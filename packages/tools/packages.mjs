@@ -201,6 +201,9 @@ function typecheck(entry) {
     types: [],
     allowJs: true,
     checkJs: true,
+    // Relative .ts imports keep `node --test` type-stripping resolvable; esbuild
+    // handles them natively and noEmit makes the extension-only import legal.
+    allowImportingTsExtensions: true,
   });
   const diagnostics = ts.getPreEmitDiagnostics(program);
   if (diagnostics.length)
