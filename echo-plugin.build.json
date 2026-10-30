@@ -3,6 +3,7 @@
   "plugins": [
     "plugins/spectrum-visualizer",
     "plugins/cloud-priority",
+    "plugins/apple-music-style",
     "plugins/auto-team-vip"
   ]
 }
