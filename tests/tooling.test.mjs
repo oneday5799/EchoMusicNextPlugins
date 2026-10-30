@@ -44,7 +44,8 @@ test('bindings follow actual Qt properties, signals, methods, readonly state and
 });
 
 test('manifest compatibility, source-only index and comparator intersections', async () => {
-  assert.equal((await localPackages(root)).length, 1);
+  const build = JSON.parse(await readFile(path.join(root, 'echo-plugin.build.json'), 'utf8'));
+  assert.equal((await localPackages(root)).length, build.plugins.length);
   assert.equal(rangeContains('>=0.1.0 <1.0.0', '0.1.0'), true);
   assert.equal(rangeContains('>=1.0.0', '0.1.0'), false);
   assert.equal(rangeContains('^1.0.0', '1.0.0'), false);

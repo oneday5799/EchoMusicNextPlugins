@@ -8,6 +8,8 @@
 
 `position` 为 `before-catalog`（默认）、`after-catalog` 或 `final-fallback`。正常顺序为：插件前置 → 曲库 → 插件曲库后置 → 云盘 → 插件最终兜底。显式云盘来源仍优先云盘；本地文件、一起听专用地址和 MV 保留宿主专用流程。曲库/云盘返回的每个可用候选也会进入转换链。正常播放和预加载共用这条管线，预加载不提前更改当前曲目。
 
+当前曲目在宿主云盘索引中有匹配时，`ctx.player.control('quality', { value: 'cloud' })` 会像音质菜单中的“云盘文件”一样切换到云盘音源；没有匹配时命令不改变播放。宿主在解析曲目时加载云盘索引，索引就绪前该请求不会生效。
+
 同阶段按 `order` 升序（默认 1000），再按插件/注册 ID 稳定排序。可提供 `match`、`resolve`、`transform`；至少有一个 resolve/transform。回调接受同步值或 Promise。每次 match/resolve/transform 最长 2500ms，异常、拒绝、超时或无效候选会记录具体插件错误并继续后续解析，转换出错保留已有候选。
 
 上下文包含 `track`、`quality`、`effect`、`forceReload` 和 `preloading`。resolve 另有 `position`；transform 另有 `stage` 和只读 `source`。曲目/时长单位均为毫秒。`forceReload` 表示宿主要求重新取址，例如音质/音效切换；不要只按曲目 ID 缓存一个永久流地址。

@@ -1,0 +1,21 @@
+{
+  "format": "echomod",
+  "schemaVersion": 1,
+  "id": "cloud-priority",
+  "name": "云盘优先",
+  "version": "1.0.2",
+  "description": "播放曲库歌曲时，如果当前账号的音乐云盘存在同一首歌，则自动切换到云盘文件播放。",
+  "author": "Oneday5799",
+  "license": "MIT",
+  "icon": "icon.svg",
+  "kind": "qml-js",
+  "entry": "entry.mjs",
+  "requires": {
+    "hostVersion": ">=0.1.0",
+    "sdkVersion": ">=1.0.0 <2.0.0",
+    "features": ["lifecycle", "operations", "playback.controls", "commands", "events", "timers"]
+  },
+  "capabilities": [],
+  "contexts": ["main"],
+  "tags": ["云盘", "音源"]
+}

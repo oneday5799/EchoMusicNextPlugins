@@ -35,6 +35,7 @@ prepare:source 只构建/发布本地清单并保留第三方条目；check:publ
 - [已实现SDK](docs/sdk.md)：真实API、能力和限制。
 - [双仓库契约](docs/repository-contract.md)：宿主导出、SDK检查和版本维护。
 - [频谱可视化](plugins/spectrum-visualizer/README.md)：真实播放器 PCM、五种模式、播放栏/Mini/歌词页与持久设置。
+- [云盘优先](plugins/cloud-priority/README.md)：曲库歌曲在云盘存在时自动切换到云盘文件，复用宿主音源索引与公开播放控制。
 
 ## 许可证
 
