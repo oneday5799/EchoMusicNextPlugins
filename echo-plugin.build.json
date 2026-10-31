@@ -1,8 +1,4 @@
 {
   "repository": "https://github.com/hoowhoami/EchoMusicNextPlugins",
-  "plugins": [
-    "plugins/spectrum-visualizer",
-    "plugins/cloud-priority",
-    "plugins/custom-icon"
-  ]
+  "plugins": ["plugins/spectrum-visualizer", "plugins/cloud-priority", "plugins/custom-icon"]
 }
