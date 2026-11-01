@@ -25,6 +25,7 @@ declare module 'echo:plugin-sdk' {
     connect(callback: (...args: Arguments) => void): void;
     disconnect(callback: (...args: Arguments) => void): void;
   }
+  export type QtUrl = string | { toString(): string };
   export type OperationState = 0 | 1 | 2 | 3 | 4;
   export interface EchoPluginOperation<Result = void> {
     readonly id: string;
@@ -510,7 +511,165 @@ declare module 'echo:plugin-sdk' {
   }
   export interface EchoPluginFonts {
     readonly families: readonly string[];
+    readonly familiesChanged: QtSignal;
     build(families: string[], pixelSize?: number, weight?: number, letterSpacing?: number): QtFont;
+  }
+  export interface AssetRecord {
+    readonly handle: string;
+    readonly collection: string;
+    readonly kind: string;
+    readonly name: string;
+    readonly url: QtUrl;
+    readonly mimeType: string;
+    readonly bytes: number;
+    readonly width?: number;
+    readonly height?: number;
+    readonly animated?: boolean;
+    readonly frameCount?: number;
+    readonly durationMs?: number;
+    readonly families?: readonly string[];
+    readonly renderMimeType?: string;
+    readonly renderBytes?: number;
+    readonly entryPath?: string;
+  }
+  export interface AssetListResult {
+    readonly assets: readonly AssetRecord[];
+  }
+  export interface AssetImageSample {
+    readonly width: number;
+    readonly height: number;
+    readonly sourceWidth: number;
+    readonly sourceHeight: number;
+    readonly format: 'rgba8';
+    readonly pixels: readonly number[];
+  }
+  export interface EchoPluginAssetAnimation {
+    readonly active: boolean;
+    readonly ready: boolean;
+    playing: boolean;
+    readonly frameSource: QtUrl;
+    readonly frameIndex: number;
+    readonly frameCount: number;
+    readonly durationMs: number;
+    readonly loopCount: number;
+    readonly width: number;
+    readonly height: number;
+    readonly encodedBytes: number;
+    readonly errorString: string;
+    readonly changed: QtSignal;
+    readonly playingChanged: QtSignal;
+    readonly frameChanged: QtSignal;
+    setPlaying(playing: boolean): void;
+    dispose(): void;
+  }
+  export interface AssetArchiveEntry {
+    readonly path: string;
+    readonly bytes: number;
+    readonly mimeType?: string;
+  }
+  export interface EchoPluginAssetArchive {
+    readonly active: boolean;
+    readonly ready: boolean;
+    readonly errorString: string;
+    readonly entries: readonly AssetArchiveEntry[];
+    readonly jsonFiles: Readonly<Record<string, JsonValue>>;
+    readonly changed: QtSignal;
+    importInto(
+      collection: string,
+      entries: { path: string; name?: string }[],
+    ): EchoPluginOperation<AssetListResult>;
+    dispose(): void;
+  }
+  export interface EchoPluginAssets {
+    readonly drained: QtSignal;
+    readonly changed: QtSignal;
+    importImages(
+      collection: string,
+      options?: Record<string, JsonValue>,
+    ): EchoPluginOperation<AssetListResult>;
+    importFonts(collection: string): EchoPluginOperation<AssetListResult>;
+    openImageArchive(jsonPaths: string[]): EchoPluginAssetArchive | null;
+    exportImageArchive(
+      collection: string,
+      entries: { handle: string; path: string }[],
+      jsonFiles: Record<string, JsonValue>,
+      suggestedName: string,
+    ): EchoPluginOperation<{ exported: number; bytes: number }>;
+    list(collection: string): EchoPluginOperation<AssetListResult>;
+    remove(handle: string): EchoPluginOperation;
+    clear(collection: string): EchoPluginOperation;
+    sampleImage(
+      source: QtUrl,
+      width?: number,
+      height?: number,
+    ): EchoPluginOperation<AssetImageSample>;
+    animation(
+      source: QtUrl,
+      width?: number,
+      height?: number,
+      fit?: 'contain' | 'cover',
+    ): EchoPluginAssetAnimation | null;
+  }
+  export interface WordSegment {
+    readonly segment: string;
+    /** UTF-16 offset in the input line. */
+    readonly index: number;
+    readonly isWordLike: boolean;
+  }
+  export interface EchoPluginText {
+    readonly available: boolean;
+    readonly backend: string;
+    readonly unicodeVersion: string;
+    readonly drained: QtSignal;
+    segmentWords(
+      texts: string[],
+      locale?: string,
+    ): EchoPluginOperation<{
+      backend: string;
+      unicodeVersion: string;
+      lines: readonly (readonly WordSegment[])[];
+    }>;
+  }
+  export interface ImageCaptureLease {
+    readonly status: 'pending' | 'ready' | 'error' | 'disposed';
+    readonly ready: boolean;
+    readonly url: QtUrl;
+    readonly errorString: string;
+    readonly encodedBytes: number;
+    readonly width: number;
+    readonly height: number;
+    readonly changed: QtSignal;
+    dispose(): void;
+  }
+  export interface ImageCapture {
+    active: boolean;
+    readonly pendingJobs: number;
+    readonly leaseCount: number;
+    readonly reservedBytes: number;
+    readonly encodedBytes: number;
+    readonly drained: boolean;
+    readonly readbacks: number;
+    readonly encodes: number;
+    readonly activeChanged: QtSignal;
+    readonly changed: QtSignal;
+    encode(
+      source: QtQuickItem,
+      width: number,
+      height: number,
+      format?: 'jpeg' | 'png',
+      quality?: number,
+    ): ImageCaptureLease;
+  }
+  export interface PointMesh {
+    pointCount: number;
+    readonly vertexBytes: number;
+    readonly errorString: string;
+    readonly pointCountChanged: QtSignal;
+    readonly errorChanged: QtSignal;
+  }
+  export interface PresentationScope extends QtQuickItem {
+    readonly presented: boolean;
+    readonly presentedChanged: QtSignal;
   }
   export interface EchoPluginViewContext {
     readonly active: boolean;
@@ -518,6 +677,8 @@ declare module 'echo:plugin-sdk' {
     readonly player: EchoPluginPlayer;
     readonly snapshot: PlaybackSnapshot;
     readonly changed: QtSignal;
+    readonly aboutToClose: QtSignal;
+    closeSkinSettings(): EchoPluginOperation;
     command(action: PresentationCommand, arguments?: PresentationArguments): EchoPluginOperation;
   }
   export interface FloatingWindowsSnapshot {
@@ -543,6 +704,7 @@ declare module 'echo:plugin-sdk' {
     | 'windows'
     | 'process'
     | 'serverIntercept'
+    | 'kugouAuth'
     | 'navigation'
     | 'hostSettings'
     | 'cover'
@@ -2171,7 +2333,27 @@ declare module 'echo:plugin-sdk' {
     cancel(): void;
     dispose(): void;
   }
+  export interface PluginDialogOptions {
+    /** Package-relative QML Item; required properties: plugin, dialog. */
+    component: string;
+    width?: number;
+    title?: string;
+    modal?: boolean;
+    closeOnMask?: boolean;
+  }
+  export interface EchoPluginDialog {
+    readonly active: boolean;
+    readonly changed: QtSignal;
+    readonly closed: QtSignal;
+    close(): void;
+  }
+  export interface EchoPluginClipboard {
+    /** Text-only system clipboard, at most 1 MiB UTF-8. */
+    write(text: string): EchoPluginOperation<void>;
+  }
   export interface EchoPluginUi {
+    /** Main-window overlay; completes when its QML content is ready. */
+    showDialog(options: PluginDialogOptions): EchoPluginOperation<EchoPluginDialog>;
     registerSidebarItem(id: string, definition: SidebarDefinition): EchoPluginRegistration | null;
     registerShortcutCard(id: string, definition: SidebarDefinition): EchoPluginRegistration | null;
     registerSongMenuItem(id: string, definition: SongMenuDefinition): EchoPluginRegistration | null;
@@ -4702,7 +4884,14 @@ declare module 'echo:plugin-sdk' {
     videoPrivilege: { arguments: { hash: string }; result: KugouDto_video_privilege_Row[] };
     videoUrl: { arguments: { hash: string }; result: KugouDto_video_url_VideoUrl | null };
   }
+  export interface KugouAuthSnapshot {
+    /** Logical Authorization, identical to the API-stage interceptor header. */
+    readonly Authorization: string;
+    readonly revision: string;
+  }
   export interface EchoPluginKugou {
+    /** Requires separate kugouAuth capability and user authorization. */
+    authSnapshot(): EchoPluginOperation<KugouAuthSnapshot>;
     readonly account: Readonly<{ userId: string; loggedIn: boolean; revision: string }>;
     readonly accountChanged: QtSignal;
     request(
@@ -5161,7 +5350,9 @@ declare module 'echo:plugin-sdk' {
     readonly changed: QtSignal;
     readonly drainedChanged: QtSignal;
     /** Package-relative images. Explicit appIcons permission, target-wise priority.
-     * Native shortcut presentation may complete later; observe busy/error. */
+     * Native shortcut presentation may complete later; observe busy/error.
+     * Desktop/pinned-taskbar icons survive normal application exit. Explicit
+     * lease disposal while running still withdraws the contribution. */
     set(
       id: string,
       icons: AppIconDefinition,
@@ -5178,6 +5369,9 @@ declare module 'echo:plugin-sdk' {
     refresh(): EchoPluginOperation<AppIconSnapshot>;
   }
   export interface EchoPluginContext {
+    readonly clipboard: EchoPluginClipboard;
+    readonly assets: EchoPluginAssets;
+    readonly text: EchoPluginText;
     readonly appIcons: EchoPluginAppIcons;
     readonly settings: EchoPluginSettings;
     readonly cover: EchoPluginCover;
