@@ -1,0 +1,42 @@
+{
+  "format": "echomod",
+  "schemaVersion": 1,
+  "id": "auto-team-vip",
+  "name": "自动组队领VIP",
+  "version": "1.2.6",
+  "description": "自动参加酷狗概念版官方活动「组队瓜分畅听VIP」并组队；默认关闭自动组队，入口在标题栏★。",
+  "author": "Oneday5799",
+  "license": "MIT",
+  "icon": "icon.svg",
+  "kind": "qml-js",
+  "entry": "entry.mjs",
+  "requires": {
+    "hostVersion": ">=0.1.0",
+    "sdkVersion": ">=1.0.0 <2.0.0",
+    "features": [
+      "lifecycle",
+      "operations",
+      "commands",
+      "events",
+      "timers",
+      "storage",
+      "net.request",
+      "kugou.api",
+      "kugou.verification",
+      "server.intercept",
+      "ui.pages",
+      "ui.titlebar",
+      "ui.toast",
+      "ui.dialogs"
+    ]
+  },
+  "capabilities": [
+    "unrestrictedNetwork",
+    "serverIntercept",
+    "kugouApi",
+    "kugouAuth",
+    "kugouVerification"
+  ],
+  "contexts": ["main"],
+  "tags": ["组队", "VIP"]
+}

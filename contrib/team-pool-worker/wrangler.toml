@@ -1,0 +1,31 @@
+name = "echo-team-pool"
+main = "worker.js"
+compatibility_date = "2026-09-04"
+compatibility_flags = ["nodejs_compat"]
+# 2026-10-24：关闭 workers.dev 入口。它是唯一完全绕开 oneday.vip WAF / 限流 / 地域规则的
+# 公开入口（插件只使用自定义域），留着只会给扫描器多一个不受限的写入通道。
+workers_dev = false
+preview_urls = false
+
+routes = [
+  { pattern = "echo-team-pool.oneday.vip", zone_name = "oneday.vip", custom_domain = true, enabled = true, previews_enabled = false }
+]
+
+[vars]
+MIN_CLIENT_VERSION = "1.2.0"
+# 身份校验开关（默认 on）。改为 "off" 并重新部署进入恢复模式：跳过 token 比对，
+# 快照把 token 重绑给来者——供换设备/重装后本期恢复；恢复完成后必须改回 "on"。
+IDENTITY_CHECK = "on"
+
+[durable_objects]
+bindings = [
+  { name = "PERIOD_POOL", class_name = "PeriodPool" }
+]
+
+[observability]
+logs = { enabled = true }
+traces = { enabled = true }
+
+[exports.PeriodPool]
+type = "durable-object"
+storage = "sqlite"

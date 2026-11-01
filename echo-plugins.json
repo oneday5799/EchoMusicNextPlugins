@@ -16,6 +16,18 @@
       "sha256": "0bd6697efc68b4bb06431f7a9d8d71c9cc3fc50318230d7a7386dd309f944b01"
     },
     {
+      "id": "apple-music-style",
+      "path": "plugins/apple-music-style",
+      "artifact": "artifacts/apple-music-style-1.0.0.echomod",
+      "sha256": "f7f77467f1b2e5581b03fff404642beaa2ad57b30092e8f3aba63ec1150a4b99"
+    },
+    {
+      "id": "auto-team-vip",
+      "path": "plugins/auto-team-vip",
+      "artifact": "artifacts/auto-team-vip-1.2.6.echomod",
+      "sha256": "46d360d0fdb398dc17c192dd0b1557e85e6a7256f50f20c2fb2e1609db114a14"
+    },
+    {
       "id": "custom-icon",
       "repo": "https://github.com/oneday5799/EchoMusicNextPlugins",
       "ref": "custom-icon-v1.0.0",
