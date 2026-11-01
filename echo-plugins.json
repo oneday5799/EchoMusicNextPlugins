@@ -29,6 +29,8 @@
     },
     {
       "id": "custom-icon",
+      "repo": "https://github.com/oneday5799/EchoMusicNextPlugins",
+      "ref": "custom-icon-v1.0.0",
       "path": "plugins/custom-icon",
       "artifact": "artifacts/custom-icon-1.0.0.echomod",
       "sha256": "065baf5da71cb915dbbf5868a26bb427f9ce4ba91b824a3f79b614bc8713f19e"
