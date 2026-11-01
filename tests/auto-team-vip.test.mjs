@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   h5Token,
   md5Hex,
@@ -499,6 +502,557 @@ test('manual mode never touches the pool and only refreshes kugou state', async 
   assert.equal(m.state.lastError, null);
 });
 
+test('applyKnownPoolDisable surfaces the persisted disable marker immediately', async () => {
+  const m = mockServices();
+  m.store.poolAuthDisabled = { '152:12345': true };
+  const runner = createRunner(m.services);
+  await runner.loadDisabled();
+  m.state.periodId = '152';
+  runner.applyKnownPoolDisable();
+  assert.equal(m.state.poolDisabled, true);
+});
+
+test('applyKnownPoolDisable falls back to persisted period/uid before any flow runs', async () => {
+  const m = mockServices();
+  // 重装/重启后的真实场景：鉴权头未捕获、完整流程被门控挡在期次查询之前，
+  // state.periodId 与 runUid 都为空，只能靠激活时载入的 lastPeriodId/lastUid 判读
+  m.store.poolAuthDisabled = { '152:12345': true };
+  m.store.lastPeriodId = '152';
+  m.store.lastUid = '12345';
+  const runner = createRunner(m.services);
+  await runner.loadDisabled();
+  runner.applyKnownPoolDisable();
+  assert.equal(m.state.periodId, '');
+  assert.equal(m.state.poolDisabled, true);
+});
+
+test('applyKnownPoolDisable falls back to the created-team uid when lastUid is absent', async () => {
+  const m = mockServices();
+  m.store.poolAuthDisabled = { '152:12345': true };
+  m.store.lastPeriodId = '152';
+  m.store.lastCreatedTeam = { code: 'ABC123', memberCount: 3, periodId: '152', uid: '12345' };
+  const runner = createRunner(m.services);
+  await runner.loadDisabled();
+  runner.applyKnownPoolDisable();
+  assert.equal(m.state.poolDisabled, true);
+});
+
+test('applyKnownPoolDisable clears a stale flag when no marker exists', async () => {
+  const m = mockServices();
+  const runner = createRunner(m.services);
+  await runner.loadDisabled();
+  m.state.periodId = '152';
+  m.state.poolDisabled = true;
+  runner.applyKnownPoolDisable();
+  assert.equal(m.state.poolDisabled, false);
+});
+
+test('applyKnownPoolDisable does nothing before the period is known', async () => {
+  const m = mockServices();
+  m.store.poolAuthDisabled = { '152:12345': true };
+  const runner = createRunner(m.services);
+  await runner.loadDisabled();
+  m.state.poolDisabled = false;
+  runner.applyKnownPoolDisable();
+  assert.equal(m.state.poolDisabled, false);
+});
+
+test('clearPoolDisable removes the current period marker and keeps other periods', async () => {
+  const m = mockServices();
+  m.store.poolAuthDisabled = { '152:12345': true, '152:67890': true, '999:12345': true };
+  const runner = createRunner(m.services);
+  await runner.loadDisabled();
+  m.state.periodId = '152';
+  m.state.poolDisabled = true;
+  const result = await runner.clearPoolDisable();
+  assert.equal(result.ok, true);
+  assert.equal(m.state.poolDisabled, false);
+  // 期次内其他账号的标记一并放行（误放行只会换来一次 401），跨期记录原样保留
+  assert.deepEqual(m.store.poolAuthDisabled, { '999:12345': true });
+});
+
+test('clearPoolDisable falls back to the persisted uid while auth is not captured', async () => {
+  const m = mockServices({ authHeader: '' });
+  m.store.poolAuthDisabled = { '152:12345': true };
+  m.store.lastPeriodId = '152';
+  m.store.lastUid = '12345';
+  const runner = createRunner(m.services);
+  await runner.loadDisabled();
+  const result = await runner.clearPoolDisable();
+  assert.equal(result.ok, true);
+  assert.deepEqual(m.store.poolAuthDisabled, {});
+});
+
+test('clearPoolDisable refuses while the period or uid is unknown', async () => {
+  const m = mockServices();
+  m.store.poolAuthDisabled = { '152:12345': true };
+  const runner = createRunner(m.services);
+  await runner.loadDisabled();
+  // 期次未知：本期标记动不了
+  const noPeriod = await runner.clearPoolDisable();
+  assert.equal(noPeriod.ok, false);
+  assert.deepEqual(m.store.poolAuthDisabled, { '152:12345': true });
+  // 期次已知但鉴权未捕获、又没有 lastUid/建队码兜底
+  m.state.periodId = '152';
+  m.setAuth('');
+  const noUid = await runner.clearPoolDisable();
+  assert.equal(noUid.ok, false);
+  assert.deepEqual(m.store.poolAuthDisabled, { '152:12345': true });
+});
+
+test('a flow after clearPoolDisable reports to the pool again', async () => {
+  const m = mockServices({
+    gatewayRoutes: {
+      '/youth/v1/ut/get_period_info': () => ({
+        ok: true,
+        status: 200,
+        body: periodBody(),
+        headers: {},
+      }),
+      '/youth/v1/ut/get_my_team_info': () => ({
+        ok: true,
+        status: 200,
+        body: teamInfoBody({ team_code: 'MINE', member_count: 2 }, []),
+        headers: {},
+      }),
+    },
+    poolRoutes: {
+      '/v2/snapshot': () => ({ ok: true, status: 200, data: { ok: true }, headers: {} }),
+      '/v2/join': () => ({ ok: true, status: 200, data: { reason: 'pool_empty' }, headers: {} }),
+    },
+  });
+  m.store.poolAuthDisabled = { 'a1:12345': true };
+  const runner = createRunner(m.services);
+  await runner.loadDisabled();
+
+  // 停用标记在快照发出前就地拦截：整个流程碰不到码池
+  await runner.requestRun('manual', { force: true });
+  assert.equal(m.calls.pool.length, 0);
+  assert.equal(m.state.poolDisabled, true);
+
+  const result = await runner.clearPoolDisable();
+  assert.equal(result.ok, true);
+  await runner.requestRun('manual', { force: true });
+  assert.ok(m.calls.pool.some((call) => call.path === '/v2/snapshot'));
+});
+
+test('the first successful flow persists lastUid for later offline marker checks', async () => {
+  const m = mockServices({
+    gatewayRoutes: {
+      '/youth/v1/ut/get_period_info': () => ({
+        ok: true,
+        status: 200,
+        body: periodBody(),
+        headers: {},
+      }),
+      '/youth/v1/ut/get_my_team_info': () => ({
+        ok: true,
+        status: 200,
+        body: teamInfoBody(null),
+        headers: {},
+      }),
+    },
+  });
+  const runner = createRunner(m.services);
+  await runner.requestRun('startup', { force: true });
+  assert.equal(m.store.lastUid, '12345');
+});
+
+test('a create_team rejected as already-created surfaces the existing team without an error', async () => {
+  let createAttempts = 0;
+  const m = mockServices({
+    gatewayRoutes: {
+      '/youth/v1/ut/get_period_info': () => ({
+        ok: true,
+        status: 200,
+        body: periodBody(),
+        headers: {},
+      }),
+      '/youth/v1/ut/get_my_team_info': () => ({
+        ok: true,
+        status: 200,
+        body: teamInfoBody(createAttempts ? { team_code: 'MINE', member_count: 2 } : null, []),
+        headers: {},
+      }),
+      '/youth/v1/ut/create_team': () => {
+        createAttempts += 1;
+        // 服务端对重复建队的拒绝（2026-11-01 实测文案）：重查应取回已有队伍码，而不是报“自动创建队伍失败”
+        return {
+          ok: true,
+          status: 200,
+          body: { status: 0, error_code: 143002, error_msg: '你已经创建过队伍啦~' },
+          headers: {},
+        };
+      },
+    },
+    poolRoutes: {
+      '/v2/snapshot': () => ({ ok: true, status: 200, data: { ok: true }, headers: {} }),
+      '/v2/join': () => ({ ok: true, status: 200, data: { reason: 'pool_empty' }, headers: {} }),
+    },
+  });
+  const runner = createRunner(m.services);
+  await runner.requestRun('startup', { force: true });
+
+  assert.equal(m.state.myCode, 'MINE');
+  assert.ok(m.calls.gateway.some((call) => call.url.endsWith('/create_team')));
+  // 未满员的创建队沿用"建队后仍可加入他人"流程：不报 create_team_failed，流程继续走分配
+  assert.equal(m.state.lastError && m.state.lastError.code, 'pool_empty');
+});
+
+test('a full created team alone is terminal: no pool join, no error', async () => {
+  const m = mockServices({
+    gatewayRoutes: {
+      '/youth/v1/ut/get_period_info': () => ({
+        ok: true,
+        status: 200,
+        body: periodBody(),
+        headers: {},
+      }),
+      '/youth/v1/ut/get_my_team_info': () => ({
+        ok: true,
+        status: 200,
+        body: teamInfoBody({ team_code: 'MINE', member_count: 3 }, []),
+        headers: {},
+      }),
+    },
+    poolRoutes: {
+      '/v2/snapshot': () => ({ ok: true, status: 200, data: { ok: true }, headers: {} }),
+      '/v2/join': () => ({
+        ok: true,
+        status: 200,
+        data: { ok: true, lease_id: 'L', code: 'X' },
+        headers: {},
+      }),
+    },
+  });
+  const runner = createRunner(m.services);
+  await runner.requestRun('startup', { force: true });
+
+  assert.equal(m.state.myCode, 'MINE');
+  // 满员的创建队占用设备（143005 实证）：不建队、不申请他人队伍码、不报错
+  assert.equal(
+    m.calls.gateway.some((call) => call.url.endsWith('/create_team')),
+    false,
+  );
+  assert.equal(
+    m.calls.pool.some((call) => call.path === '/v2/join'),
+    false,
+  );
+  assert.equal(m.state.lastError, null);
+});
+
+test('a host-shaped myinfo body with non-array lists still resolves the created code', async () => {
+  const m = mockServices({
+    gatewayRoutes: {
+      '/youth/v1/ut/get_period_info': () => ({
+        ok: true,
+        status: 200,
+        body: periodBody(),
+        headers: {},
+      }),
+      '/youth/v1/ut/get_my_team_info': () => ({
+        ok: true,
+        status: 200,
+        body: {
+          status: 1,
+          error_code: 0,
+          data: {
+            // 宿主 QVariant 转换异常形态（2026-11-01 实测）：嵌套数组直读为类数组对象，
+            // Array.isArray 为 false，但序列化输出完整真实结构
+            my_create_team_list: { 0: { team_code: 'HOST', member_count: 3 }, length: 1 },
+            my_join_team_list: [],
+            toJSON() {
+              return {
+                my_create_team_list: [{ team_code: 'HOST', member_count: 3 }],
+                my_join_team_list: [],
+              };
+            },
+          },
+        },
+        headers: {},
+      }),
+    },
+    poolRoutes: {
+      '/v2/snapshot': () => ({ ok: true, status: 200, data: { ok: true }, headers: {} }),
+      '/v2/join': () => ({
+        ok: true,
+        status: 200,
+        data: { ok: true, lease_id: 'L', code: 'X' },
+        headers: {},
+      }),
+    },
+  });
+  const runner = createRunner(m.services);
+  await runner.requestRun('startup', { force: true });
+
+  // JSON 文本往返后按真实结构解析：队伍码可见，满员创建队为终态
+  assert.equal(m.state.myCode, 'HOST');
+  assert.equal(m.state.lastError, null);
+  assert.equal(
+    m.calls.pool.some((call) => call.path === '/v2/join'),
+    false,
+  );
+});
+
+test('an unreadable created code is retried before surfacing created_team_unreadable', async () => {
+  let myInfoCalls = 0;
+  const m = mockServices({
+    gatewayRoutes: {
+      '/youth/v1/ut/get_period_info': () => ({
+        ok: true,
+        status: 200,
+        body: periodBody(),
+        headers: {},
+      }),
+      '/youth/v1/ut/get_my_team_info': () => {
+        myInfoCalls += 1;
+        // ① 空 → create 被拒 → ② 空 → 重试1 空 → 重试2 取回满员队伍（酷狗连续快查返回不一致）
+        const created = myInfoCalls >= 4 ? { team_code: 'LATE', member_count: 3 } : null;
+        return {
+          ok: true,
+          status: 200,
+          body: teamInfoBody(created, []),
+          headers: {},
+        };
+      },
+      '/youth/v1/ut/create_team': () => ({
+        ok: true,
+        status: 200,
+        body: { status: 0, error_code: 143002, error_msg: '你已经创建过队伍啦~' },
+        headers: {},
+      }),
+    },
+    poolRoutes: {
+      '/v2/snapshot': () => ({ ok: true, status: 200, data: { ok: true }, headers: {} }),
+      '/v2/join': () => ({
+        ok: true,
+        status: 200,
+        data: { ok: true, lease_id: 'L', code: 'X' },
+        headers: {},
+      }),
+    },
+  });
+  const runner = createRunner(m.services);
+  await runner.requestRun('startup', { force: true });
+
+  // 重试取回队伍码：不报错、不申请他人队伍码
+  assert.equal(myInfoCalls, 4);
+  assert.equal(m.state.myCode, 'LATE');
+  assert.equal(m.state.lastError, null);
+  assert.equal(
+    m.calls.pool.some((call) => call.path === '/v2/join'),
+    false,
+  );
+});
+
+test('a persistently unreadable created code stops without joining the pool', async () => {
+  const m = mockServices({
+    gatewayRoutes: {
+      '/youth/v1/ut/get_period_info': () => ({
+        ok: true,
+        status: 200,
+        body: periodBody(),
+        headers: {},
+      }),
+      '/youth/v1/ut/get_my_team_info': () => ({
+        ok: true,
+        status: 200,
+        body: teamInfoBody(null, []),
+        headers: {},
+      }),
+      '/youth/v1/ut/create_team': () => ({
+        ok: true,
+        status: 200,
+        body: { status: 0, error_code: 143002, error_msg: '你已经创建过队伍啦~' },
+        headers: {},
+      }),
+    },
+    poolRoutes: {
+      '/v2/snapshot': () => ({ ok: true, status: 200, data: { ok: true }, headers: {} }),
+      '/v2/join': () => ({
+        ok: true,
+        status: 200,
+        data: { ok: true, lease_id: 'L', code: 'X' },
+        headers: {},
+      }),
+    },
+  });
+  const runner = createRunner(m.services);
+  await runner.requestRun('startup', { force: true });
+
+  assert.equal(m.state.lastError && m.state.lastError.code, 'created_team_unreadable');
+  // 设备已绑定自己创建的队伍：报错后终止本轮，不再申请他人队伍码
+  assert.equal(
+    m.calls.pool.some((call) => call.path === '/v2/join'),
+    false,
+  );
+  const detail = m.state.lastError && m.state.lastError.detail;
+  assert.ok(detail && typeof detail.myTeamInfoBody === 'string');
+});
+
+test('kugou already-created rejection with unreadable myinfo reports diagnostics instead of create failure', async () => {
+  let createAttempts = 0;
+  const m = mockServices({
+    gatewayRoutes: {
+      '/youth/v1/ut/get_period_info': () => ({
+        ok: true,
+        status: 200,
+        body: periodBody(),
+        headers: {},
+      }),
+      // 两轮查询都读不到已建队伍（真实响应可能缺少可解析的队伍码字段）
+      '/youth/v1/ut/get_my_team_info': () => ({
+        ok: true,
+        status: 200,
+        body: teamInfoBody(null, []),
+        headers: {},
+      }),
+      '/youth/v1/ut/create_team': () => {
+        createAttempts += 1;
+        return {
+          ok: true,
+          status: 502,
+          body: { status: 0, error_code: 143002, error_msg: '你已经创建过队伍啦~' },
+          headers: {},
+        };
+      },
+    },
+    poolRoutes: {
+      '/v2/snapshot': () => ({ ok: true, status: 200, data: { ok: true }, headers: {} }),
+    },
+  });
+  const runner = createRunner(m.services);
+  // snapshotOnly：面板打开的轻量刷新在建队检查后即返回，错误不被后续分配覆盖
+  await runner.requestRun('panel_open', { snapshotOnly: true, force: true });
+
+  assert.ok(m.calls.gateway.some((call) => call.url.endsWith('/create_team')));
+  assert.equal(m.state.lastError && m.state.lastError.code, 'created_team_unreadable');
+  assert.equal(m.state.lastError.detail.createError, '你已经创建过队伍啦~');
+  // 复制错误详情应能拿到 myinfo 原始响应结构，用于定位解析缺口
+  assert.ok(String(m.state.lastError.detail.myTeamInfoBody).includes('my_create_team_list'));
+  assert.equal(m.state.myCode, '');
+});
+
+test('an explicit business failure from my_team_info counts as a query failure and falls back to cache', async () => {
+  const m = mockServices({
+    autoEnabled: false,
+    gatewayRoutes: {
+      '/youth/v1/ut/get_period_info': () => ({
+        ok: true,
+        status: 200,
+        body: periodBody(),
+        headers: {},
+      }),
+      '/youth/v1/ut/get_my_team_info': () => ({
+        ok: true,
+        status: 200,
+        body: { status: 0, error_code: 143002, error_msg: '你已经创建过队伍啦~' },
+        headers: {},
+      }),
+    },
+  });
+  m.store.lastCreatedTeam = {
+    uid: '12345',
+    periodId: 'a1',
+    code: 'MINE',
+    memberCount: 1,
+    vipDesc: '豪华VIP',
+  };
+  const runner = createRunner(m.services);
+  await runner.requestRun('startup', { force: true });
+  // status≠1 的成功传输响应不再被静默解析成“没有任何队伍”，并按查询失败回退建队码缓存
+  assert.equal(m.state.myCode, 'MINE');
+  assert.equal(m.state.myVipDesc, '豪华VIP');
+  assert.equal(m.state.lastError && m.state.lastError.code, 'myinfo_failed');
+});
+
+test('a failed my-team query falls back to the cached created code of the same period', async () => {
+  let teamInfoFails = false;
+  const m = mockServices({
+    autoEnabled: false,
+    gatewayRoutes: {
+      '/youth/v1/ut/get_period_info': () => ({
+        ok: true,
+        status: 200,
+        body: periodBody(),
+        headers: {},
+      }),
+      '/youth/v1/ut/get_my_team_info': () => {
+        if (teamInfoFails)
+          return { ok: false, status: 0, error: 'network down', body: null, headers: {} };
+        return {
+          ok: true,
+          status: 200,
+          body: teamInfoBody({ team_code: 'MINE', member_count: 1, vip_desc: '豪华VIP' }, []),
+          headers: {},
+        };
+      },
+    },
+  });
+  const runner = createRunner(m.services);
+  await runner.requestRun('startup', { force: true });
+  assert.equal(m.state.myCode, 'MINE');
+  assert.deepEqual(m.store.lastCreatedTeam, {
+    uid: '12345',
+    periodId: 'a1',
+    code: 'MINE',
+    memberCount: 1,
+    vipDesc: '豪华VIP',
+  });
+
+  // 模拟重启（新 runner、同一存储）后首次酷狗查询失败：面板直接回退展示本期已建队伍码
+  teamInfoFails = true;
+  const restarted = createRunner(m.services);
+  await restarted.requestRun('startup', { force: true });
+  assert.equal(m.state.myCode, 'MINE');
+  assert.equal(m.state.myMemberCount, 1);
+  assert.equal(m.state.myVipDesc, '豪华VIP');
+  assert.equal(m.state.lastError && m.state.lastError.code, 'myinfo_failed');
+});
+
+test('a cached created code from another account or period is not shown', async () => {
+  const m = mockServices({
+    autoEnabled: false,
+    gatewayRoutes: {
+      '/youth/v1/ut/get_period_info': () => ({
+        ok: true,
+        status: 200,
+        body: periodBody(),
+        headers: {},
+      }),
+      '/youth/v1/ut/get_my_team_info': () => ({
+        ok: false,
+        status: 0,
+        error: 'network down',
+        body: null,
+        headers: {},
+      }),
+    },
+  });
+  m.store.lastCreatedTeam = {
+    uid: '99999',
+    periodId: 'a1',
+    code: 'OTHER-ACCOUNT',
+    memberCount: 1,
+    vipDesc: '',
+  };
+  const runner = createRunner(m.services);
+  await runner.requestRun('startup', { force: true });
+  assert.equal(m.state.myCode, '');
+  assert.equal(m.state.lastError && m.state.lastError.code, 'myinfo_failed');
+
+  m.store.lastCreatedTeam = {
+    uid: '12345',
+    periodId: 'a0',
+    code: 'OLD-PERIOD',
+    memberCount: 1,
+    vipDesc: '',
+  };
+  const restarted = createRunner(m.services);
+  await restarted.requestRun('startup', { force: true });
+  assert.equal(m.state.myCode, '');
+});
+
 test('a full successful flow creates a team, joins via lease and confirms with a snapshot', async () => {
   let createdTeam = false;
   let joinedCode = '';
@@ -742,6 +1296,11 @@ test('a device-bound 143005 with no visible team stops with a plain-language err
   const runner = createRunner(m.services);
   await runner.requestRun('startup', { force: true });
   assert.equal(m.state.lastError.code, 'device_already_bound');
+  // 详情携带原始 myinfo 响应：设备绑定来源不可见时可复制定位
+  assert.ok(
+    typeof m.state.lastError.detail.myTeamInfoBody === 'string' &&
+      m.state.lastError.detail.myTeamInfoBody.length > 0,
+  );
   assert.equal(m.calls.toasts.length, 1);
   // 设备级终态只提示一次
   await runner.requestRun('retry', { force: true });
@@ -868,6 +1427,40 @@ test('a 401 from the pool disables the current period permanently', async () => 
     m.calls.pool.map((call) => call.path),
     ['/v2/snapshot'],
   );
+});
+
+test('a 401 disable merges into stored records instead of overwriting them', async () => {
+  const m = mockServices({
+    gatewayRoutes: {
+      '/youth/v1/ut/get_period_info': () => ({
+        ok: true,
+        status: 200,
+        body: periodBody(),
+        headers: {},
+      }),
+      '/youth/v1/ut/get_my_team_info': () => ({
+        ok: true,
+        status: 200,
+        body: teamInfoBody({ team_code: 'MINE', member_count: 1 }),
+        headers: {},
+      }),
+    },
+    poolRoutes: {
+      '/v2/snapshot': () => ({
+        ok: false,
+        status: 401,
+        data: { ok: false, error: 'unauthorized' },
+        headers: {},
+      }),
+    },
+  });
+  // 其他账号已落库的停用记录：本会话内存里没有，401 写入不能把它抹掉（旧 disablePool 语义）
+  m.store.poolAuthDisabled = { 'a0:999': true };
+  const runner = createRunner(m.services);
+  await runner.requestRun('startup', { force: true });
+
+  assert.equal(m.store.poolAuthDisabled['a1:12345'], true);
+  assert.equal(m.store.poolAuthDisabled['a0:999'], true);
 });
 
 test('the run merge window collapses triggers inside ten seconds', async () => {
@@ -1083,4 +1676,28 @@ test('the heartbeat tick stays silent when the panel is closed and auto is off',
   runner.heartbeatTick();
   assert.deepEqual(m.calls.pool, []);
   assert.deepEqual(m.calls.gateway, []);
+});
+
+// ---------- 版本防漂移 ----------
+
+const pluginDir = path.join(
+  path.dirname(fileURLToPath(import.meta.url)),
+  '..',
+  'plugins',
+  'auto-team-vip',
+);
+
+// manifest.version 是码池版本门禁（X-Plugin-Version）的声明来源；entry.ts 内的同名常量靠人工同步，
+// 这里把源码与已构建 bundle 一起锁死，防止只改 manifest 忘记同步（或反之）。
+test('PLUGIN_VERSION stays in sync with manifest.version across source and bundle', () => {
+  const manifest = JSON.parse(fs.readFileSync(path.join(pluginDir, 'manifest.json'), 'utf8'));
+  assert.ok(manifest.version, 'manifest.json must declare version');
+  const source = fs.readFileSync(path.join(pluginDir, 'src', 'entry.ts'), 'utf8');
+  const declared = /const PLUGIN_VERSION = '([^']+)';/.exec(source);
+  assert.ok(declared, 'entry.ts must declare PLUGIN_VERSION');
+  assert.equal(declared[1], manifest.version);
+  const bundle = fs.readFileSync(path.join(pluginDir, 'entry.mjs'), 'utf8');
+  const bundled = /PLUGIN_VERSION\s*=\s*["']([^"']+)["']/.exec(bundle);
+  assert.ok(bundled, 'entry.mjs must carry PLUGIN_VERSION');
+  assert.equal(bundled[1], manifest.version);
 });

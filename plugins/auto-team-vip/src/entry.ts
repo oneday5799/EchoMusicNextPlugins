@@ -11,7 +11,7 @@
 //   - 验证码走 ctx.kugou.verify(eventId)，由宿主现有验证界面承接。
 //   - Vue 弹窗改为原生 QML 页面（qml/TeamPanel.qml），经标题栏 ★ 动作打开。
 
-import { awaitOperation, type EchoPluginContext } from 'echo:plugin-sdk';
+import { awaitOperation, type EchoPluginContext, type EchoPluginDialog } from 'echo:plugin-sdk';
 import {
   buildTeamRequest,
   parseAuthHeader,
@@ -56,7 +56,12 @@ function encodeQuery(query: Record<string, string>): string {
 export function activate(ctx: EchoPluginContext) {
   const state = createPanelState();
   let autoEnabled = false;
-  let panelOpen = false;
+  // 面板有两个入口：主窗口共享弹层（★ 默认，复刻旧插件弹窗）与页面（回退）。
+  // 巡检门控取两者的并集；页面经 panel.opened 命令上报，弹窗经句柄 closed 信号跟踪。
+  let pageOpen = false;
+  let dialogHandle: EchoPluginDialog | null = null;
+  let dialogActive = false;
+  let dialogOpening = false;
   let capturedAuth: KugouAuth | null = null;
   let rawAuthHeader = '';
   let interceptorLease: { dispose(): void } | null = null;
@@ -100,7 +105,7 @@ export function activate(ctx: EchoPluginContext) {
       return autoEnabled;
     },
     get panelOpen() {
-      return panelOpen;
+      return pageOpen || dialogActive;
     },
   });
 
@@ -191,7 +196,7 @@ export function activate(ctx: EchoPluginContext) {
       poolDown: state.poolDown,
       poolRetryMinutes: Math.ceil(remaining / 60_000),
       autoEnabled,
-      panelOpen,
+      panelOpen: pageOpen || dialogActive,
       lastMessage: state.lastMessage,
       lastError: state.lastError
         ? {
@@ -243,6 +248,91 @@ export function activate(ctx: EchoPluginContext) {
     }
   }
 
+  // ---------- 按需会话快照：激活即得登录态，不再等宿主业务请求 ----------
+
+  // kugouAuth 授权后的 authSnapshot 与拦截链同名头 9 字段一致；未登录时只有设备字段。
+  // 与拦截器互补：快照解决"空闲时无流量可捕获"，拦截器在 token 续期时自动更新捕获。
+  async function syncAuthSnapshot(): Promise<void> {
+    try {
+      const snapshot = await awaitOperation(ctx.kugou.authSnapshot());
+      const header = String(snapshot?.Authorization || '');
+      if (header.indexOf('token=') >= 0 && header !== rawAuthHeader) {
+        rawAuthHeader = header;
+        capturedAuth = parseAuthHeader(header);
+        publishPanel();
+      }
+    } catch (error) {
+      console.warn(
+        '[auto-team-vip] authSnapshot unavailable, keeping passive capture: ' +
+          String((error as Error)?.message || error),
+      );
+    }
+  }
+
+  // ---------- 主窗口弹窗 ----------
+
+  async function openPanelDialog(): Promise<void> {
+    // 重入守卫：弹窗打开是异步的（正文 QML 加载期间未完成），双击/连点不能叠加打开
+    if (dialogActive || dialogOpening) return;
+    dialogOpening = true;
+    try {
+      const handle = await awaitOperation(
+        ctx.ui.showDialog({
+          component: 'qml/PanelDialog.qml',
+          width: 400,
+          title: '自动组队领VIP',
+          modal: true,
+          closeOnMask: true,
+        }),
+      );
+      if (disposed) {
+        handle.close();
+        return;
+      }
+      dialogHandle = handle;
+      dialogActive = true;
+      handle.closed.connect(() => {
+        dialogHandle = null;
+        dialogActive = false;
+        publishPanel();
+      });
+      // 与旧插件一致：每次打开面板重置版本提示一次性开关，并补一次轻量查询
+      runner.onPanelOpened();
+      void runner.requestRun('panel_open', { snapshotOnly: true });
+      publishPanel();
+    } catch (error) {
+      // 正文异步加载期间用户按遮罩/Esc，宿主会取消未完成的打开操作（Canceled）。
+      // 这是主动关闭而非故障：静默收尾，不提示也不跳页，避免双击被误判成打开失败。
+      const code = (error as Error & { code?: string })?.code;
+      if (!disposed && code !== 'Canceled') {
+        console.warn(
+          '[auto-team-vip] dialog unavailable, falling back to page: ' +
+            String((error as Error)?.message || error),
+        );
+        void ctx.toast.warning('弹窗打开失败，已改用页面面板');
+        try {
+          await awaitOperation(ctx.ui.navigate('panel'));
+        } catch {
+          // 页面回退也失败时保持静默：状态仍由心跳维护
+        }
+      }
+    } finally {
+      dialogOpening = false;
+    }
+  }
+
+  function disposeDialog(): void {
+    dialogOpening = false;
+    if (dialogHandle) {
+      const handle = dialogHandle;
+      dialogHandle = null;
+      dialogActive = false;
+      handle.close();
+    } else {
+      dialogActive = false;
+    }
+  }
+
   // ---------- 启动 / 会话 ----------
 
   const settingsReady = (async () => {
@@ -255,6 +345,9 @@ export function activate(ctx: EchoPluginContext) {
       autoEnabled = false;
     }
     await runner.loadDisabled();
+    // 停用标记是持久状态：激活即同步进面板，首次打开（甚至未拨开关）就如实可见；
+    // 此时鉴权头通常尚未捕获、完整流程会被门控挡在期次查询之前
+    runner.applyKnownPoolDisable();
     publishPanel();
   })();
 
@@ -265,20 +358,31 @@ export function activate(ctx: EchoPluginContext) {
     if (!registration) void settingsReady.then(() => runner.requestRun(reason));
   }
 
-  // 账号切换：旧会话的拦截租约已被宿主撤下；清空捕获的鉴权头与码池侧状态，
-  // 在新会话重新注册，稍后重跑。
+  // 账号切换：旧会话的拦截租约与弹层已被宿主撤下；清空捕获的鉴权头与码池侧状态，
+  // 在新会话重新注册并按需重取快照，稍后重跑。
   ctx.sessionInvalidated.connect(() => {
     capturedAuth = null;
     rawAuthHeader = '';
+    dialogHandle = null;
+    dialogActive = false;
     interceptorLease = null;
     void runner.resetForAccountChange();
     void registerInterceptor();
+    void syncAuthSnapshot();
     scheduleStartupRun('login', LOGIN_RUN_DELAY_MS);
   });
 
+  // 同账号内的续期/信息变化也按需重取快照（宿主建议：订阅 accountChanged 后按需重取）
+  ctx.kugou.accountChanged.connect(() => {
+    capturedAuth = null;
+    rawAuthHeader = '';
+    publishPanel();
+    void syncAuthSnapshot();
+  });
+
   ctx.registerCommand('panel.opened', (args) => {
-    panelOpen = args?.active !== false;
-    if (panelOpen) {
+    pageOpen = args?.active !== false;
+    if (pageOpen) {
       runner.onPanelOpened(); // 与旧插件一致：每次打开面板重置版本提示的一次性开关
       // 面板数据可能滞后（心跳 60s 巡检 + 保活间隔）；不带 force：受 10s 合并窗口约束
       void runner.requestRun('panel_open', { snapshotOnly: true });
@@ -312,6 +416,9 @@ export function activate(ctx: EchoPluginContext) {
     } catch {
       // 持久化失败不影响本次会话的开关
     }
+    // 开关状态即时发布；已知的码池停用标记（激活时载入）同步带上，
+    // 状态异常提示在开启瞬间即可见，不必等 toggle_on 流程走到快照
+    runner.applyKnownPoolDisable();
     publishPanel();
     if (enabled) {
       void ctx.toast.info('已开启自动组队，正在执行~~~');
@@ -324,11 +431,23 @@ export function activate(ctx: EchoPluginContext) {
     return { ok: true };
   });
 
+  // 换设备/重装后 token 失配的恢复入口：站长已在码池删除用户后，一键清除本地
+  // 停用标记并立即重发快照；服务端 token 校验不变，未解除绑定时重试仍会 401
+  ctx.registerCommand('pool-retry', async () => {
+    const result = await runner.clearPoolDisable();
+    if (result.ok) void ctx.toast.info(result.message);
+    else void ctx.toast.warning(result.message);
+    if (result.ok) await runner.requestRun('pool_retry', { force: true });
+    return result;
+  });
+
   ctx.registerCommand('join-manual', async (args) => {
     const code = String((args?.code as string) ?? '').trim();
     if (!code) return { ok: false, message: '请输入组队码' };
     const result = await runner.manualJoin(code);
-    if (!result.ok) void ctx.toast.warning(result.message);
+    // 成败都即时提示（旧插件行为）：失败为分类原文，成功为“已提交加入”
+    if (result.ok) void ctx.toast.success(result.message);
+    else void ctx.toast.warning(result.message);
     return result;
   });
 
@@ -358,6 +477,7 @@ export function activate(ctx: EchoPluginContext) {
     return buildErrorDetail(error, Date.now());
   });
 
+  // 调试用：排障时从宿主控制台查看关键状态（不参与面板流程，QML 不调用）
   ctx.registerCommand('status', () => ({
     poolUrl: POOL_URL,
     minRunIntervalMs: MIN_RUN_INTERVAL_MS,
@@ -375,7 +495,7 @@ export function activate(ctx: EchoPluginContext) {
     defaultPlacement: 'toolbar',
     order: 100,
     onClick: () => {
-      void awaitOperation(ctx.ui.navigate('panel'));
+      void openPanelDialog();
     },
   });
 
@@ -387,16 +507,18 @@ export function activate(ctx: EchoPluginContext) {
 
   scheduleStartupRun('startup', AUTO_RUN_DELAY_MS);
   void registerInterceptor();
+  void syncAuthSnapshot();
 
   ctx.onDispose(() => {
     disposed = true;
+    disposeDialog();
     if (interceptorLease) {
       interceptorLease.dispose();
       interceptorLease = null;
     }
     for (const finish of Array.from(pendingSleeps)) finish();
     pendingSleeps.clear();
-    panelOpen = false;
+    pageOpen = false;
   });
 }
 

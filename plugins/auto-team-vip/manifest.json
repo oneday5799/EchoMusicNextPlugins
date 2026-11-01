@@ -26,10 +26,17 @@
       "server.intercept",
       "ui.pages",
       "ui.titlebar",
-      "ui.toast"
+      "ui.toast",
+      "ui.dialogs"
     ]
   },
-  "capabilities": ["unrestrictedNetwork", "serverIntercept", "kugouApi", "kugouVerification"],
+  "capabilities": [
+    "unrestrictedNetwork",
+    "serverIntercept",
+    "kugouApi",
+    "kugouAuth",
+    "kugouVerification"
+  ],
   "contexts": ["main"],
   "tags": ["组队", "VIP"]
 }

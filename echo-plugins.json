@@ -25,7 +25,7 @@
       "id": "auto-team-vip",
       "path": "plugins/auto-team-vip",
       "artifact": "artifacts/auto-team-vip-1.2.6.echomod",
-      "sha256": "fe7ca13ca6ec711b0a0fe3458166282e745ee7c7e53113cdd2dd2b78026f0aeb"
+      "sha256": "46d360d0fdb398dc17c192dd0b1557e85e6a7256f50f20c2fb2e1609db114a14"
     },
     {
       "id": "custom-icon",

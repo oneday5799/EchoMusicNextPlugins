@@ -5,7 +5,7 @@
 import type { JsonValue } from 'echo:plugin-sdk';
 import { h5Token, signatureWebParams, signatureWebParamsWithBody } from './crypto.ts';
 
-const TARGET_MEMBERS = 3; // 1 队长 + 2 队员（与 team-pool-worker 的 TEAM_CAPACITY 一致）
+export const TARGET_MEMBERS = 3; // 1 队长 + 2 队员（与 team-pool-worker 的 TEAM_CAPACITY 一致）
 const GATEWAY_ORIGIN = 'https://gateway.kugou.com';
 // 旧宿主 createRequest 的固定协议头（kg-* 为酷狗内部来源标识，静态值）
 const PROTOCOL_HEADERS = {
@@ -287,6 +287,13 @@ export function classifyJoinError(body: unknown): JoinFailure {
   return { kind, errorCode, errorMsg: asString(pick(body, ['error_msg', 'msg', 'message'], '')) };
 }
 
+// create_team 的“已建过队”拒绝（2026-11-01 实测文案“你已经创建过队伍啦~”，数值码未固定）：
+// 队伍已存在＝建队目标已达成，调用方应转去取回已建队伍，而不是按建队失败处理。
+export function isAlreadyCreatedError(body: unknown): boolean {
+  const msg = asString(pick(body, ['error_msg', 'msg', 'message'], ''));
+  return /创建过|已创建/.test(msg);
+}
+
 // 判定 join / create 响应是否成功：要求**显式** status === 1，错误码仅在字段确实存在时才要求为 0。
 // 缺省值一律按失败处理（fail-closed），避免把 null/空对象静默吞成“入队成功”。
 export function parseJoinResponse(response: GatewayResponse): {
@@ -317,18 +324,18 @@ export interface PeriodFailure {
   diag: { [key: string]: JsonValue };
 }
 
-export function responseHeader(response: GatewayResponse, name: string): string {
+export function headerValue(headers: Record<string, string | string[]>, name: string): string {
   const target = name.toLowerCase();
-  for (const key of Object.keys(response.headers || {})) {
+  for (const key of Object.keys(headers || {})) {
     if (key.toLowerCase() !== target) continue;
-    const value = response.headers[key];
+    const value = headers[key];
     if (Array.isArray(value)) return value.length > 0 ? String(value[0]) : '';
     return String(value ?? '');
   }
   return '';
 }
 
-function bodyText(body: unknown): string {
+export function bodyText(body: unknown): string {
   if (body === undefined || body === null) return '';
   try {
     const text = typeof body === 'string' ? body : JSON.stringify(body);
@@ -338,7 +345,8 @@ function bodyText(body: unknown): string {
   }
 }
 
-function truncate(text: string): string {
+// 复制详情里的原始响应体截断：超长 JSON 全量进面板状态没有意义，保留头部字段结构即可
+export function truncateBody(text: string): string {
   return text.length > 1200 ? text.slice(0, 1200) + '…(已截断)' : text;
 }
 
@@ -352,9 +360,9 @@ export function classifyPeriodFailure(response: GatewayResponse): PeriodFailure 
     errorCode: asNumber(pick(body, ['error_code', 'errcode', 'code'], 0), 0),
     errorMsg: asString(pick(body, ['error_msg', 'msg', 'message'], '')),
     ssaCode: asString(
-      pick(body, ['ssaCode', 'eventId'], '') || responseHeader(response, 'ssa-code'),
+      pick(body, ['ssaCode', 'eventId'], '') || headerValue(response.headers, 'ssa-code'),
     ),
-    body: truncate(bodyText(body)),
+    body: truncateBody(bodyText(body)),
   };
   if (!response.ok)
     return {
@@ -377,7 +385,7 @@ export function classifyPeriodFailure(response: GatewayResponse): PeriodFailure 
 export function needsCaptcha(response: GatewayResponse): string {
   const body = response.body;
   const eventId = asString(
-    pick(body, ['ssaCode', 'eventId'], '') || responseHeader(response, 'ssa-code'),
+    pick(body, ['ssaCode', 'eventId'], '') || headerValue(response.headers, 'ssa-code'),
   );
   if (!eventId) return '';
   const errorCode = asNumber(pick(body, ['error_code', 'errcode', 'code'], 0), 0);

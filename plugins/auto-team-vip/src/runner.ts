@@ -8,14 +8,18 @@ import {
   classifyJoinError,
   classifyPeriodFailure,
   buildTeamRequest,
+  isAlreadyCreatedError,
   needsCaptcha,
   normalizePeriod,
   normalizeTeamInfo,
   parseJoinResponse,
+  TARGET_MEMBERS,
+  truncateBody,
   type GatewayRequest,
   type GatewayResponse,
   type KugouAuth,
   type TeamInfo,
+  type TeamView,
 } from './kugou.ts';
 import {
   backoffRemainingMs,
@@ -33,6 +37,10 @@ import {
 
 export const RETRY_MAX = 3; // 当轮 join 重试上限（含首次）
 const RETRY_DELAY_MS = 2000;
+// 建队被拒后重查自己的队伍码：酷狗 myinfo 连续快查返回不一致（实测 ①空→②全量），
+// 读不到码先短间隔重试再放弃，不把瞬时读空当终态
+const CREATED_REQUERY_MAX = 2;
+const CREATED_REQUERY_DELAY_MS = 1500;
 const POOL_RETRY_DELAY_MS = 500; // 瞬时故障（网络/5xx）的一次补射间隔
 export const MIN_RUN_INTERVAL_MS = 10_000; // 触发合并窗口
 export const REFRESH_THROTTLE_MS = 3000;
@@ -163,6 +171,11 @@ export function createRunner(services: RunnerServices) {
   let lastSnapshotAt = 0;
   let lastFullAt = 0;
   let lastInactiveProbeAt = 0;
+  let runUid = ''; // 本轮流程的账号 id：applyTeamInfo 回写建队码缓存时使用
+  // 激活时从 storage 载入的最近期次/账号：鉴权头尚未捕获、任何流程都未上网之前，
+  // applyKnownPoolDisable 靠它们判读停用标记（完整流程会被鉴权门控挡在 ① 之前）
+  let knownPeriodId = '';
+  let knownUid = '';
   let runChain: Promise<void> | null = null;
   let versionMismatchReported = false;
   let deviceBoundToastShown = false;
@@ -201,17 +214,90 @@ export function createRunner(services: RunnerServices) {
     state.joinedMemberCount = info.joined ? info.joined.memberCount : 0;
     state.joinedVipDesc = info.joined ? info.joined.vipDesc : '';
     state.joined = Boolean(info.joined && info.joined.code);
+    if (info.created && state.periodId) rememberCreatedTeam(state.periodId, info.created);
     services.publish();
   }
 
-  async function updateDisabled(key: string, value: boolean): Promise<void> {
-    if (key && value) disabledPeriods.add(key);
+  // 本期已建队伍码的本地缓存：酷狗查询失败（网络/验证码）时面板仍能直接展示已创建的队伍码，
+  // 而不是空卡片等下一次重试。按「账号:期次」隔离，换账号或跨期自动失效。
+  interface CreatedTeamCache {
+    uid: string;
+    periodId: string;
+    code: string;
+    memberCount: number;
+    vipDesc: string;
+  }
+
+  function rememberCreatedTeam(periodId: string, team: TeamView): void {
+    const record: CreatedTeamCache = {
+      uid: runUid,
+      periodId,
+      code: team.code,
+      memberCount: team.memberCount,
+      vipDesc: team.vipDesc,
+    };
+    void services.writeValue('lastCreatedTeam', record).catch(() => {
+      // 缓存失败不影响主流程
+    });
+  }
+
+  async function readCreatedCache(periodId: string, uid: string): Promise<CreatedTeamCache | null> {
+    try {
+      const raw = await services.readValue('lastCreatedTeam');
+      if (!raw || typeof raw !== 'object') return null;
+      const record = raw as Record<string, unknown>;
+      if (String(record.uid || '') !== uid) return null;
+      if (String(record.periodId || '') !== periodId) return null;
+      const code = String(record.code || '');
+      if (!code) return null;
+      return {
+        uid,
+        periodId,
+        code,
+        memberCount: Number(record.memberCount) || 1,
+        vipDesc: String(record.vipDesc || ''),
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  function applyCreatedCache(cache: CreatedTeamCache): void {
+    state.myCode = cache.code;
+    state.myMemberCount = cache.memberCount;
+    state.myVipDesc = cache.vipDesc;
+    services.publish();
+  }
+
+  // 401 停用写入：读-改-写合并进存储（与旧插件 disablePool 语义一致），
+  // 保留其他账号/会话已落库的停用记录；内存 Set 只作本会话的快速判定。
+  async function disablePoolAuth(key: string): Promise<void> {
+    if (key) disabledPeriods.add(key);
+    try {
+      const stored = await services.readValue('poolAuthDisabled');
+      const map: Record<string, boolean> = {};
+      if (stored && typeof stored === 'object') {
+        const record = stored as Record<string, unknown>;
+        for (const k of Object.keys(record)) {
+          if (record[k] === true) map[k] = true;
+        }
+      }
+      for (const entry of disabledPeriods) map[entry] = true;
+      await services.writeValue('poolAuthDisabled', map);
+    } catch {
+      // 存储失败不影响内存判定
+    }
+  }
+
+  // 把内存停用表整体覆写进存储；调用方先把内存裁剪到位（期次切换只留当前期次、
+  // 解除停用删掉对应记录），跨期旧记录由此主动丢弃（旧插件 F7 语义）。
+  async function persistDisabledTable(): Promise<void> {
     try {
       const map: Record<string, boolean> = {};
       for (const entry of disabledPeriods) map[entry] = true;
       await services.writeValue('poolAuthDisabled', map);
     } catch {
-      // 存储失败不影响内存判定
+      // 存储失败不影响本轮
     }
   }
 
@@ -295,7 +381,23 @@ export function createRunner(services: RunnerServices) {
   async function getMyTeamInfo(auth: KugouAuth, periodId: string) {
     const response = await teamCall(auth, 'get_my_team_info', { periodId });
     if (!response.ok) return { ok: false as const, error: response.error || '请求失败' };
-    return { ok: true as const, ...normalizeTeamInfo(response.body) };
+    // 显式业务失败（status≠1）按查询失败处理：不把错误响应静默解析成“没有任何队伍”
+    const body = response.body;
+    const status =
+      body && typeof body === 'object' ? Number((body as Record<string, unknown>).status) : NaN;
+    if (Number.isFinite(status) && status !== 1)
+      return { ok: false as const, error: response.error || '接口返回异常' };
+    // 宿主把响应体经 QVariant 转成 JS 对象后，嵌套数组结构的直接属性访问与序列化结果
+    // 可能不一致（实测：序列化含 team_code，直读 my_create_team_list 却取不到元素）。
+    // 统一做一次 JSON 文本往返得到纯净对象再解析；载荷仅数 KB、全流程级频率，开销可忽略。
+    let plain: unknown = body;
+    try {
+      const text = JSON.stringify(body);
+      if (typeof text === 'string' && text.length > 0) plain = JSON.parse(text);
+    } catch {
+      // 往返失败时按原对象解析（解析器自身对普通对象已被验证正确）
+    }
+    return { ok: true as const, ...normalizeTeamInfo(plain) };
   }
 
   // ---------- 码池侧 ----------
@@ -349,7 +451,6 @@ export function createRunner(services: RunnerServices) {
   // confirm：入队成功后的 VERIFY 快照强制发送一次——即使结果回报失败刚开启了退避，
   // 否则 success 租约 10 分钟后过期、名额被释放，又可能分配给其他人。
   async function doSnapshot(
-    auth: KugouAuth,
     periodId: string,
     uid: string,
     teamInfo: TeamInfo,
@@ -431,7 +532,7 @@ export function createRunner(services: RunnerServices) {
       return 'ok';
     }
     if (response.status === 401) {
-      await updateDisabled(periodId + ':' + uid, true);
+      await disablePoolAuth(periodId + ':' + uid);
       state.poolDisabled = true;
       services.publish();
       setLastError('身份校验失败，本期码池功能停用（下期自动恢复）', 'pool_unauthorized', {
@@ -500,7 +601,6 @@ export function createRunner(services: RunnerServices) {
 
   // 回报租约结果，并语义化处理码池侧失败。返回 "abort" 表示本轮应终止。
   async function reportLeaseResult(
-    auth: KugouAuth,
     periodId: string,
     uid: string,
     leaseId: string,
@@ -526,7 +626,7 @@ export function createRunner(services: RunnerServices) {
       if (record && record.error === 'lease_not_found') return 'ok';
     }
     if (response.status === 401) {
-      await updateDisabled(periodId + ':' + uid, true);
+      await disablePoolAuth(periodId + ':' + uid);
       state.poolDisabled = true;
       services.publish();
       setLastError('身份校验失败，本期码池功能停用（下期自动恢复）', 'pool_unauthorized', {
@@ -572,7 +672,6 @@ export function createRunner(services: RunnerServices) {
   }
 
   async function poolJoin(
-    auth: KugouAuth,
     periodId: string,
     uid: string,
     excludeCodes: string[],
@@ -621,6 +720,14 @@ export function createRunner(services: RunnerServices) {
         return;
       }
       const uid = String(auth.userid);
+      if (uid !== runUid || uid !== knownUid) {
+        runUid = uid;
+        knownUid = uid;
+        // 账号 id 落盘：重启/重装后 applyKnownPoolDisable 在鉴权头捕获前也有 uid 可用
+        void services.writeValue('lastUid', uid);
+      } else {
+        runUid = uid;
+      }
 
       // ① GUARD：期次信息；非进行中直接终止（不建队、不请求码池）
       const period = await getPeriodInfo(auth);
@@ -652,7 +759,7 @@ export function createRunner(services: RunnerServices) {
         }
         disabledPeriods.clear();
         for (const key of kept) disabledPeriods.add(key);
-        await updateDisabled('', false);
+        await persistDisabledTable();
       }
       await services.writeValue('lastPeriodId', periodId);
       state.periodId = periodId;
@@ -675,6 +782,9 @@ export function createRunner(services: RunnerServices) {
       let myInfo = await getMyTeamInfo(auth, periodId);
       ensureActive();
       if (!myInfo.ok) {
+        // 查询失败：回退到本期已缓存的建队码，已创建过队伍的面板不必空等到下一次查询成功
+        const cached = await readCreatedCache(periodId, uid);
+        if (cached) applyCreatedCache(cached);
         setLastError('获取队伍信息失败', 'myinfo_failed');
         return;
       }
@@ -693,7 +803,62 @@ export function createRunner(services: RunnerServices) {
         const createdRes = await teamCall(auth, 'create_team', { periodId });
         ensureActive();
         const createdParsed = createdRes.ok ? parseJoinResponse(createdRes) : null;
-        if (!createdParsed || !createdParsed.httpOk || !createdParsed.bizOk) {
+        // 酷狗对重复建队的拒绝（实测文案“你已经创建过队伍啦~”）：队伍已存在＝目标已达成，
+        // 转入取回已有队伍，不按建队失败处理。
+        const alreadyCreated = Boolean(
+          createdParsed && !createdParsed.bizOk && isAlreadyCreatedError(createdRes.body),
+        );
+        const refreshed = await getMyTeamInfo(auth, periodId);
+        ensureActive();
+        if (!refreshed.ok) {
+          const cached = await readCreatedCache(periodId, uid);
+          if (cached) applyCreatedCache(cached);
+          setLastError('获取队伍信息失败', 'myinfo_failed');
+          return;
+        }
+        myInfo = refreshed;
+        if (alreadyCreated && !myInfo.created) {
+          // 建队被拒＝队伍确定存在；重查读不到码按查询侧数据未同步处理，短间隔重试后再放弃
+          for (let retry = 0; retry < CREATED_REQUERY_MAX && !myInfo.created; retry += 1) {
+            await services.sleep(CREATED_REQUERY_DELAY_MS);
+            ensureActive();
+            const again = await getMyTeamInfo(auth, periodId);
+            if (again.ok) myInfo = again;
+          }
+        }
+        if (alreadyCreated && !myInfo.created) {
+          // 酷狗确认已建队但查询读不到队伍码：如实提示并携带双方原始响应与解析探针，
+          // 复制错误详情即可定位取数缺口（不虚构成功也不误报建队失败）。
+          // 设备已绑定自己创建的队伍，继续申请他人队伍码必然 143005，直接终止本轮。
+          const raw = JSON.stringify(myInfo.raw) || '';
+          const list = (myInfo.raw as { my_create_team_list?: unknown } | undefined)
+            ?.my_create_team_list;
+          const first = Array.isArray(list) ? (list as unknown[])[0] : undefined;
+          setLastError(
+            '酷狗提示本期已创建过队伍，但暂时查询不到队伍码，请稍后刷新；若持续出现请复制错误详情反馈',
+            'created_team_unreadable',
+            {
+              periodId,
+              uid,
+              createError: (createdParsed && createdParsed.errorMsg) || '',
+              myTeamInfoBody: truncateBody(raw),
+              parseProbe: [
+                'rawType=' + typeof myInfo.raw,
+                'list=' + (Array.isArray(list) ? 'array' : typeof list),
+                'first=' + typeof first,
+                'code=' +
+                  (first && typeof first === 'object'
+                    ? String((first as Record<string, unknown>).team_code ?? '')
+                    : '-'),
+              ].join(','),
+            },
+          );
+          return;
+        } else if (
+          !alreadyCreated &&
+          (!createdParsed || !createdParsed.httpOk || !createdParsed.bizOk) &&
+          !myInfo.created
+        ) {
           // 建队失败不阻断分配流程（仍可以队员身份加入他人队伍），但给出可见提示
           const detail =
             (createdParsed && createdParsed.errorMsg) || String(createdRes.error || '请求失败');
@@ -702,18 +867,11 @@ export function createRunner(services: RunnerServices) {
             detail,
           });
         }
-        const refreshed = await getMyTeamInfo(auth, periodId);
-        ensureActive();
-        if (!refreshed.ok) {
-          setLastError('获取队伍信息失败', 'myinfo_failed');
-          return;
-        }
-        myInfo = refreshed;
       }
       applyTeamInfo(myInfo as TeamInfo);
 
       // ③ SNAPSHOT：两维度真实状态整体上报
-      const snap = await doSnapshot(auth, periodId, uid, myInfo as TeamInfo);
+      const snap = await doSnapshot(periodId, uid, myInfo as TeamInfo);
       lastSnapshotAt = services.now();
       if (snapshotOnly || snap !== 'ok') {
         // 快照成功＝鉴权/期次/队伍信息均正常；此路径无后续重试，清掉历史错误不会闪烁
@@ -721,8 +879,10 @@ export function createRunner(services: RunnerServices) {
         return;
       }
 
-      // ④ DECIDE：入队即终态（酷狗不支持退队），本轮结束进入心跳模式
-      if (myInfo.joined) {
+      // ④ DECIDE：已在完整队伍中即终态（酷狗不支持退队），本轮结束进入心跳模式。
+      // 实测（143005"每台设备只能加入一个队伍"）：满员的创建队占用设备，队长不能再加入他人，
+      // 等待队员经码池加入即可；未满员的创建队沿用"建队后仍可申请加入他人"的原有流程。
+      if (myInfo.joined || (myInfo.created && myInfo.created.memberCount >= TARGET_MEMBERS)) {
         clearIfNoNewError();
         return;
       }
@@ -748,11 +908,11 @@ export function createRunner(services: RunnerServices) {
           );
           return;
         }
-        const joinRes = await poolJoin(auth, periodId, uid, Array.from(excludedCodes));
+        const joinRes = await poolJoin(periodId, uid, Array.from(excludedCodes));
         ensureActive();
         if (!joinRes.ok) {
           if (joinRes.status === 401) {
-            await updateDisabled(periodId + ':' + uid, true);
+            await disablePoolAuth(periodId + ':' + uid);
             state.poolDisabled = true;
             services.publish();
             setLastError('身份校验失败，本期码池功能停用（下期自动恢复）', 'pool_unauthorized', {
@@ -811,12 +971,7 @@ export function createRunner(services: RunnerServices) {
           const verify = await getMyTeamInfo(auth, periodId);
           ensureActive();
           if (verify.ok) applyTeamInfo(verify as TeamInfo);
-          await doSnapshot(
-            auth,
-            periodId,
-            uid,
-            verify.ok ? (verify as TeamInfo) : (myInfo as TeamInfo),
-          );
+          await doSnapshot(periodId, uid, verify.ok ? (verify as TeamInfo) : (myInfo as TeamInfo));
           clearIfNoNewError();
           return;
         }
@@ -846,29 +1001,21 @@ export function createRunner(services: RunnerServices) {
             类别: 'network',
             说明: joinKugou.error || '请求失败',
           });
-          if (
-            (await reportLeaseResult(auth, periodId, uid, leaseId, 'failed', 'network')) === 'abort'
-          )
+          if ((await reportLeaseResult(periodId, uid, leaseId, 'failed', 'network')) === 'abort')
             return;
           if (attempt < RETRY_MAX) await services.sleep(RETRY_DELAY_MS);
           continue;
         }
         const parsed = parseJoinResponse(joinKugou);
         if (parsed.httpOk && parsed.bizOk) {
-          await reportLeaseResult(auth, periodId, uid, leaseId, 'success', '');
+          await reportLeaseResult(periodId, uid, leaseId, 'success', '');
           // ⑧ VERIFY + SNAPSHOT：把成队后的真实人数报给码池（confirm 强制发送）
           const verify = await getMyTeamInfo(auth, periodId);
           ensureActive();
           if (verify.ok) applyTeamInfo(verify as TeamInfo);
-          await doSnapshot(
-            auth,
-            periodId,
-            uid,
-            verify.ok ? (verify as TeamInfo) : (myInfo as TeamInfo),
-            {
-              confirm: true,
-            },
-          );
+          await doSnapshot(periodId, uid, verify.ok ? (verify as TeamInfo) : (myInfo as TeamInfo), {
+            confirm: true,
+          });
           clearIfNoNewError();
           return;
         }
@@ -881,22 +1028,14 @@ export function createRunner(services: RunnerServices) {
           ...(failure.errorCode ? { 酷狗错误码: failure.errorCode } : {}),
           ...(failure.errorMsg ? { 酷狗信息: failure.errorMsg } : {}),
         });
-        if (
-          (await reportLeaseResult(auth, periodId, uid, leaseId, 'failed', failure.kind)) ===
-          'abort'
-        )
+        if ((await reportLeaseResult(periodId, uid, leaseId, 'failed', failure.kind)) === 'abort')
           return;
         if (failure.kind === 'already_joined') {
           // 已在队中（如上轮租约迟到成功）：立即快照纠偏，不重试
           const verify = await getMyTeamInfo(auth, periodId);
           ensureActive();
           if (verify.ok) applyTeamInfo(verify as TeamInfo);
-          await doSnapshot(
-            auth,
-            periodId,
-            uid,
-            verify.ok ? (verify as TeamInfo) : (myInfo as TeamInfo),
-          );
+          await doSnapshot(periodId, uid, verify.ok ? (verify as TeamInfo) : (myInfo as TeamInfo));
           // 143005 是设备级约束（设备已绑队）。若本期查不到任何队伍，本地无法自愈，
           // 必须明确告知用户，否则会退化成"一直不成功却毫无提示"的无声失败。
           if (failure.errorCode === 143005 && verify.ok && !(verify as TeamInfo).joined) {
@@ -906,6 +1045,9 @@ export function createRunner(services: RunnerServices) {
               uid,
               code,
               errorCode: failure.errorCode,
+              // 携带原始 myinfo 响应：设备绑定来源（创建队/加入队）在查询侧不可见时，
+              // 复制错误详情即可拿到 join 列表真实字段结构，用于定位解析缺口
+              myTeamInfoBody: truncateBody(JSON.stringify((verify as TeamInfo).raw) || ''),
             });
             if (!deviceBoundToastShown) {
               deviceBoundToastShown = true;
@@ -936,7 +1078,7 @@ export function createRunner(services: RunnerServices) {
         message: services.loggedIn() ? '登录态同步中，请稍后重试' : '未登录 EchoMusic，请先登录',
       };
     }
-    ensureActive();
+    // ensureActive 由 teamCall 内部检查点承担：此处提前抛出会绕过下方"插件已停用"兜底
     try {
       const response = await teamCall(auth, 'join_team', { teamCode: code });
       const parsed = parseJoinResponse(response);
@@ -1010,12 +1152,16 @@ export function createRunner(services: RunnerServices) {
     poolEmptyBackoff.step = 0;
     poolEmptyBackoff.nextAttemptAt = 0;
     disabledPeriods.clear();
+    // 内存清空后回读存储：停用表合并写入的其他记录不能因切换会话而丢基线
+    void loadDisabledPeriods();
     versionMismatchReported = false;
     deviceBoundToastShown = false;
     lastRunAt = 0;
     lastSnapshotAt = 0;
     lastFullAt = 0;
     lastInactiveProbeAt = 0;
+    runUid = '';
+    knownUid = ''; // 切换账号后旧 uid 不再代表当前会话，等新鉴权头或首次流程回写
     state.periodId = '';
     state.periodName = '';
     state.periodStart = '';
@@ -1038,10 +1184,70 @@ export function createRunner(services: RunnerServices) {
 
   async function loadDisabled(): Promise<void> {
     await loadDisabledPeriods();
+    try {
+      const [periodId, uid, created] = await Promise.all([
+        services.readValue('lastPeriodId'),
+        services.readValue('lastUid'),
+        services.readValue('lastCreatedTeam'),
+      ]);
+      if (typeof periodId === 'string') knownPeriodId = periodId;
+      if (typeof uid === 'string' && uid) knownUid = uid;
+      // lastUid 自首个成功流程才落盘；老存量用建队码缓存里的 uid 兜底
+      if (!knownUid && created && typeof created === 'object') {
+        const createdUid = (created as Record<string, unknown>).uid;
+        if (typeof createdUid === 'string' && createdUid) knownUid = createdUid;
+      }
+    } catch {
+      // 载入失败按未知处理，等首次成功流程回写
+    }
+  }
+
+  // 开启自动组队（或激活载入停用表）时不等流程上网回来才披露本期停用状态：
+  // 停用表与最近期次/账号激活时已载入内存，按 doSnapshot 首道判定（期次:uid）立即
+  // 同步进面板——有标记则状态行即时显示，无标记则不误挂；全部未知时交由后续流程发现。
+  function applyKnownPoolDisable(): void {
+    const auth = services.auth();
+    const uid = auth ? String(auth.userid) : runUid || knownUid;
+    const periodId = state.periodId || knownPeriodId;
+    if (!uid || !periodId) return;
+    state.poolDisabled = disabledPeriods.has(periodId + ':' + uid);
+  }
+
+  // 解除本期停用标记（面板「解除停用并重试」）：换设备/重装后 token 失配会同时
+  // 落下服务端与本地两道停用；站长在码池删除用户解除服务端绑定后，这里删掉本地
+  // 标记并允许立即重发快照。服务端 token 校验原样保留——未解除绑定时重试仍会
+  // 401，标记如实重新落下，不构成绕过。按期次前缀清除：该期内其他账号的标记
+  // 一并放行重试，误放行只会换来一次 401，不会错报状态。
+  async function clearPoolDisable(): Promise<{ ok: boolean; message: string }> {
+    const auth = services.auth();
+    const uid = auth ? String(auth.userid) : runUid || knownUid;
+    const periodId = state.periodId || knownPeriodId;
+    if (!periodId) return { ok: false, message: '本期期次未知，请先刷新一次再重试' };
+    if (!uid) return { ok: false, message: '登录态未知，请先登录或播放一首歌曲后重试' };
+    const prefix = periodId + ':';
+    let removed = 0;
+    for (const key of Array.from(disabledPeriods)) {
+      if (key.startsWith(prefix)) {
+        disabledPeriods.delete(key);
+        removed += 1;
+      }
+    }
+    await persistDisabledTable();
+    if (removed > 0) {
+      state.poolDisabled = false;
+      if (state.lastError && state.lastError.code === 'pool_unauthorized') clearLastError();
+    }
+    services.publish();
+    return {
+      ok: true,
+      message: removed > 0 ? '已解除本期停用标记，正在重试' : '本期没有停用标记，正在重试',
+    };
   }
 
   return {
     requestRun,
+    applyKnownPoolDisable,
+    clearPoolDisable,
     /** 等待当前串行链排空（排水用，不触发新流程） */
     idle(): Promise<void> {
       return runChain ?? Promise.resolve();

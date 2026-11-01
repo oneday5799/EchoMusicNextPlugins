@@ -477,6 +477,10 @@ function classifyJoinError(body) {
     kind = "invalid";
   return { kind, errorCode, errorMsg: asString(pick(body, ["error_msg", "msg", "message"], "")) };
 }
+function isAlreadyCreatedError(body) {
+  const msg = asString(pick(body, ["error_msg", "msg", "message"], ""));
+  return /创建过|已创建/.test(msg);
+}
 function parseJoinResponse(response) {
   const body = response.body;
   const isObj = Boolean(body) && typeof body === "object";
@@ -489,11 +493,11 @@ function parseJoinResponse(response) {
   const bizOk = bodyStatus === 1 && (!hasErrCode || errorCode === 0);
   return { httpOk, bizOk: hasStatus && bizOk, errorCode, errorMsg };
 }
-function responseHeader(response, name) {
+function headerValue(headers, name) {
   const target = name.toLowerCase();
-  for (const key of Object.keys(response.headers || {})) {
+  for (const key of Object.keys(headers || {})) {
     if (key.toLowerCase() !== target) continue;
-    const value = response.headers[key];
+    const value = headers[key];
     if (Array.isArray(value)) return value.length > 0 ? String(value[0]) : "";
     return String(value != null ? value : "");
   }
@@ -508,7 +512,7 @@ function bodyText(body) {
     return String(body);
   }
 }
-function truncate(text) {
+function truncateBody(text) {
   return text.length > 1200 ? text.slice(0, 1200) + "…(已截断)" : text;
 }
 function classifyPeriodFailure(response) {
@@ -519,9 +523,9 @@ function classifyPeriodFailure(response) {
     errorCode: asNumber(pick(body, ["error_code", "errcode", "code"], 0), 0),
     errorMsg: asString(pick(body, ["error_msg", "msg", "message"], "")),
     ssaCode: asString(
-      pick(body, ["ssaCode", "eventId"], "") || responseHeader(response, "ssa-code")
+      pick(body, ["ssaCode", "eventId"], "") || headerValue(response.headers, "ssa-code")
     ),
-    body: truncate(bodyText(body))
+    body: truncateBody(bodyText(body))
   };
   if (!response.ok)
     return {
@@ -542,7 +546,7 @@ function classifyPeriodFailure(response) {
 function needsCaptcha(response) {
   const body = response.body;
   const eventId = asString(
-    pick(body, ["ssaCode", "eventId"], "") || responseHeader(response, "ssa-code")
+    pick(body, ["ssaCode", "eventId"], "") || headerValue(response.headers, "ssa-code")
   );
   if (!eventId) return "";
   const errorCode = asNumber(pick(body, ["error_code", "errcode", "code"], 0), 0);
@@ -573,26 +577,10 @@ function poolHeaders(pluginVersion) {
     "X-Plugin-Version": pluginVersion
   };
 }
-function bodyText2(data) {
-  try {
-    const text = typeof data === "string" ? data : JSON.stringify(data != null ? data : "");
-    return text === void 0 ? String(data != null ? data : "") : text;
-  } catch (e) {
-    return String(data != null ? data : "");
-  }
-}
-function headerValue(headers, name) {
-  var _a;
-  const target = name.toLowerCase();
-  for (const key of Object.keys(headers || {})) {
-    if (key.toLowerCase() === target) return String((_a = headers[key]) != null ? _a : "");
-  }
-  return "";
-}
 function isCfChallenge(response) {
   const status = Number(response.status) || 0;
   if (status !== 403 && status !== 503) return false;
-  const text = bodyText2(response.data);
+  const text = bodyText(response.data);
   if (!text) return false;
   return /Attention Required|Just a moment|cf-browser-verification|cf_chl_|challenge-platform|Enable JavaScript and cookies/i.test(
     text
@@ -607,40 +595,30 @@ function isCfEdgeError(response) {
     if (record.cloudflare_error === true) return true;
     if (Number.isFinite(code) && code >= 1e3 && code < 2e3) return true;
   }
-  const text = bodyText2(data);
+  const text = bodyText(data);
   return /cloudflare-1xxx-errors|workers_dev_script_not_found|No Workers script was found/i.test(
     text
   );
 }
 function cfChallengeTrace(response) {
-  let ray = headerValue(response.headers || {}, "cf-ray");
-  const mitigated = headerValue(response.headers || {}, "cf-mitigated");
+  let ray = headerValue(response.headers, "cf-ray");
+  const mitigated = headerValue(response.headers, "cf-mitigated");
   if (!ray) {
     const match = /Ray ID:\s*([0-9a-f]{8,})|"?ray_id"?\s*:\s*"([0-9a-f]{8,})"/i.exec(
-      bodyText2(response.data)
+      bodyText(response.data)
     );
     if (match) ray = match[1] || match[2] || "";
   }
   return { cfRay: ray, cfMitigated: mitigated };
 }
 function buildPoolDiag(path, response) {
-  const data = response.data;
-  let text = "";
-  if (data !== void 0 && data !== null) {
-    try {
-      const serialized = typeof data === "string" ? data : JSON.stringify(data);
-      text = serialized === void 0 ? String(data) : serialized;
-    } catch (e) {
-      text = String(data);
-    }
-  }
   return {
     endpoint: POOL_URL + path,
     httpStatus: Number(response.status) || 0,
     poolError: String(response.error || ""),
     cfRay: String(response.cfRay || ""),
     cfMitigated: String(response.cfMitigated || ""),
-    body: text.length > 1200 ? text.slice(0, 1200) + "…(已截断)" : text
+    body: truncateBody(bodyText(response.data))
   };
 }
 var POOL_BACKOFF_STEPS_MS = [5, 15, 30].map((minutes) => minutes * 6e4);
@@ -717,6 +695,8 @@ function normalizePoolResponse(raw) {
 // plugins/auto-team-vip/src/runner.ts
 var RETRY_MAX = 3;
 var RETRY_DELAY_MS = 2e3;
+var CREATED_REQUERY_MAX = 2;
+var CREATED_REQUERY_DELAY_MS = 1500;
 var POOL_RETRY_DELAY_MS = 500;
 var MIN_RUN_INTERVAL_MS = 1e4;
 var REFRESH_THROTTLE_MS = 3e3;
@@ -786,6 +766,9 @@ function createRunner(services) {
   let lastSnapshotAt = 0;
   let lastFullAt = 0;
   let lastInactiveProbeAt = 0;
+  let runUid = "";
+  let knownPeriodId = "";
+  let knownUid = "";
   let runChain = null;
   let versionMismatchReported = false;
   let deviceBoundToastShown = false;
@@ -812,11 +795,68 @@ function createRunner(services) {
     state.joinedMemberCount = info.joined ? info.joined.memberCount : 0;
     state.joinedVipDesc = info.joined ? info.joined.vipDesc : "";
     state.joined = Boolean(info.joined && info.joined.code);
+    if (info.created && state.periodId) rememberCreatedTeam(state.periodId, info.created);
     services.publish();
   }
-  function updateDisabled(key, value) {
+  function rememberCreatedTeam(periodId, team) {
+    const record = {
+      uid: runUid,
+      periodId,
+      code: team.code,
+      memberCount: team.memberCount,
+      vipDesc: team.vipDesc
+    };
+    void services.writeValue("lastCreatedTeam", record).catch(() => {
+    });
+  }
+  function readCreatedCache(periodId, uid) {
     return __async(this, null, function* () {
-      if (key && value) disabledPeriods.add(key);
+      try {
+        const raw = yield services.readValue("lastCreatedTeam");
+        if (!raw || typeof raw !== "object") return null;
+        const record = raw;
+        if (String(record.uid || "") !== uid) return null;
+        if (String(record.periodId || "") !== periodId) return null;
+        const code = String(record.code || "");
+        if (!code) return null;
+        return {
+          uid,
+          periodId,
+          code,
+          memberCount: Number(record.memberCount) || 1,
+          vipDesc: String(record.vipDesc || "")
+        };
+      } catch (e) {
+        return null;
+      }
+    });
+  }
+  function applyCreatedCache(cache) {
+    state.myCode = cache.code;
+    state.myMemberCount = cache.memberCount;
+    state.myVipDesc = cache.vipDesc;
+    services.publish();
+  }
+  function disablePoolAuth(key) {
+    return __async(this, null, function* () {
+      if (key) disabledPeriods.add(key);
+      try {
+        const stored = yield services.readValue("poolAuthDisabled");
+        const map = {};
+        if (stored && typeof stored === "object") {
+          const record = stored;
+          for (const k of Object.keys(record)) {
+            if (record[k] === true) map[k] = true;
+          }
+        }
+        for (const entry of disabledPeriods) map[entry] = true;
+        yield services.writeValue("poolAuthDisabled", map);
+      } catch (e) {
+      }
+    });
+  }
+  function persistDisabledTable() {
+    return __async(this, null, function* () {
       try {
         const map = {};
         for (const entry of disabledPeriods) map[entry] = true;
@@ -893,7 +933,17 @@ function createRunner(services) {
     return __async(this, null, function* () {
       const response = yield teamCall(auth, "get_my_team_info", { periodId });
       if (!response.ok) return { ok: false, error: response.error || "请求失败" };
-      return __spreadValues({ ok: true }, normalizeTeamInfo(response.body));
+      const body = response.body;
+      const status = body && typeof body === "object" ? Number(body.status) : NaN;
+      if (Number.isFinite(status) && status !== 1)
+        return { ok: false, error: response.error || "接口返回异常" };
+      let plain = body;
+      try {
+        const text = JSON.stringify(body);
+        if (typeof text === "string" && text.length > 0) plain = JSON.parse(text);
+      } catch (e) {
+      }
+      return __spreadValues({ ok: true }, normalizeTeamInfo(plain));
     });
   }
   function onPanelOpened() {
@@ -939,8 +989,8 @@ function createRunner(services) {
   function remainingBackoffSeconds(now) {
     return Math.max(1, Math.ceil(backoffRemainingMs(poolBackoff, now) / 1e3));
   }
-  function doSnapshot(_0, _1, _2, _3) {
-    return __async(this, arguments, function* (auth, periodId, uid, teamInfo, options = {}) {
+  function doSnapshot(_0, _1, _2) {
+    return __async(this, arguments, function* (periodId, uid, teamInfo, options = {}) {
       const now = services.now();
       if (yield isPoolDisabled(periodId, uid)) {
         state.poolDisabled = true;
@@ -1009,7 +1059,7 @@ function createRunner(services) {
         return "ok";
       }
       if (response.status === 401) {
-        yield updateDisabled(periodId + ":" + uid, true);
+        yield disablePoolAuth(periodId + ":" + uid);
         state.poolDisabled = true;
         services.publish();
         setLastError("身份校验失败，本期码池功能停用（下期自动恢复）", "pool_unauthorized", {
@@ -1068,7 +1118,7 @@ function createRunner(services) {
     });
     services.toastWarning(message);
   }
-  function reportLeaseResult(auth, periodId, uid, leaseId, result, errorKind) {
+  function reportLeaseResult(periodId, uid, leaseId, result, errorKind) {
     return __async(this, null, function* () {
       const token = yield getPoolToken(uid);
       const response = yield poolRequest("/v2/join/result", {
@@ -1085,7 +1135,7 @@ function createRunner(services) {
         if (record && record.error === "lease_not_found") return "ok";
       }
       if (response.status === 401) {
-        yield updateDisabled(periodId + ":" + uid, true);
+        yield disablePoolAuth(periodId + ":" + uid);
         state.poolDisabled = true;
         services.publish();
         setLastError("身份校验失败，本期码池功能停用（下期自动恢复）", "pool_unauthorized", {
@@ -1123,7 +1173,7 @@ function createRunner(services) {
       return response;
     });
   }
-  function poolJoin(auth, periodId, uid, excludeCodes) {
+  function poolJoin(periodId, uid, excludeCodes) {
     return __async(this, null, function* () {
       const token = yield getPoolToken(uid);
       return poolRequest("/v2/join", {
@@ -1137,6 +1187,7 @@ function createRunner(services) {
   }
   function runFullFlow(_0) {
     return __async(this, arguments, function* (reason, options = {}) {
+      var _a, _b;
       const snapshotOnly = Boolean(options.snapshotOnly);
       const now0 = services.now();
       if (!options.force && now0 - lastRunAt < MIN_RUN_INTERVAL_MS) return;
@@ -1164,6 +1215,13 @@ function createRunner(services) {
           return;
         }
         const uid = String(auth.userid);
+        if (uid !== runUid || uid !== knownUid) {
+          runUid = uid;
+          knownUid = uid;
+          void services.writeValue("lastUid", uid);
+        } else {
+          runUid = uid;
+        }
         const period = yield getPeriodInfo(auth);
         ensureActive();
         if (!period.ok) {
@@ -1190,7 +1248,7 @@ function createRunner(services) {
           }
           disabledPeriods.clear();
           for (const key of kept) disabledPeriods.add(key);
-          yield updateDisabled("", false);
+          yield persistDisabledTable();
         }
         yield services.writeValue("lastPeriodId", periodId);
         state.periodId = periodId;
@@ -1209,6 +1267,8 @@ function createRunner(services) {
         let myInfo = yield getMyTeamInfo(auth, periodId);
         ensureActive();
         if (!myInfo.ok) {
+          const cached = yield readCreatedCache(periodId, uid);
+          if (cached) applyCreatedCache(cached);
           setLastError("获取队伍信息失败", "myinfo_failed");
           return;
         }
@@ -1222,29 +1282,63 @@ function createRunner(services) {
           const createdRes = yield teamCall(auth, "create_team", { periodId });
           ensureActive();
           const createdParsed = createdRes.ok ? parseJoinResponse(createdRes) : null;
-          if (!createdParsed || !createdParsed.httpOk || !createdParsed.bizOk) {
+          const alreadyCreated = Boolean(
+            createdParsed && !createdParsed.bizOk && isAlreadyCreatedError(createdRes.body)
+          );
+          const refreshed = yield getMyTeamInfo(auth, periodId);
+          ensureActive();
+          if (!refreshed.ok) {
+            const cached = yield readCreatedCache(periodId, uid);
+            if (cached) applyCreatedCache(cached);
+            setLastError("获取队伍信息失败", "myinfo_failed");
+            return;
+          }
+          myInfo = refreshed;
+          if (alreadyCreated && !myInfo.created) {
+            for (let retry = 0; retry < CREATED_REQUERY_MAX && !myInfo.created; retry += 1) {
+              yield services.sleep(CREATED_REQUERY_DELAY_MS);
+              ensureActive();
+              const again = yield getMyTeamInfo(auth, periodId);
+              if (again.ok) myInfo = again;
+            }
+          }
+          if (alreadyCreated && !myInfo.created) {
+            const raw = JSON.stringify(myInfo.raw) || "";
+            const list = (_a = myInfo.raw) == null ? void 0 : _a.my_create_team_list;
+            const first = Array.isArray(list) ? list[0] : void 0;
+            setLastError(
+              "酷狗提示本期已创建过队伍，但暂时查询不到队伍码，请稍后刷新；若持续出现请复制错误详情反馈",
+              "created_team_unreadable",
+              {
+                periodId,
+                uid,
+                createError: createdParsed && createdParsed.errorMsg || "",
+                myTeamInfoBody: truncateBody(raw),
+                parseProbe: [
+                  "rawType=" + typeof myInfo.raw,
+                  "list=" + (Array.isArray(list) ? "array" : typeof list),
+                  "first=" + typeof first,
+                  "code=" + (first && typeof first === "object" ? String((_b = first.team_code) != null ? _b : "") : "-")
+                ].join(",")
+              }
+            );
+            return;
+          } else if (!alreadyCreated && (!createdParsed || !createdParsed.httpOk || !createdParsed.bizOk) && !myInfo.created) {
             const detail = createdParsed && createdParsed.errorMsg || String(createdRes.error || "请求失败");
             setLastError(`自动创建队伍失败（${detail}），仍可加入其他队伍`, "create_team_failed", {
               periodId,
               detail
             });
           }
-          const refreshed = yield getMyTeamInfo(auth, periodId);
-          ensureActive();
-          if (!refreshed.ok) {
-            setLastError("获取队伍信息失败", "myinfo_failed");
-            return;
-          }
-          myInfo = refreshed;
         }
         applyTeamInfo(myInfo);
-        const snap = yield doSnapshot(auth, periodId, uid, myInfo);
+        const snap = yield doSnapshot(periodId, uid, myInfo);
         lastSnapshotAt = services.now();
         if (snapshotOnly || snap !== "ok") {
           if (snap === "ok") clearIfNoNewError();
           return;
         }
-        if (myInfo.joined) {
+        if (myInfo.joined || myInfo.created && myInfo.created.memberCount >= TARGET_MEMBERS) {
           clearIfNoNewError();
           return;
         }
@@ -1267,11 +1361,11 @@ function createRunner(services) {
             );
             return;
           }
-          const joinRes = yield poolJoin(auth, periodId, uid, Array.from(excludedCodes));
+          const joinRes = yield poolJoin(periodId, uid, Array.from(excludedCodes));
           ensureActive();
           if (!joinRes.ok) {
             if (joinRes.status === 401) {
-              yield updateDisabled(periodId + ":" + uid, true);
+              yield disablePoolAuth(periodId + ":" + uid);
               state.poolDisabled = true;
               services.publish();
               setLastError("身份校验失败，本期码池功能停用（下期自动恢复）", "pool_unauthorized", {
@@ -1323,12 +1417,7 @@ function createRunner(services) {
             const verify = yield getMyTeamInfo(auth, periodId);
             ensureActive();
             if (verify.ok) applyTeamInfo(verify);
-            yield doSnapshot(
-              auth,
-              periodId,
-              uid,
-              verify.ok ? verify : myInfo
-            );
+            yield doSnapshot(periodId, uid, verify.ok ? verify : myInfo);
             clearIfNoNewError();
             return;
           }
@@ -1354,26 +1443,20 @@ function createRunner(services) {
               类别: "network",
               说明: joinKugou.error || "请求失败"
             });
-            if ((yield reportLeaseResult(auth, periodId, uid, leaseId, "failed", "network")) === "abort")
+            if ((yield reportLeaseResult(periodId, uid, leaseId, "failed", "network")) === "abort")
               return;
             if (attempt < RETRY_MAX) yield services.sleep(RETRY_DELAY_MS);
             continue;
           }
           const parsed = parseJoinResponse(joinKugou);
           if (parsed.httpOk && parsed.bizOk) {
-            yield reportLeaseResult(auth, periodId, uid, leaseId, "success", "");
+            yield reportLeaseResult(periodId, uid, leaseId, "success", "");
             const verify = yield getMyTeamInfo(auth, periodId);
             ensureActive();
             if (verify.ok) applyTeamInfo(verify);
-            yield doSnapshot(
-              auth,
-              periodId,
-              uid,
-              verify.ok ? verify : myInfo,
-              {
-                confirm: true
-              }
-            );
+            yield doSnapshot(periodId, uid, verify.ok ? verify : myInfo, {
+              confirm: true
+            });
             clearIfNoNewError();
             return;
           }
@@ -1384,25 +1467,23 @@ function createRunner(services) {
             类别: failure.kind,
             HTTP状态: joinKugou.status
           }, failure.errorCode ? { 酷狗错误码: failure.errorCode } : {}), failure.errorMsg ? { 酷狗信息: failure.errorMsg } : {}));
-          if ((yield reportLeaseResult(auth, periodId, uid, leaseId, "failed", failure.kind)) === "abort")
+          if ((yield reportLeaseResult(periodId, uid, leaseId, "failed", failure.kind)) === "abort")
             return;
           if (failure.kind === "already_joined") {
             const verify = yield getMyTeamInfo(auth, periodId);
             ensureActive();
             if (verify.ok) applyTeamInfo(verify);
-            yield doSnapshot(
-              auth,
-              periodId,
-              uid,
-              verify.ok ? verify : myInfo
-            );
+            yield doSnapshot(periodId, uid, verify.ok ? verify : myInfo);
             if (failure.errorCode === 143005 && verify.ok && !verify.joined) {
               const message = "无法加入其他队伍，请到概念版APP手动加入或查看原因";
               setLastError(message, "device_already_bound", {
                 periodId,
                 uid,
                 code,
-                errorCode: failure.errorCode
+                errorCode: failure.errorCode,
+                // 携带原始 myinfo 响应：设备绑定来源（创建队/加入队）在查询侧不可见时，
+                // 复制错误详情即可拿到 join 列表真实字段结构，用于定位解析缺口
+                myTeamInfoBody: truncateBody(JSON.stringify(verify.raw) || "")
               });
               if (!deviceBoundToastShown) {
                 deviceBoundToastShown = true;
@@ -1433,7 +1514,6 @@ function createRunner(services) {
           message: services.loggedIn() ? "登录态同步中，请稍后重试" : "未登录 EchoMusic，请先登录"
         };
       }
-      ensureActive();
       try {
         const response = yield teamCall(auth, "join_team", { teamCode: code });
         const parsed = parseJoinResponse(response);
@@ -1491,12 +1571,15 @@ function createRunner(services) {
     poolEmptyBackoff.step = 0;
     poolEmptyBackoff.nextAttemptAt = 0;
     disabledPeriods.clear();
+    void loadDisabledPeriods();
     versionMismatchReported = false;
     deviceBoundToastShown = false;
     lastRunAt = 0;
     lastSnapshotAt = 0;
     lastFullAt = 0;
     lastInactiveProbeAt = 0;
+    runUid = "";
+    knownUid = "";
     state.periodId = "";
     state.periodName = "";
     state.periodStart = "";
@@ -1519,10 +1602,60 @@ function createRunner(services) {
   function loadDisabled() {
     return __async(this, null, function* () {
       yield loadDisabledPeriods();
+      try {
+        const [periodId, uid, created] = yield Promise.all([
+          services.readValue("lastPeriodId"),
+          services.readValue("lastUid"),
+          services.readValue("lastCreatedTeam")
+        ]);
+        if (typeof periodId === "string") knownPeriodId = periodId;
+        if (typeof uid === "string" && uid) knownUid = uid;
+        if (!knownUid && created && typeof created === "object") {
+          const createdUid = created.uid;
+          if (typeof createdUid === "string" && createdUid) knownUid = createdUid;
+        }
+      } catch (e) {
+      }
+    });
+  }
+  function applyKnownPoolDisable() {
+    const auth = services.auth();
+    const uid = auth ? String(auth.userid) : runUid || knownUid;
+    const periodId = state.periodId || knownPeriodId;
+    if (!uid || !periodId) return;
+    state.poolDisabled = disabledPeriods.has(periodId + ":" + uid);
+  }
+  function clearPoolDisable() {
+    return __async(this, null, function* () {
+      const auth = services.auth();
+      const uid = auth ? String(auth.userid) : runUid || knownUid;
+      const periodId = state.periodId || knownPeriodId;
+      if (!periodId) return { ok: false, message: "本期期次未知，请先刷新一次再重试" };
+      if (!uid) return { ok: false, message: "登录态未知，请先登录或播放一首歌曲后重试" };
+      const prefix = periodId + ":";
+      let removed = 0;
+      for (const key of Array.from(disabledPeriods)) {
+        if (key.startsWith(prefix)) {
+          disabledPeriods.delete(key);
+          removed += 1;
+        }
+      }
+      yield persistDisabledTable();
+      if (removed > 0) {
+        state.poolDisabled = false;
+        if (state.lastError && state.lastError.code === "pool_unauthorized") clearLastError();
+      }
+      services.publish();
+      return {
+        ok: true,
+        message: removed > 0 ? "已解除本期停用标记，正在重试" : "本期没有停用标记，正在重试"
+      };
     });
   }
   return {
     requestRun,
+    applyKnownPoolDisable,
+    clearPoolDisable,
     /** 等待当前串行链排空（排水用，不触发新流程） */
     idle() {
       return runChain != null ? runChain : Promise.resolve();
@@ -1561,7 +1694,10 @@ function encodeQuery(query) {
 function activate(ctx) {
   const state = createPanelState();
   let autoEnabled = false;
-  let panelOpen = false;
+  let pageOpen = false;
+  let dialogHandle = null;
+  let dialogActive = false;
+  let dialogOpening = false;
   let capturedAuth = null;
   let rawAuthHeader = "";
   let interceptorLease = null;
@@ -1597,7 +1733,7 @@ function activate(ctx) {
       return autoEnabled;
     },
     get panelOpen() {
-      return panelOpen;
+      return pageOpen || dialogActive;
     }
   });
   function gatewaySend(request) {
@@ -1681,7 +1817,7 @@ function activate(ctx) {
       poolDown: state.poolDown,
       poolRetryMinutes: Math.ceil(remaining / 6e4),
       autoEnabled,
-      panelOpen,
+      panelOpen: pageOpen || dialogActive,
       lastMessage: state.lastMessage,
       lastError: state.lastError ? {
         code: state.lastError.code,
@@ -1722,6 +1858,79 @@ function activate(ctx) {
       }
     });
   }
+  function syncAuthSnapshot() {
+    return __async(this, null, function* () {
+      try {
+        const snapshot = yield awaitOperation(ctx.kugou.authSnapshot());
+        const header = String((snapshot == null ? void 0 : snapshot.Authorization) || "");
+        if (header.indexOf("token=") >= 0 && header !== rawAuthHeader) {
+          rawAuthHeader = header;
+          capturedAuth = parseAuthHeader(header);
+          publishPanel();
+        }
+      } catch (error) {
+        console.warn(
+          "[auto-team-vip] authSnapshot unavailable, keeping passive capture: " + String((error == null ? void 0 : error.message) || error)
+        );
+      }
+    });
+  }
+  function openPanelDialog() {
+    return __async(this, null, function* () {
+      if (dialogActive || dialogOpening) return;
+      dialogOpening = true;
+      try {
+        const handle = yield awaitOperation(
+          ctx.ui.showDialog({
+            component: "qml/PanelDialog.qml",
+            width: 400,
+            title: "自动组队领VIP",
+            modal: true,
+            closeOnMask: true
+          })
+        );
+        if (disposed) {
+          handle.close();
+          return;
+        }
+        dialogHandle = handle;
+        dialogActive = true;
+        handle.closed.connect(() => {
+          dialogHandle = null;
+          dialogActive = false;
+          publishPanel();
+        });
+        runner.onPanelOpened();
+        void runner.requestRun("panel_open", { snapshotOnly: true });
+        publishPanel();
+      } catch (error) {
+        const code = error == null ? void 0 : error.code;
+        if (!disposed && code !== "Canceled") {
+          console.warn(
+            "[auto-team-vip] dialog unavailable, falling back to page: " + String((error == null ? void 0 : error.message) || error)
+          );
+          void ctx.toast.warning("弹窗打开失败，已改用页面面板");
+          try {
+            yield awaitOperation(ctx.ui.navigate("panel"));
+          } catch (e) {
+          }
+        }
+      } finally {
+        dialogOpening = false;
+      }
+    });
+  }
+  function disposeDialog() {
+    dialogOpening = false;
+    if (dialogHandle) {
+      const handle = dialogHandle;
+      dialogHandle = null;
+      dialogActive = false;
+      handle.close();
+    } else {
+      dialogActive = false;
+    }
+  }
   const settingsReady = (() => __async(null, null, function* () {
     try {
       const saved = yield awaitOperation(ctx.io.readValue("settings"));
@@ -1732,6 +1941,7 @@ function activate(ctx) {
       autoEnabled = false;
     }
     yield runner.loadDisabled();
+    runner.applyKnownPoolDisable();
     publishPanel();
   }))();
   function scheduleStartupRun(reason, delayMs) {
@@ -1743,14 +1953,23 @@ function activate(ctx) {
   ctx.sessionInvalidated.connect(() => {
     capturedAuth = null;
     rawAuthHeader = "";
+    dialogHandle = null;
+    dialogActive = false;
     interceptorLease = null;
     void runner.resetForAccountChange();
     void registerInterceptor();
+    void syncAuthSnapshot();
     scheduleStartupRun("login", LOGIN_RUN_DELAY_MS);
   });
+  ctx.kugou.accountChanged.connect(() => {
+    capturedAuth = null;
+    rawAuthHeader = "";
+    publishPanel();
+    void syncAuthSnapshot();
+  });
   ctx.registerCommand("panel.opened", (args) => {
-    panelOpen = (args == null ? void 0 : args.active) !== false;
-    if (panelOpen) {
+    pageOpen = (args == null ? void 0 : args.active) !== false;
+    if (pageOpen) {
       runner.onPanelOpened();
       void runner.requestRun("panel_open", { snapshotOnly: true });
     }
@@ -1779,6 +1998,7 @@ function activate(ctx) {
       yield awaitOperation(ctx.io.writeValue("settings", base));
     } catch (e) {
     }
+    runner.applyKnownPoolDisable();
     publishPanel();
     if (enabled) {
       void ctx.toast.info("已开启自动组队，正在执行~~~");
@@ -1789,12 +2009,20 @@ function activate(ctx) {
     }
     return { ok: true };
   }));
+  ctx.registerCommand("pool-retry", () => __async(null, null, function* () {
+    const result = yield runner.clearPoolDisable();
+    if (result.ok) void ctx.toast.info(result.message);
+    else void ctx.toast.warning(result.message);
+    if (result.ok) yield runner.requestRun("pool_retry", { force: true });
+    return result;
+  }));
   ctx.registerCommand("join-manual", (args) => __async(null, null, function* () {
     var _a;
     const code = String((_a = args == null ? void 0 : args.code) != null ? _a : "").trim();
     if (!code) return { ok: false, message: "请输入组队码" };
     const result = yield runner.manualJoin(code);
-    if (!result.ok) void ctx.toast.warning(result.message);
+    if (result.ok) void ctx.toast.success(result.message);
+    else void ctx.toast.warning(result.message);
     return result;
   }));
   ctx.registerCommand("copy-created", () => {
@@ -1834,7 +2062,7 @@ function activate(ctx) {
     defaultPlacement: "toolbar",
     order: 100,
     onClick: () => {
-      void awaitOperation(ctx.ui.navigate("panel"));
+      void openPanelDialog();
     }
   });
   ctx.setTimer("heartbeat", HEARTBEAT_TICK_MS, true, () => {
@@ -1843,15 +2071,17 @@ function activate(ctx) {
   });
   scheduleStartupRun("startup", AUTO_RUN_DELAY_MS);
   void registerInterceptor();
+  void syncAuthSnapshot();
   ctx.onDispose(() => {
     disposed = true;
+    disposeDialog();
     if (interceptorLease) {
       interceptorLease.dispose();
       interceptorLease = null;
     }
     for (const finish of Array.from(pendingSleeps)) finish();
     pendingSleeps.clear();
-    panelOpen = false;
+    pageOpen = false;
   });
 }
 function deactivate() {

@@ -3,7 +3,7 @@
 // 单地址下候选列表机制只是空转（2026-09-30 实测确认），不保留备选地址。
 
 import type { JsonValue } from 'echo:plugin-sdk';
-import type { TeamMember, TeamView } from './kugou.ts';
+import { bodyText, headerValue, truncateBody, type TeamMember, type TeamView } from './kugou.ts';
 
 export const POOL_URL = 'https://echo-team-pool.oneday.vip';
 export const POOL_RATE_LIMIT_BACKOFF_MS = 60_000; // 429 短退避：令牌桶持续 1r/s，很快恢复
@@ -64,23 +64,6 @@ export function poolHeaders(pluginVersion: string): Record<string, string> {
   };
 }
 
-function bodyText(data: unknown): string {
-  try {
-    const text = typeof data === 'string' ? data : JSON.stringify(data ?? '');
-    return text === undefined ? String(data ?? '') : text;
-  } catch {
-    return String(data ?? '');
-  }
-}
-
-function headerValue(headers: Record<string, string>, name: string): string {
-  const target = name.toLowerCase();
-  for (const key of Object.keys(headers || {})) {
-    if (key.toLowerCase() === target) return String(headers[key] ?? '');
-  }
-  return '';
-}
-
 // Cloudflare 质询页识别：Electron/Qt 网络栈没有可执行 JS 的浏览器环境，质询永远过不了；
 // 与其在退避阶梯里空转，不如直接识别出来告知站点侧去配 WAF 跳过规则。
 export function isCfChallenge(response: PoolResponse): boolean {
@@ -113,8 +96,8 @@ export function isCfEdgeError(response: PoolResponse): boolean {
 // 质询诊断：优先取响应头 cf-ray / cf-mitigated；头缺失时回退解析 HTML 页脚。
 // 有了 Ray ID，用户可在 Security → Events 精确查到是哪个产品拦的。
 export function cfChallengeTrace(response: PoolResponse): { cfRay: string; cfMitigated: string } {
-  let ray = headerValue(response.headers || {}, 'cf-ray');
-  const mitigated = headerValue(response.headers || {}, 'cf-mitigated');
+  let ray = headerValue(response.headers, 'cf-ray');
+  const mitigated = headerValue(response.headers, 'cf-mitigated');
   if (!ray) {
     const match = /Ray ID:\s*([0-9a-f]{8,})|"?ray_id"?\s*:\s*"([0-9a-f]{8,})"/i.exec(
       bodyText(response.data),
@@ -128,23 +111,13 @@ export function cfChallengeTrace(response: PoolResponse): { cfRay: string; cfMit
 // 关键场景是 Cloudflare 安全挑战——body 是 HTML 而非 JSON；
 // Ray ID 置于 body 之前：body 会被截断，而 Ray ID 在质询页页脚，截断后必丢。
 export function buildPoolDiag(path: string, response: PoolResponse): { [key: string]: JsonValue } {
-  const data = response.data;
-  let text = '';
-  if (data !== undefined && data !== null) {
-    try {
-      const serialized = typeof data === 'string' ? data : JSON.stringify(data);
-      text = serialized === undefined ? String(data) : serialized;
-    } catch {
-      text = String(data);
-    }
-  }
   return {
     endpoint: POOL_URL + path,
     httpStatus: Number(response.status) || 0,
     poolError: String(response.error || ''),
     cfRay: String(response.cfRay || ''),
     cfMitigated: String(response.cfMitigated || ''),
-    body: text.length > 1200 ? text.slice(0, 1200) + '…(已截断)' : text,
+    body: truncateBody(bodyText(response.data)),
   };
 }
 
