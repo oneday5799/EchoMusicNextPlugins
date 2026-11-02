@@ -33,6 +33,7 @@
     },
     {
       "id": "apple-music-style",
+      "repo": "https://github.com/oneday5799/EchoMusicNextPlugins",
       "path": "plugins/apple-music-style",
       "artifact": "artifacts/apple-music-style-1.0.0.echomod",
       "sha256": "f7f77467f1b2e5581b03fff404642beaa2ad57b30092e8f3aba63ec1150a4b99"
