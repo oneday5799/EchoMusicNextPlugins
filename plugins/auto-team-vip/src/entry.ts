@@ -13,7 +13,6 @@
 
 import { awaitOperation, type EchoPluginContext, type EchoPluginDialog } from 'echo:plugin-sdk';
 import {
-  buildTeamRequest,
   parseAuthHeader,
   type GatewayRequest,
   type GatewayResponse,
@@ -31,7 +30,7 @@ import {
 } from './runner.ts';
 
 // 与 manifest.version 同步（宿主上下文不暴露 manifest）；码池 MIN_CLIENT_VERSION 门禁要求 ≥1.2.0
-const PLUGIN_VERSION = '1.2.6';
+const PLUGIN_VERSION = '1.2.7';
 const AUTO_RUN_DELAY_MS = 3000;
 const LOGIN_RUN_DELAY_MS = 2000;
 const GATEWAY_TIMEOUT_MS = 15_000;
@@ -87,6 +86,12 @@ export function activate(ctx: EchoPluginContext) {
         if (!registration) finish();
       }),
     readValue: (key) => awaitOperation(ctx.io.readValue(key)).catch(() => undefined),
+    // RSA 冷计算分片用：0ms 一次性计时器让出完整事件循环回合（渲染帧得以推进）
+    yieldUi: () =>
+      new Promise<void>((resolve) => {
+        const registration = ctx.setTimer('rsa-yield', 0, false, resolve);
+        if (!registration) resolve();
+      }),
     writeValue: (key, value) =>
       awaitOperation(ctx.io.writeValue(key, value as never))
         .then(() => undefined)
@@ -451,12 +456,12 @@ export function activate(ctx: EchoPluginContext) {
     return result;
   });
 
-  // 复制队伍码由插件侧承接：空码时与旧插件一致给出提示（QML 侧无法弹 toast）；
+  // 复制队伍码由插件侧承接：空码时给出提示（QML 侧无法弹 toast）；
   // 返回码字符串由 QML 写入剪贴板，空串表示无可复制内容
   ctx.registerCommand('copy-created', () => {
     const code = state.myCode;
     if (!code) {
-      void ctx.toast.warning('暂无组队码，请先运行互助');
+      void ctx.toast.warning('暂无组队码，请稍后刷新');
       return '';
     }
     return code;
@@ -465,7 +470,7 @@ export function activate(ctx: EchoPluginContext) {
   ctx.registerCommand('copy-joined', () => {
     const code = state.joinedCode;
     if (!code) {
-      void ctx.toast.warning('暂无组队码，请先运行互助');
+      void ctx.toast.warning('暂无组队码，请稍后刷新');
       return '';
     }
     return code;

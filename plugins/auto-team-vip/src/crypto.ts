@@ -287,19 +287,72 @@ function toLittleEndianHex(word: number): string {
 
 // ---------- 对外接口 ----------
 
-function rsaNoPadEncryptHex(message: number[]): string {
+function rsaPaddedBlock(message: number[]): number[] {
   const padded: number[] = new Array(RSA_BLOCK_BYTES).fill(0);
   const used = Math.min(message.length, RSA_BLOCK_BYTES);
   for (let i = 0; i < used; i += 1) padded[i] = message[i];
-  const result = limbsExpMod(limbsFromBytes(padded), LITE_EXPONENT, LITE_MODULUS);
+  return padded;
+}
+
+function rsaResultHex(result: number[]): string {
   const bytes = limbsToBytes(result, RSA_BLOCK_BYTES);
   let hex = '';
   for (const byte of bytes) hex += byteHex(byte);
   return hex.toUpperCase();
 }
 
+function rsaNoPadEncryptHex(message: number[]): string {
+  return rsaResultHex(
+    limbsExpMod(limbsFromBytes(rsaPaddedBlock(message)), LITE_EXPONENT, LITE_MODULUS),
+  );
+}
+
+// h5Token 结果只由 realToken 决定（前缀固定、模幂确定性）。网关每个请求都要带 token 参数，
+// 而 V4 引擎跑在 UI 线程：不缓存时每次心跳的 3~4 个网关请求各做一次 RSA 模幂（百万级数组
+// 运算、数十毫秒），开关动画与滚动会被周期性冻结。登录会话内 token 稳定，按 token 缓存。
+const H5_TOKEN_CACHE = new Map<string, string>();
+const H5_TOKEN_CACHE_LIMIT = 8;
+
+function cacheH5Token(realToken: string, value: string): void {
+  if (H5_TOKEN_CACHE.size >= H5_TOKEN_CACHE_LIMIT) {
+    const oldest = H5_TOKEN_CACHE.keys().next();
+    if (!oldest.done) H5_TOKEN_CACHE.delete(oldest.value);
+  }
+  H5_TOKEN_CACHE.set(realToken, value);
+}
+
 export function h5Token(realToken: string): string {
-  return 'h5' + rsaNoPadEncryptHex(utf8Bytes(H5_TOKEN_PREFIX + realToken));
+  const cached = H5_TOKEN_CACHE.get(realToken);
+  if (cached !== undefined) return cached;
+  const value = 'h5' + rsaNoPadEncryptHex(utf8Bytes(H5_TOKEN_PREFIX + realToken));
+  cacheH5Token(realToken, value);
+  return value;
+}
+
+// 冷计算的让步式变体：每个模幂（数毫秒级）让出一个事件循环回合，单回合不超过一帧预算，
+// 首次请求的 RSA 不再一次性冻结 UI 数帧；结果与 h5Token 逐位一致并共用缓存。
+export async function h5TokenAsync(
+  realToken: string,
+  yieldStep: () => Promise<void>,
+): Promise<string> {
+  const cached = H5_TOKEN_CACHE.get(realToken);
+  if (cached !== undefined) return cached;
+  const message = utf8Bytes(H5_TOKEN_PREFIX + realToken);
+  const base = limbsFromBytes(rsaPaddedBlock(message));
+  const bits: number[] = [];
+  for (let value = LITE_EXPONENT; value > 0; value = Math.floor(value / 2)) bits.push(value % 2);
+  let result = limbsFromBytes([1]);
+  for (let i = bits.length - 1; i >= 0; i -= 1) {
+    result = limbsMulMod(result, result, LITE_MODULUS);
+    await yieldStep();
+    if (bits[i]) {
+      result = limbsMulMod(result, base, LITE_MODULUS);
+      await yieldStep();
+    }
+  }
+  const value = 'h5' + rsaResultHex(result);
+  cacheH5Token(realToken, value);
+  return value;
 }
 
 function sortedParamsString(params: Record<string, string | number>): string {

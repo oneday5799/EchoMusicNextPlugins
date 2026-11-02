@@ -114,7 +114,7 @@ ColumnLayout {
                 Layout.fillWidth: true
                 visible: !(bodyRoot.s && bodyRoot.s.myCode)
                 text: bodyRoot.s && bodyRoot.s.periodActive
-                      ? "开启自动组队后自动创建，或手动加入他人队伍"
+                      ? "将自动加入可用的队伍；无队可加时会自动建队并分享组队码"
                       : "等待本期活动开启"
                 font: Theme.font(12, Theme.regularWeight)
                 color: Theme.secondaryText
@@ -235,8 +235,8 @@ ColumnLayout {
                 Label {
                     Layout.fillWidth: true
                     text: bodyRoot.s && bodyRoot.s.autoEnabled
-                          ? "已开启：自动建队、上报快照并申请组队码"
-                          : "已关闭：仅查询状态，不与码池服务器通信"
+                          ? "已开启：优先加入他人队伍，无队可加时自动建队入池"
+                          : "已关闭：自动建队并展示队伍码，不与码池服务器通信"
                     font: Theme.font(11, Theme.regularWeight)
                     color: Theme.secondaryText
                     wrapMode: Text.Wrap

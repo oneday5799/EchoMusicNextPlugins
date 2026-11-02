@@ -3,7 +3,7 @@
   "schemaVersion": 1,
   "id": "auto-team-vip",
   "name": "自动组队领VIP",
-  "version": "1.2.6",
+  "version": "1.2.7",
   "description": "自动参加酷狗概念版官方活动「组队瓜分畅听VIP」并组队；默认关闭自动组队，入口在标题栏★。",
   "author": "Oneday5799",
   "license": "MIT",

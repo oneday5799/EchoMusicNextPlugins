@@ -98,6 +98,9 @@ export function buildTeamRequest(
   auth: KugouAuth,
   endpoint: TeamEndpoint,
   args: { periodId?: string; teamCode?: string },
+  // 调用方用 h5TokenAsync 预计算并传入，让冷启动 RSA 不阻塞 UI 线程；
+  // 缺省走同步缓存版（测试与旧调用路径）
+  h5token?: string,
 ): GatewayRequest {
   const params: Record<string, string | number> = {
     srcappid: SRCAPPID,
@@ -108,7 +111,7 @@ export function buildTeamRequest(
     dfid: auth.dfid || '-',
     appid: APPID,
     userid: Number(auth.userid) || 0,
-    token: h5Token(auth.token),
+    token: h5token ?? h5Token(auth.token),
   };
   let method = 'GET';
   let body: string | null = null;

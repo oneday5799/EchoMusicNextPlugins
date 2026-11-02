@@ -4,6 +4,7 @@
 // 依赖全部注入，便于隔离测试真实协议行为。
 
 import type { JsonValue } from 'echo:plugin-sdk';
+import { h5TokenAsync } from './crypto.ts';
 import {
   classifyJoinError,
   classifyPeriodFailure,
@@ -31,6 +32,7 @@ import {
   poolRateLimited,
   poolUp,
   POOL_ROOT_CAUSE_CODES,
+  POOL_TRANSPORT_BACKOFF_MS,
   toPoolTeamState,
   type PoolResponse,
 } from './pool.ts';
@@ -39,8 +41,8 @@ export const RETRY_MAX = 3; // 当轮 join 重试上限（含首次）
 const RETRY_DELAY_MS = 2000;
 // 建队被拒后重查自己的队伍码：酷狗 myinfo 连续快查返回不一致（实测 ①空→②全量），
 // 读不到码先短间隔重试再放弃，不把瞬时读空当终态
-const CREATED_REQUERY_MAX = 2;
-const CREATED_REQUERY_DELAY_MS = 1500;
+const CREATED_REQUERY_MAX = 4;
+const CREATED_REQUERY_DELAY_MS = 2000;
 const POOL_RETRY_DELAY_MS = 500; // 瞬时故障（网络/5xx）的一次补射间隔
 export const MIN_RUN_INTERVAL_MS = 10_000; // 触发合并窗口
 export const REFRESH_THROTTLE_MS = 3000;
@@ -97,7 +99,7 @@ export function createPanelState(): PanelState {
     myCode: '',
     myMemberCount: 0,
     myVipDesc: '',
-    targetMembers: 3,
+    targetMembers: TARGET_MEMBERS,
     joined: false,
     joinedCode: '',
     joinedMemberCount: 0,
@@ -122,6 +124,8 @@ export interface RunnerServices {
   /** 宿主账号会话状态：与 auth() 分开——已登录但拦截器尚未捕获鉴权头时用于区分提示 */
   loggedIn(): boolean;
   gatewaySend(request: GatewayRequest): Promise<GatewayResponse>;
+  /** 让出一个事件循环回合（宏任务），供 RSA 冷计算分片；缺省/测试桩可省略（不让步） */
+  yieldUi?(): Promise<void>;
   verifyCaptcha(eventId: string): Promise<boolean>;
   poolSend(path: string, payload: unknown): Promise<PoolResponse>;
   publish(): void;
@@ -165,6 +169,17 @@ export function createRunner(services: RunnerServices) {
   const poolBackoff = createBackoff();
   const poolEmptyBackoff = createBackoff();
   const disabledPeriods = new Set<string>();
+  // 设备级建队标记（键=期次 id）：酷狗以"当前设备已经创建过队伍~~"拒绝建队后落盘。
+  // 2026-11-03 用户实测：从未组过队的账号也可能被同样拒（资格问题而非真已建队），
+  // 但两种情况下期内继续 create 都只会得到同样的拒绝（组队无法解散，期内不可逆），
+  // 标记用于免做拒建后的重查循环；账号切换不清除（设备维度），随期次切换裁剪。
+  const deviceCreatedPeriods = new Set<string>();
+  // 设备级"本期加入被拒"标记（仅内存）：未满员队长租码加入被 143005 拒绝且 myinfo
+  // 可见创建队时落下——该设备本期的酷狗加入通道不可用，退回等待队员的终态，避免
+  // 逐轮浪费租约。酷狗对"创建队能否同时加入他人"行为不明确，默认允许队长租码
+  // （2026-11-03 的 143005 样本更可能是"账号从未组过队"的资格问题），被真实拒绝的
+  // 设备据此自适应退回；重启后重新学习，每期至多浪费一个租约。随期次切换裁剪。
+  const joinBlockedPeriods = new Set<string>();
 
   let errorSeq = 0;
   let lastRunAt = 0;
@@ -310,7 +325,10 @@ export function createRunner(services: RunnerServices) {
     args: { periodId?: string; teamCode?: string } = {},
   ): Promise<GatewayResponse> {
     const send = async (): Promise<GatewayResponse> => {
-      const request = buildTeamRequest(auth, endpoint, args);
+      // token 参数经 h5TokenAsync 预计算：命中缓存是纯查表；冷计算按模幂分片让步，
+      // 避免开启开关/心跳瞬间的一次 RSA 模幂在 UI 线程冻结动画数帧
+      const h5token = await h5TokenAsync(auth.token, services.yieldUi ?? (() => Promise.resolve()));
+      const request = buildTeamRequest(auth, endpoint, args, h5token);
       return normalizeGateway(await services.gatewaySend(request));
     };
     ensureActive();
@@ -400,6 +418,123 @@ export function createRunner(services: RunnerServices) {
     return { ok: true as const, ...normalizeTeamInfo(plain) };
   }
 
+  // 建队共用路径（自动/手动两种模式都走，仅经酷狗网关、与码池无关）：无自己创建的
+  // 队伍 → 创建 → 重查；酷狗对重复建队的拒绝（实测文案"你已经创建过队伍啦~"）视为
+  // 队伍已存在，转入取回已有队伍。stop=true 表示已设置终态错误（酷狗确认已建队但
+  // 查询读不到码 / 重查失败），调用方应直接结束本轮；建队失败不 stop，仅提示。
+  async function ensureTeamCreated(
+    auth: KugouAuth,
+    periodId: string,
+    uid: string,
+    current: { ok: true } & TeamInfo,
+    failureHint: string,
+  ): Promise<{ myInfo: { ok: true } & TeamInfo; stop: boolean }> {
+    if (current.created) return { myInfo: current, stop: false };
+    if (current.joined) {
+      // 设备已绑定加入的队伍（143005 设备级单队约束）：建队必然被拒，直接沿用当前
+      // 状态——自动模式继续走快照/终态判定，手动模式仅展示
+      return { myInfo: current, stop: false };
+    }
+    if (deviceCreatedPeriods.has(periodId)) {
+      // 本期已确认设备建过队（或被以同文案拒建）：直接重查一次取队伍码，不做拒建后的
+      // 重查循环——同步以分钟计，轮询无意义。组队无法解散（官方APP亦无解散入口），
+      // "已建队却查不到码"只可能是查询侧滞后或从未组队账号的资格性拒建，两者都无法
+      // 通过再次 create 解决；给轻提示等待下轮流程（不算终态故障）。
+      const again = await getMyTeamInfo(auth, periodId);
+      ensureActive();
+      if (!again.ok) {
+        setLastError('获取队伍信息失败', 'myinfo_failed');
+        return { myInfo: current, stop: true };
+      }
+      if (!again.created) {
+        setLastError(
+          '设备本期已建队，酷狗暂未返回队伍码。若本账号从未组过队，在概念版APP中打开一次组队页面（会自动建队）即可恢复；稍后也会自动重试',
+          'created_code_pending',
+          {
+            periodId,
+            uid,
+          },
+        );
+        return { myInfo: again, stop: true };
+      }
+      return { myInfo: again, stop: false };
+    }
+    const createdRes = await teamCall(auth, 'create_team', { periodId });
+    ensureActive();
+    const createdParsed = createdRes.ok ? parseJoinResponse(createdRes) : null;
+    const alreadyCreated = Boolean(
+      createdParsed && !createdParsed.bizOk && isAlreadyCreatedError(createdRes.body),
+    );
+    if (alreadyCreated) {
+      // 设备已被本期队伍绑定（不可逆）：落持久标记，后续流程不再尝试 create
+      deviceCreatedPeriods.add(periodId);
+      void persistDeviceCreatedPeriods();
+    }
+    const refreshed = await getMyTeamInfo(auth, periodId);
+    ensureActive();
+    if (!refreshed.ok) {
+      const cached = await readCreatedCache(periodId, uid);
+      if (cached) applyCreatedCache(cached);
+      setLastError('获取队伍信息失败', 'myinfo_failed');
+      return { myInfo: current, stop: true };
+    }
+    let myInfo: { ok: true } & TeamInfo = refreshed;
+    if (alreadyCreated && !myInfo.created) {
+      // 建队被拒＝真已建队或从未组队账号的资格性拒建（2026-11-03 用户实测），两种情况
+      // 期内都无法靠再次 create 推进；重查读不到码按查询侧数据未同步处理，短间隔重试后再放弃
+      for (let retry = 0; retry < CREATED_REQUERY_MAX && !myInfo.created; retry += 1) {
+        await services.sleep(CREATED_REQUERY_DELAY_MS);
+        ensureActive();
+        const again = await getMyTeamInfo(auth, periodId);
+        if (again.ok) myInfo = again;
+      }
+    }
+    if (alreadyCreated && !myInfo.created) {
+      // 酷狗确认已建队但查询读不到队伍码：如实提示并携带双方原始响应与解析探针，
+      // 复制错误详情即可定位取数缺口（不虚构成功也不误报建队失败）。终止本轮：
+      // 若队伍真实存在，本期状态以酷狗侧为准，等下轮直查；若是资格性拒建，
+      // 需用户先在概念版APP手动组队一次，插件侧无能为力。
+      const raw = JSON.stringify(myInfo.raw) || '';
+      const list = (myInfo.raw as { my_create_team_list?: unknown } | undefined)
+        ?.my_create_team_list;
+      const first = Array.isArray(list) ? (list as unknown[])[0] : undefined;
+      setLastError(
+        '酷狗提示本期已创建过队伍，但暂时查询不到队伍码。若本账号从未组过队，在概念版APP中打开一次组队页面（会自动建队）即可恢复；若持续出现请复制错误详情反馈',
+        'created_team_unreadable',
+        {
+          periodId,
+          uid,
+          createError: (createdParsed && createdParsed.errorMsg) || '',
+          myTeamInfoBody: truncateBody(raw),
+          parseProbe: [
+            'rawType=' + typeof myInfo.raw,
+            'list=' + (Array.isArray(list) ? 'array' : typeof list),
+            'first=' + typeof first,
+            'code=' +
+              (first && typeof first === 'object'
+                ? String((first as Record<string, unknown>).team_code ?? '')
+                : '-'),
+          ].join(','),
+        },
+      );
+      return { myInfo, stop: true };
+    } else if (
+      !alreadyCreated &&
+      (!createdParsed || !createdParsed.httpOk || !createdParsed.bizOk) &&
+      !myInfo.created
+    ) {
+      // 建队失败不阻断本轮后续（自动模式仍可经码池加入他人；手动模式可手动输入组队码），
+      // 但给出可见提示
+      const detail =
+        (createdParsed && createdParsed.errorMsg) || String(createdRes.error || '请求失败');
+      setLastError(`自动创建队伍失败（${detail}），${failureHint}`, 'create_team_failed', {
+        periodId,
+        detail,
+      });
+    }
+    return { myInfo, stop: false };
+  }
+
   // ---------- 码池侧 ----------
 
   // 旧插件在每次打开面板时重置版本不匹配提示（用户重新看到"请更新"）。
@@ -437,6 +572,29 @@ export function createRunner(services: RunnerServices) {
       const map = await services.readValue('poolAuthDisabled');
       if (map && typeof map === 'object') {
         for (const key of Object.keys(map as Record<string, unknown>)) disabledPeriods.add(key);
+      }
+    } catch {
+      // 内存集合从空开始
+    }
+  }
+
+  async function persistDeviceCreatedPeriods(): Promise<void> {
+    try {
+      const map: Record<string, boolean> = {};
+      for (const entry of deviceCreatedPeriods) map[entry] = true;
+      await services.writeValue('deviceCreatedPeriods', map);
+    } catch {
+      // 存储失败不影响内存判定
+    }
+  }
+
+  async function loadDeviceCreatedPeriods(): Promise<void> {
+    try {
+      const map = await services.readValue('deviceCreatedPeriods');
+      if (map && typeof map === 'object') {
+        for (const key of Object.keys(map as Record<string, unknown>)) {
+          if ((map as Record<string, unknown>)[key] === true) deviceCreatedPeriods.add(key);
+        }
       }
     } catch {
       // 内存集合从空开始
@@ -561,7 +719,7 @@ export function createRunner(services: RunnerServices) {
       setLastError(MSG_POOL_NETWORK, 'pool_net_error', {
         periodId,
         uid,
-        transportRetryAfter: 60,
+        transportRetryAfter: POOL_TRANSPORT_BACKOFF_MS / 1000,
         ...buildPoolDiag('/v2/snapshot', response),
       });
       return 'down';
@@ -725,8 +883,6 @@ export function createRunner(services: RunnerServices) {
         knownUid = uid;
         // 账号 id 落盘：重启/重装后 applyKnownPoolDisable 在鉴权头捕获前也有 uid 可用
         void services.writeValue('lastUid', uid);
-      } else {
-        runUid = uid;
       }
 
       // ① GUARD：期次信息；非进行中直接终止（不建队、不请求码池）
@@ -745,8 +901,7 @@ export function createRunner(services: RunnerServices) {
       const lastPeriodId = await services.readValue('lastPeriodId');
       if (typeof lastPeriodId === 'string' && lastPeriodId && lastPeriodId !== periodId) {
         // 期次切换：清空本地缓存的码与 joined 状态（token 为账号级，由新期次 DO 重签覆盖）
-        poolEmptyBackoff.step = 0;
-        poolEmptyBackoff.nextAttemptAt = 0;
+        poolUp(poolEmptyBackoff); // 新期次重新开始，不继承上一期的池空退避
         state.myCode = '';
         state.myMemberCount = 0;
         state.joinedCode = '';
@@ -760,6 +915,16 @@ export function createRunner(services: RunnerServices) {
         disabledPeriods.clear();
         for (const key of kept) disabledPeriods.add(key);
         await persistDisabledTable();
+        // 设备建队标记同样按期次裁剪：新期次从空开始（设备绑定随期次重置）
+        const keptCreated = new Set<string>();
+        for (const key of deviceCreatedPeriods) {
+          if (key === periodId) keptCreated.add(key);
+        }
+        deviceCreatedPeriods.clear();
+        for (const key of keptCreated) deviceCreatedPeriods.add(key);
+        void persistDeviceCreatedPeriods();
+        // 加入被拒标记按期次裁剪（仅内存）
+        joinBlockedPeriods.clear();
       }
       await services.writeValue('lastPeriodId', periodId);
       state.periodId = periodId;
@@ -790,87 +955,29 @@ export function createRunner(services: RunnerServices) {
       }
 
       if (!autoOn) {
-        // 手动模式：只读酷狗，不自动建队、不上报快照、不申请组队码。
+        // 手动模式：同样自动建队并展示队伍码（可复制分享，或手动输入他人组队码加入），
+        // 但与码池服务器零交流——不上报快照、不申请组队码、不做自动分配。
         // 记录刷新时间，避免心跳把面板刷新压成每 60s 一次（按 SNAPSHOT_INTERVAL_MS 节流）。
+        const ensured = await ensureTeamCreated(
+          auth,
+          periodId,
+          uid,
+          myInfo,
+          '可稍后重试，或手动输入组队码加入他人队伍',
+        );
+        if (ensured.stop) return;
+        myInfo = ensured.myInfo;
         lastSnapshotAt = services.now();
         applyTeamInfo(myInfo as TeamInfo);
         clearIfNoNewError();
         return;
       }
 
-      // 自动模式：无自己创建的队伍 → 创建 → 重查
-      if (!myInfo.created) {
-        const createdRes = await teamCall(auth, 'create_team', { periodId });
-        ensureActive();
-        const createdParsed = createdRes.ok ? parseJoinResponse(createdRes) : null;
-        // 酷狗对重复建队的拒绝（实测文案“你已经创建过队伍啦~”）：队伍已存在＝目标已达成，
-        // 转入取回已有队伍，不按建队失败处理。
-        const alreadyCreated = Boolean(
-          createdParsed && !createdParsed.bizOk && isAlreadyCreatedError(createdRes.body),
-        );
-        const refreshed = await getMyTeamInfo(auth, periodId);
-        ensureActive();
-        if (!refreshed.ok) {
-          const cached = await readCreatedCache(periodId, uid);
-          if (cached) applyCreatedCache(cached);
-          setLastError('获取队伍信息失败', 'myinfo_failed');
-          return;
-        }
-        myInfo = refreshed;
-        if (alreadyCreated && !myInfo.created) {
-          // 建队被拒＝队伍确定存在；重查读不到码按查询侧数据未同步处理，短间隔重试后再放弃
-          for (let retry = 0; retry < CREATED_REQUERY_MAX && !myInfo.created; retry += 1) {
-            await services.sleep(CREATED_REQUERY_DELAY_MS);
-            ensureActive();
-            const again = await getMyTeamInfo(auth, periodId);
-            if (again.ok) myInfo = again;
-          }
-        }
-        if (alreadyCreated && !myInfo.created) {
-          // 酷狗确认已建队但查询读不到队伍码：如实提示并携带双方原始响应与解析探针，
-          // 复制错误详情即可定位取数缺口（不虚构成功也不误报建队失败）。
-          // 设备已绑定自己创建的队伍，继续申请他人队伍码必然 143005，直接终止本轮。
-          const raw = JSON.stringify(myInfo.raw) || '';
-          const list = (myInfo.raw as { my_create_team_list?: unknown } | undefined)
-            ?.my_create_team_list;
-          const first = Array.isArray(list) ? (list as unknown[])[0] : undefined;
-          setLastError(
-            '酷狗提示本期已创建过队伍，但暂时查询不到队伍码，请稍后刷新；若持续出现请复制错误详情反馈',
-            'created_team_unreadable',
-            {
-              periodId,
-              uid,
-              createError: (createdParsed && createdParsed.errorMsg) || '',
-              myTeamInfoBody: truncateBody(raw),
-              parseProbe: [
-                'rawType=' + typeof myInfo.raw,
-                'list=' + (Array.isArray(list) ? 'array' : typeof list),
-                'first=' + typeof first,
-                'code=' +
-                  (first && typeof first === 'object'
-                    ? String((first as Record<string, unknown>).team_code ?? '')
-                    : '-'),
-              ].join(','),
-            },
-          );
-          return;
-        } else if (
-          !alreadyCreated &&
-          (!createdParsed || !createdParsed.httpOk || !createdParsed.bizOk) &&
-          !myInfo.created
-        ) {
-          // 建队失败不阻断分配流程（仍可以队员身份加入他人队伍），但给出可见提示
-          const detail =
-            (createdParsed && createdParsed.errorMsg) || String(createdRes.error || '请求失败');
-          setLastError(`自动创建队伍失败（${detail}），仍可加入其他队伍`, 'create_team_failed', {
-            periodId,
-            detail,
-          });
-        }
-      }
+      // 自动模式 joiner-first：无队伍的设备先租码加入他人（快满优先把队填满），
+      // 仅当码池无队可发（pool_empty）时才转建队入池。角色由池内供需自发分配，
+      // 避免旧版预建队造成的"开局人人 1/3 队、互等人加入"的低效开局。
       applyTeamInfo(myInfo as TeamInfo);
-
-      // ③ SNAPSHOT：两维度真实状态整体上报
+      // ③ SNAPSHOT：两维度真实状态整体上报（此时建队码若已存在也已入池）
       const snap = await doSnapshot(periodId, uid, myInfo as TeamInfo);
       lastSnapshotAt = services.now();
       if (snapshotOnly || snap !== 'ok') {
@@ -879,10 +986,21 @@ export function createRunner(services: RunnerServices) {
         return;
       }
 
-      // ④ DECIDE：已在完整队伍中即终态（酷狗不支持退队），本轮结束进入心跳模式。
-      // 实测（143005"每台设备只能加入一个队伍"）：满员的创建队占用设备，队长不能再加入他人，
-      // 等待队员经码池加入即可；未满员的创建队沿用"建队后仍可申请加入他人"的原有流程。
-      if (myInfo.joined || (myInfo.created && myInfo.created.memberCount >= TARGET_MEMBERS)) {
+      // ④ DECIDE：已加入他人队伍、创建队已满员、或本期加入已被 143005 拒绝
+      // （joinBlockedPeriods）即终态，本轮结束进入心跳模式。
+      // 2026-11-03 用户更正：此前"创建队 1/3 占用设备"的判断依据（队长 join 被 143005
+      // 拒）实为"账号从未组过队"的资格问题（需先在概念版APP手动组队一次），并非设备
+      // 绑定。故未满员的创建队队长默认仍可租码加入他人；某设备若真实被拒，由下方
+      // already_joined 分支落 joinBlockedPeriods 自适应退回等待态。
+      if (myInfo.joined) {
+        clearIfNoNewError();
+        return;
+      }
+      if (myInfo.created && myInfo.created.memberCount >= TARGET_MEMBERS) {
+        clearIfNoNewError();
+        return;
+      }
+      if (joinBlockedPeriods.has(periodId)) {
         clearIfNoNewError();
         return;
       }
@@ -931,7 +1049,7 @@ export function createRunner(services: RunnerServices) {
                 periodId,
                 uid,
                 stage: 'join',
-                transportRetryAfter: 60,
+                transportRetryAfter: POOL_TRANSPORT_BACKOFF_MS / 1000,
                 ...buildPoolDiag('/v2/join', joinRes),
               });
               return;
@@ -976,8 +1094,26 @@ export function createRunner(services: RunnerServices) {
           return;
         }
         if (data.reason === 'pool_empty' || !data.code) {
+          // 池内没有可加入的队伍：无队设备转入建队（队长角色），新码经随后的快照供入
+          // 码池由其他设备租用；已有创建队的设备仅补快照等待队员。两种情况都武装空池
+          // 退避，避免每 10min 空转；建队失败如实报错，下轮心跳池仍空时再试。
           poolEmptyBackoffStart(poolEmptyBackoff, services.now());
-          setLastError('暂无可加入的队伍，可手动组队或耐心等待', 'pool_empty', { periodId, uid });
+          const ensured = await ensureTeamCreated(
+            auth,
+            periodId,
+            uid,
+            myInfo,
+            '稍后自动重试，或手动输入组队码加入他人队伍',
+          );
+          if (ensured.stop) return;
+          myInfo = ensured.myInfo;
+          applyTeamInfo(myInfo as TeamInfo);
+          if (myInfo.created) {
+            // 新建队伍码立即入池：补一次快照注册（confirm 仅用于成队确认，此处普通快照）
+            await doSnapshot(periodId, uid, myInfo as TeamInfo);
+            lastSnapshotAt = services.now();
+            clearIfNoNewError();
+          }
           return;
         }
 
@@ -989,8 +1125,7 @@ export function createRunner(services: RunnerServices) {
 
         const leaseId = String(data.lease_id);
         const code = String(data.code);
-        poolEmptyBackoff.step = 0; // 领到码 = 池子已恢复
-        poolEmptyBackoff.nextAttemptAt = 0;
+        poolUp(poolEmptyBackoff); // 领到码 = 池子已恢复，清空池空退避
         const joinKugou = await teamCall(auth, 'join_team', { teamCode: code });
         ensureActive();
         if (!joinKugou.ok) {
@@ -1036,10 +1171,34 @@ export function createRunner(services: RunnerServices) {
           ensureActive();
           if (verify.ok) applyTeamInfo(verify as TeamInfo);
           await doSnapshot(periodId, uid, verify.ok ? (verify as TeamInfo) : (myInfo as TeamInfo));
-          // 143005 是设备级约束（设备已绑队）。若本期查不到任何队伍，本地无法自愈，
-          // 必须明确告知用户，否则会退化成"一直不成功却毫无提示"的无声失败。
           if (failure.errorCode === 143005 && verify.ok && !(verify as TeamInfo).joined) {
-            const message = '无法加入其他队伍，请到概念版APP手动加入或查看原因';
+            const seen = verify as TeamInfo;
+            // toast 只报酷狗原文（用户要求），完整补救指引进面板下方状态区
+            const toastText = failure.errorMsg || '每台设备只能加入一个队伍~~';
+            if (seen.created) {
+              // 队长（创建队未满员）加入他人被 143005 拒：该设备本期的酷狗加入通道
+              // 不可用（创建队占用或资格限制），落标记自适应退回等待态——默认仍允许
+              // 队长租码（见 ④ DECIDE 注），被真实拒后每期至多浪费一个租约。
+              joinBlockedPeriods.add(periodId);
+              const message =
+                '酷狗拒绝了加入请求（每台设备只能加入一个队伍~~）。请在概念版APP的组队页面手动加入一次其他人的队伍，之后自动加入即可生效；本期先等待队员加入你的队伍';
+              setLastError(message, 'device_already_bound', {
+                periodId,
+                uid,
+                code,
+                errorCode: failure.errorCode,
+              });
+              if (!deviceBoundToastShown) {
+                deviceBoundToastShown = true;
+                services.toastWarning(toastText);
+              }
+              return;
+            }
+            // 143005 但查不到任何队伍：设备绑定来源在查询侧不可见。常见于从未组过队的
+            // 账号（资格问题，误报"设备已绑定"）——必须给出 APP 手动加入一次的补救
+            // 指引，否则会退化成无声失败。
+            const message =
+              '无法加入其他队伍（每台设备只能加入一个队伍~~）。请在概念版APP的组队页面手动加入一次其他人的队伍，之后自动加入即可生效';
             setLastError(message, 'device_already_bound', {
               periodId,
               uid,
@@ -1051,7 +1210,7 @@ export function createRunner(services: RunnerServices) {
             });
             if (!deviceBoundToastShown) {
               deviceBoundToastShown = true;
-              services.toastWarning(message);
+              services.toastWarning(toastText);
             }
             return;
           }
@@ -1088,9 +1247,19 @@ export function createRunner(services: RunnerServices) {
         void requestRun('manual_join', { snapshotOnly: true, force: true });
         return { ok: true, message: '已提交加入' };
       }
-      const message = parsed.errorMsg || '加入失败，请检查组队码';
-      setLastError(message, 'manual_join_failed', { code, errorMsg: parsed.errorMsg });
-      return { ok: false, message };
+      const rawMessage = parsed.errorMsg || '加入失败，请检查组队码';
+      if (parsed.errorCode === 143005) {
+        // 从未组过队的账号手动加入也会被 143005 拒：toast 只报酷狗原文（与自动流程
+        // 一致），完整补救指引进面板状态区
+        setLastError(
+          '无法加入该队伍（每台设备只能加入一个队伍~~）。请在概念版APP的组队页面手动加入一次其他人的队伍，之后即可正常加入',
+          'manual_join_failed',
+          { code, errorMsg: parsed.errorMsg },
+        );
+        return { ok: false, message: rawMessage };
+      }
+      setLastError(rawMessage, 'manual_join_failed', { code, errorMsg: parsed.errorMsg });
+      return { ok: false, message: rawMessage };
     } catch (error) {
       if (error instanceof Aborted) return { ok: false, message: '插件已停用' };
       const message = String((error as Error)?.message || error) || '加入失败';
@@ -1126,7 +1295,9 @@ export function createRunner(services: RunnerServices) {
         }
         return;
       }
-      // 已入队（无论自己创建还是加入他人）＝终态：只需低频保活快照。
+      // 已加入他人队伍、创建队满员或本期加入被拒＝终态：只需低频保活快照。
+      // 未满员队长仍随完整流程租码加入（除非已落 joinBlockedPeriods）；
+      // 完整流程同时刷新成员人数，且 pool_empty 建队路径可在未建队时补建。
       const joined = state.joined;
       const snapshotInterval = panelOpen ? SNAPSHOT_INTERVAL_MS : JOINED_SNAPSHOT_INTERVAL_MS;
       if (
@@ -1149,8 +1320,7 @@ export function createRunner(services: RunnerServices) {
 
   function resetForAccountChange(): void {
     poolUp(poolBackoff);
-    poolEmptyBackoff.step = 0;
-    poolEmptyBackoff.nextAttemptAt = 0;
+    poolUp(poolEmptyBackoff);
     disabledPeriods.clear();
     // 内存清空后回读存储：停用表合并写入的其他记录不能因切换会话而丢基线
     void loadDisabledPeriods();
@@ -1184,6 +1354,7 @@ export function createRunner(services: RunnerServices) {
 
   async function loadDisabled(): Promise<void> {
     await loadDisabledPeriods();
+    await loadDeviceCreatedPeriods();
     try {
       const [periodId, uid, created] = await Promise.all([
         services.readValue('lastPeriodId'),

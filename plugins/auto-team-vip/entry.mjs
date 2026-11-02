@@ -284,18 +284,60 @@ function toLittleEndianHex(word) {
   }
   return hex;
 }
-function rsaNoPadEncryptHex(message) {
+function rsaPaddedBlock(message) {
   const padded = new Array(RSA_BLOCK_BYTES).fill(0);
   const used = Math.min(message.length, RSA_BLOCK_BYTES);
   for (let i = 0; i < used; i += 1) padded[i] = message[i];
-  const result = limbsExpMod(limbsFromBytes(padded), LITE_EXPONENT, LITE_MODULUS);
+  return padded;
+}
+function rsaResultHex(result) {
   const bytes = limbsToBytes(result, RSA_BLOCK_BYTES);
   let hex = "";
   for (const byte of bytes) hex += byteHex(byte);
   return hex.toUpperCase();
 }
+function rsaNoPadEncryptHex(message) {
+  return rsaResultHex(
+    limbsExpMod(limbsFromBytes(rsaPaddedBlock(message)), LITE_EXPONENT, LITE_MODULUS)
+  );
+}
+var H5_TOKEN_CACHE = /* @__PURE__ */ new Map();
+var H5_TOKEN_CACHE_LIMIT = 8;
+function cacheH5Token(realToken, value) {
+  if (H5_TOKEN_CACHE.size >= H5_TOKEN_CACHE_LIMIT) {
+    const oldest = H5_TOKEN_CACHE.keys().next();
+    if (!oldest.done) H5_TOKEN_CACHE.delete(oldest.value);
+  }
+  H5_TOKEN_CACHE.set(realToken, value);
+}
 function h5Token(realToken) {
-  return "h5" + rsaNoPadEncryptHex(utf8Bytes(H5_TOKEN_PREFIX + realToken));
+  const cached = H5_TOKEN_CACHE.get(realToken);
+  if (cached !== void 0) return cached;
+  const value = "h5" + rsaNoPadEncryptHex(utf8Bytes(H5_TOKEN_PREFIX + realToken));
+  cacheH5Token(realToken, value);
+  return value;
+}
+function h5TokenAsync(realToken, yieldStep) {
+  return __async(this, null, function* () {
+    const cached = H5_TOKEN_CACHE.get(realToken);
+    if (cached !== void 0) return cached;
+    const message = utf8Bytes(H5_TOKEN_PREFIX + realToken);
+    const base = limbsFromBytes(rsaPaddedBlock(message));
+    const bits = [];
+    for (let value2 = LITE_EXPONENT; value2 > 0; value2 = Math.floor(value2 / 2)) bits.push(value2 % 2);
+    let result = limbsFromBytes([1]);
+    for (let i = bits.length - 1; i >= 0; i -= 1) {
+      result = limbsMulMod(result, result, LITE_MODULUS);
+      yield yieldStep();
+      if (bits[i]) {
+        result = limbsMulMod(result, base, LITE_MODULUS);
+        yield yieldStep();
+      }
+    }
+    const value = "h5" + rsaResultHex(result);
+    cacheH5Token(realToken, value);
+    return value;
+  });
 }
 function sortedParamsString(params) {
   return Object.keys(params).sort().map((key) => `${key}=${params[key]}`).join("");
@@ -358,7 +400,7 @@ function asNumber(value, fallback) {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : fallback;
 }
-function buildTeamRequest(auth, endpoint, args) {
+function buildTeamRequest(auth, endpoint, args, h5token) {
   const params = {
     srcappid: SRCAPPID,
     clientver: CLIENTVER,
@@ -368,7 +410,7 @@ function buildTeamRequest(auth, endpoint, args) {
     dfid: auth.dfid || "-",
     appid: APPID,
     userid: Number(auth.userid) || 0,
-    token: h5Token(auth.token)
+    token: h5token != null ? h5token : h5Token(auth.token)
   };
   let method = "GET";
   let body = null;
@@ -695,8 +737,8 @@ function normalizePoolResponse(raw) {
 // plugins/auto-team-vip/src/runner.ts
 var RETRY_MAX = 3;
 var RETRY_DELAY_MS = 2e3;
-var CREATED_REQUERY_MAX = 2;
-var CREATED_REQUERY_DELAY_MS = 1500;
+var CREATED_REQUERY_MAX = 4;
+var CREATED_REQUERY_DELAY_MS = 2e3;
 var POOL_RETRY_DELAY_MS = 500;
 var MIN_RUN_INTERVAL_MS = 1e4;
 var REFRESH_THROTTLE_MS = 3e3;
@@ -719,7 +761,7 @@ function createPanelState() {
     myCode: "",
     myMemberCount: 0,
     myVipDesc: "",
-    targetMembers: 3,
+    targetMembers: TARGET_MEMBERS,
     joined: false,
     joinedCode: "",
     joinedMemberCount: 0,
@@ -761,6 +803,8 @@ function createRunner(services) {
   const poolBackoff = createBackoff();
   const poolEmptyBackoff = createBackoff();
   const disabledPeriods = /* @__PURE__ */ new Set();
+  const deviceCreatedPeriods = /* @__PURE__ */ new Set();
+  const joinBlockedPeriods = /* @__PURE__ */ new Set();
   let errorSeq = 0;
   let lastRunAt = 0;
   let lastSnapshotAt = 0;
@@ -868,7 +912,9 @@ function createRunner(services) {
   function teamCall(_0, _1) {
     return __async(this, arguments, function* (auth, endpoint, args = {}) {
       const send = () => __async(null, null, function* () {
-        const request = buildTeamRequest(auth, endpoint, args);
+        var _a;
+        const h5token = yield h5TokenAsync(auth.token, (_a = services.yieldUi) != null ? _a : (() => Promise.resolve()));
+        const request = buildTeamRequest(auth, endpoint, args, h5token);
         return normalizeGateway(yield services.gatewaySend(request));
       });
       ensureActive();
@@ -946,6 +992,91 @@ function createRunner(services) {
       return __spreadValues({ ok: true }, normalizeTeamInfo(plain));
     });
   }
+  function ensureTeamCreated(auth, periodId, uid, current, failureHint) {
+    return __async(this, null, function* () {
+      var _a, _b;
+      if (current.created) return { myInfo: current, stop: false };
+      if (current.joined) {
+        return { myInfo: current, stop: false };
+      }
+      if (deviceCreatedPeriods.has(periodId)) {
+        const again = yield getMyTeamInfo(auth, periodId);
+        ensureActive();
+        if (!again.ok) {
+          setLastError("获取队伍信息失败", "myinfo_failed");
+          return { myInfo: current, stop: true };
+        }
+        if (!again.created) {
+          setLastError(
+            "设备本期已建队，酷狗暂未返回队伍码。若本账号从未组过队，在概念版APP中打开一次组队页面（会自动建队）即可恢复；稍后也会自动重试",
+            "created_code_pending",
+            {
+              periodId,
+              uid
+            }
+          );
+          return { myInfo: again, stop: true };
+        }
+        return { myInfo: again, stop: false };
+      }
+      const createdRes = yield teamCall(auth, "create_team", { periodId });
+      ensureActive();
+      const createdParsed = createdRes.ok ? parseJoinResponse(createdRes) : null;
+      const alreadyCreated = Boolean(
+        createdParsed && !createdParsed.bizOk && isAlreadyCreatedError(createdRes.body)
+      );
+      if (alreadyCreated) {
+        deviceCreatedPeriods.add(periodId);
+        void persistDeviceCreatedPeriods();
+      }
+      const refreshed = yield getMyTeamInfo(auth, periodId);
+      ensureActive();
+      if (!refreshed.ok) {
+        const cached = yield readCreatedCache(periodId, uid);
+        if (cached) applyCreatedCache(cached);
+        setLastError("获取队伍信息失败", "myinfo_failed");
+        return { myInfo: current, stop: true };
+      }
+      let myInfo = refreshed;
+      if (alreadyCreated && !myInfo.created) {
+        for (let retry = 0; retry < CREATED_REQUERY_MAX && !myInfo.created; retry += 1) {
+          yield services.sleep(CREATED_REQUERY_DELAY_MS);
+          ensureActive();
+          const again = yield getMyTeamInfo(auth, periodId);
+          if (again.ok) myInfo = again;
+        }
+      }
+      if (alreadyCreated && !myInfo.created) {
+        const raw = JSON.stringify(myInfo.raw) || "";
+        const list = (_a = myInfo.raw) == null ? void 0 : _a.my_create_team_list;
+        const first = Array.isArray(list) ? list[0] : void 0;
+        setLastError(
+          "酷狗提示本期已创建过队伍，但暂时查询不到队伍码。若本账号从未组过队，在概念版APP中打开一次组队页面（会自动建队）即可恢复；若持续出现请复制错误详情反馈",
+          "created_team_unreadable",
+          {
+            periodId,
+            uid,
+            createError: createdParsed && createdParsed.errorMsg || "",
+            myTeamInfoBody: truncateBody(raw),
+            parseProbe: [
+              "rawType=" + typeof myInfo.raw,
+              "list=" + (Array.isArray(list) ? "array" : typeof list),
+              "first=" + typeof first,
+              "code=" + (first && typeof first === "object" ? String((_b = first.team_code) != null ? _b : "") : "-")
+            ].join(",")
+          }
+        );
+        return { myInfo, stop: true };
+      } else if (!alreadyCreated && (!createdParsed || !createdParsed.httpOk || !createdParsed.bizOk) && !myInfo.created) {
+        const detail = createdParsed && createdParsed.errorMsg || String(createdRes.error || "请求失败");
+        setLastError(`自动创建队伍失败（${detail}），${failureHint}`, "create_team_failed", {
+          periodId,
+          detail
+        });
+      }
+      return { myInfo, stop: false };
+    });
+  }
   function onPanelOpened() {
     versionMismatchReported = false;
   }
@@ -981,6 +1112,29 @@ function createRunner(services) {
         const map = yield services.readValue("poolAuthDisabled");
         if (map && typeof map === "object") {
           for (const key of Object.keys(map)) disabledPeriods.add(key);
+        }
+      } catch (e) {
+      }
+    });
+  }
+  function persistDeviceCreatedPeriods() {
+    return __async(this, null, function* () {
+      try {
+        const map = {};
+        for (const entry of deviceCreatedPeriods) map[entry] = true;
+        yield services.writeValue("deviceCreatedPeriods", map);
+      } catch (e) {
+      }
+    });
+  }
+  function loadDeviceCreatedPeriods() {
+    return __async(this, null, function* () {
+      try {
+        const map = yield services.readValue("deviceCreatedPeriods");
+        if (map && typeof map === "object") {
+          for (const key of Object.keys(map)) {
+            if (map[key] === true) deviceCreatedPeriods.add(key);
+          }
         }
       } catch (e) {
       }
@@ -1087,7 +1241,7 @@ function createRunner(services) {
         setLastError(MSG_POOL_NETWORK, "pool_net_error", __spreadValues({
           periodId,
           uid,
-          transportRetryAfter: 60
+          transportRetryAfter: POOL_TRANSPORT_BACKOFF_MS / 1e3
         }, buildPoolDiag("/v2/snapshot", response)));
         return "down";
       }
@@ -1187,7 +1341,6 @@ function createRunner(services) {
   }
   function runFullFlow(_0) {
     return __async(this, arguments, function* (reason, options = {}) {
-      var _a, _b;
       const snapshotOnly = Boolean(options.snapshotOnly);
       const now0 = services.now();
       if (!options.force && now0 - lastRunAt < MIN_RUN_INTERVAL_MS) return;
@@ -1219,8 +1372,6 @@ function createRunner(services) {
           runUid = uid;
           knownUid = uid;
           void services.writeValue("lastUid", uid);
-        } else {
-          runUid = uid;
         }
         const period = yield getPeriodInfo(auth);
         ensureActive();
@@ -1235,8 +1386,7 @@ function createRunner(services) {
         const periodId = String(period.periodId);
         const lastPeriodId = yield services.readValue("lastPeriodId");
         if (typeof lastPeriodId === "string" && lastPeriodId && lastPeriodId !== periodId) {
-          poolEmptyBackoff.step = 0;
-          poolEmptyBackoff.nextAttemptAt = 0;
+          poolUp(poolEmptyBackoff);
           state.myCode = "";
           state.myMemberCount = 0;
           state.joinedCode = "";
@@ -1249,6 +1399,14 @@ function createRunner(services) {
           disabledPeriods.clear();
           for (const key of kept) disabledPeriods.add(key);
           yield persistDisabledTable();
+          const keptCreated = /* @__PURE__ */ new Set();
+          for (const key of deviceCreatedPeriods) {
+            if (key === periodId) keptCreated.add(key);
+          }
+          deviceCreatedPeriods.clear();
+          for (const key of keptCreated) deviceCreatedPeriods.add(key);
+          void persistDeviceCreatedPeriods();
+          joinBlockedPeriods.clear();
         }
         yield services.writeValue("lastPeriodId", periodId);
         state.periodId = periodId;
@@ -1273,63 +1431,19 @@ function createRunner(services) {
           return;
         }
         if (!autoOn) {
+          const ensured = yield ensureTeamCreated(
+            auth,
+            periodId,
+            uid,
+            myInfo,
+            "可稍后重试，或手动输入组队码加入他人队伍"
+          );
+          if (ensured.stop) return;
+          myInfo = ensured.myInfo;
           lastSnapshotAt = services.now();
           applyTeamInfo(myInfo);
           clearIfNoNewError();
           return;
-        }
-        if (!myInfo.created) {
-          const createdRes = yield teamCall(auth, "create_team", { periodId });
-          ensureActive();
-          const createdParsed = createdRes.ok ? parseJoinResponse(createdRes) : null;
-          const alreadyCreated = Boolean(
-            createdParsed && !createdParsed.bizOk && isAlreadyCreatedError(createdRes.body)
-          );
-          const refreshed = yield getMyTeamInfo(auth, periodId);
-          ensureActive();
-          if (!refreshed.ok) {
-            const cached = yield readCreatedCache(periodId, uid);
-            if (cached) applyCreatedCache(cached);
-            setLastError("获取队伍信息失败", "myinfo_failed");
-            return;
-          }
-          myInfo = refreshed;
-          if (alreadyCreated && !myInfo.created) {
-            for (let retry = 0; retry < CREATED_REQUERY_MAX && !myInfo.created; retry += 1) {
-              yield services.sleep(CREATED_REQUERY_DELAY_MS);
-              ensureActive();
-              const again = yield getMyTeamInfo(auth, periodId);
-              if (again.ok) myInfo = again;
-            }
-          }
-          if (alreadyCreated && !myInfo.created) {
-            const raw = JSON.stringify(myInfo.raw) || "";
-            const list = (_a = myInfo.raw) == null ? void 0 : _a.my_create_team_list;
-            const first = Array.isArray(list) ? list[0] : void 0;
-            setLastError(
-              "酷狗提示本期已创建过队伍，但暂时查询不到队伍码，请稍后刷新；若持续出现请复制错误详情反馈",
-              "created_team_unreadable",
-              {
-                periodId,
-                uid,
-                createError: createdParsed && createdParsed.errorMsg || "",
-                myTeamInfoBody: truncateBody(raw),
-                parseProbe: [
-                  "rawType=" + typeof myInfo.raw,
-                  "list=" + (Array.isArray(list) ? "array" : typeof list),
-                  "first=" + typeof first,
-                  "code=" + (first && typeof first === "object" ? String((_b = first.team_code) != null ? _b : "") : "-")
-                ].join(",")
-              }
-            );
-            return;
-          } else if (!alreadyCreated && (!createdParsed || !createdParsed.httpOk || !createdParsed.bizOk) && !myInfo.created) {
-            const detail = createdParsed && createdParsed.errorMsg || String(createdRes.error || "请求失败");
-            setLastError(`自动创建队伍失败（${detail}），仍可加入其他队伍`, "create_team_failed", {
-              periodId,
-              detail
-            });
-          }
         }
         applyTeamInfo(myInfo);
         const snap = yield doSnapshot(periodId, uid, myInfo);
@@ -1338,7 +1452,15 @@ function createRunner(services) {
           if (snap === "ok") clearIfNoNewError();
           return;
         }
-        if (myInfo.joined || myInfo.created && myInfo.created.memberCount >= TARGET_MEMBERS) {
+        if (myInfo.joined) {
+          clearIfNoNewError();
+          return;
+        }
+        if (myInfo.created && myInfo.created.memberCount >= TARGET_MEMBERS) {
+          clearIfNoNewError();
+          return;
+        }
+        if (joinBlockedPeriods.has(periodId)) {
           clearIfNoNewError();
           return;
         }
@@ -1384,7 +1506,7 @@ function createRunner(services) {
                   periodId,
                   uid,
                   stage: "join",
-                  transportRetryAfter: 60
+                  transportRetryAfter: POOL_TRANSPORT_BACKOFF_MS / 1e3
                 }, buildPoolDiag("/v2/join", joinRes)));
                 return;
               }
@@ -1423,7 +1545,21 @@ function createRunner(services) {
           }
           if (data.reason === "pool_empty" || !data.code) {
             poolEmptyBackoffStart(poolEmptyBackoff, services.now());
-            setLastError("暂无可加入的队伍，可手动组队或耐心等待", "pool_empty", { periodId, uid });
+            const ensured = yield ensureTeamCreated(
+              auth,
+              periodId,
+              uid,
+              myInfo,
+              "稍后自动重试，或手动输入组队码加入他人队伍"
+            );
+            if (ensured.stop) return;
+            myInfo = ensured.myInfo;
+            applyTeamInfo(myInfo);
+            if (myInfo.created) {
+              yield doSnapshot(periodId, uid, myInfo);
+              lastSnapshotAt = services.now();
+              clearIfNoNewError();
+            }
             return;
           }
           if (!data.lease_id || !data.code) {
@@ -1432,8 +1568,7 @@ function createRunner(services) {
           }
           const leaseId = String(data.lease_id);
           const code = String(data.code);
-          poolEmptyBackoff.step = 0;
-          poolEmptyBackoff.nextAttemptAt = 0;
+          poolUp(poolEmptyBackoff);
           const joinKugou = yield teamCall(auth, "join_team", { teamCode: code });
           ensureActive();
           if (!joinKugou.ok) {
@@ -1475,7 +1610,24 @@ function createRunner(services) {
             if (verify.ok) applyTeamInfo(verify);
             yield doSnapshot(periodId, uid, verify.ok ? verify : myInfo);
             if (failure.errorCode === 143005 && verify.ok && !verify.joined) {
-              const message = "无法加入其他队伍，请到概念版APP手动加入或查看原因";
+              const seen = verify;
+              const toastText = failure.errorMsg || "每台设备只能加入一个队伍~~";
+              if (seen.created) {
+                joinBlockedPeriods.add(periodId);
+                const message2 = "酷狗拒绝了加入请求（每台设备只能加入一个队伍~~）。请在概念版APP的组队页面手动加入一次其他人的队伍，之后自动加入即可生效；本期先等待队员加入你的队伍";
+                setLastError(message2, "device_already_bound", {
+                  periodId,
+                  uid,
+                  code,
+                  errorCode: failure.errorCode
+                });
+                if (!deviceBoundToastShown) {
+                  deviceBoundToastShown = true;
+                  services.toastWarning(toastText);
+                }
+                return;
+              }
+              const message = "无法加入其他队伍（每台设备只能加入一个队伍~~）。请在概念版APP的组队页面手动加入一次其他人的队伍，之后自动加入即可生效";
               setLastError(message, "device_already_bound", {
                 periodId,
                 uid,
@@ -1487,7 +1639,7 @@ function createRunner(services) {
               });
               if (!deviceBoundToastShown) {
                 deviceBoundToastShown = true;
-                services.toastWarning(message);
+                services.toastWarning(toastText);
               }
               return;
             }
@@ -1522,9 +1674,17 @@ function createRunner(services) {
           void requestRun("manual_join", { snapshotOnly: true, force: true });
           return { ok: true, message: "已提交加入" };
         }
-        const message = parsed.errorMsg || "加入失败，请检查组队码";
-        setLastError(message, "manual_join_failed", { code, errorMsg: parsed.errorMsg });
-        return { ok: false, message };
+        const rawMessage = parsed.errorMsg || "加入失败，请检查组队码";
+        if (parsed.errorCode === 143005) {
+          setLastError(
+            "无法加入该队伍（每台设备只能加入一个队伍~~）。请在概念版APP的组队页面手动加入一次其他人的队伍，之后即可正常加入",
+            "manual_join_failed",
+            { code, errorMsg: parsed.errorMsg }
+          );
+          return { ok: false, message: rawMessage };
+        }
+        setLastError(rawMessage, "manual_join_failed", { code, errorMsg: parsed.errorMsg });
+        return { ok: false, message: rawMessage };
       } catch (error) {
         if (error instanceof Aborted) return { ok: false, message: "插件已停用" };
         const message = String((error == null ? void 0 : error.message) || error) || "加入失败";
@@ -1568,8 +1728,7 @@ function createRunner(services) {
   }
   function resetForAccountChange() {
     poolUp(poolBackoff);
-    poolEmptyBackoff.step = 0;
-    poolEmptyBackoff.nextAttemptAt = 0;
+    poolUp(poolEmptyBackoff);
     disabledPeriods.clear();
     void loadDisabledPeriods();
     versionMismatchReported = false;
@@ -1602,6 +1761,7 @@ function createRunner(services) {
   function loadDisabled() {
     return __async(this, null, function* () {
       yield loadDisabledPeriods();
+      yield loadDeviceCreatedPeriods();
       try {
         const [periodId, uid, created] = yield Promise.all([
           services.readValue("lastPeriodId"),
@@ -1671,7 +1831,7 @@ function createRunner(services) {
 }
 
 // plugins/auto-team-vip/src/entry.ts
-var PLUGIN_VERSION = "1.2.6";
+var PLUGIN_VERSION = "1.2.7";
 var AUTO_RUN_DELAY_MS = 3e3;
 var LOGIN_RUN_DELAY_MS = 2e3;
 var GATEWAY_TIMEOUT_MS = 15e3;
@@ -1721,6 +1881,11 @@ function activate(ctx) {
       if (!registration) finish();
     }),
     readValue: (key) => awaitOperation(ctx.io.readValue(key)).catch(() => void 0),
+    // RSA 冷计算分片用：0ms 一次性计时器让出完整事件循环回合（渲染帧得以推进）
+    yieldUi: () => new Promise((resolve) => {
+      const registration = ctx.setTimer("rsa-yield", 0, false, resolve);
+      if (!registration) resolve();
+    }),
     writeValue: (key, value) => awaitOperation(ctx.io.writeValue(key, value)).then(() => void 0).catch(() => void 0),
     auth: () => capturedAuth,
     loggedIn: () => Boolean(ctx.kugou.account && ctx.kugou.account.loggedIn),
@@ -2028,7 +2193,7 @@ function activate(ctx) {
   ctx.registerCommand("copy-created", () => {
     const code = state.myCode;
     if (!code) {
-      void ctx.toast.warning("暂无组队码，请先运行互助");
+      void ctx.toast.warning("暂无组队码，请稍后刷新");
       return "";
     }
     return code;
@@ -2036,7 +2201,7 @@ function activate(ctx) {
   ctx.registerCommand("copy-joined", () => {
     const code = state.joinedCode;
     if (!code) {
-      void ctx.toast.warning("暂无组队码，请先运行互助");
+      void ctx.toast.warning("暂无组队码，请稍后刷新");
       return "";
     }
     return code;
