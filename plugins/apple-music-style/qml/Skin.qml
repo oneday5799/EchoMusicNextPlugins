@@ -210,18 +210,51 @@ Item {
                     // 封面直接叠在封面模糊背景上：MultiEffect 阴影会把纯黑
                     // 源矩形一并画出，暂停缩小时露出一圈黑底，故不使用阴影
                     EchoCover {
+                        id: coverItem
                         anchors.fill: parent
                         source: root.player.coverUrl
                         cornerRadius: 14
                         colors: root.am
-                        // 播放时放大、暂停时缩小的呼吸感（旧版 0.75 ↔ 1 的关键帧动画）
-                        scale: !root.motion || root.player.playing ? 1 : 0.75
-                        Behavior on scale {
-                            enabled: root.motion
+                        // 封面弹簧对照旧插件 coverAnim（500ms ease 关键帧）：
+                        // 播放 0.75 → 1.1（60%） → 1；暂停 1 → 0.75；挂载时直接落位不动画
+                        Component.onCompleted: scale = root.player.playing ? 1 : 0.75
+                        SequentialAnimation {
+                            id: coverSpring
                             NumberAnimation {
-                                duration: 480
-                                easing.type: Easing.OutBack
-                                easing.overshoot: 1.1
+                                target: coverItem
+                                property: "scale"
+                                from: 0.75
+                                to: 1.1
+                                duration: 300
+                                easing.type: Easing.BezierSpline
+                                easing.bezierCurve: [0.25, 0.1, 0.25, 1, 1, 1]
+                            }
+                            NumberAnimation {
+                                target: coverItem
+                                property: "scale"
+                                to: 1
+                                duration: 200
+                                easing.type: Easing.BezierSpline
+                                easing.bezierCurve: [0.25, 0.1, 0.25, 1, 1, 1]
+                            }
+                        }
+                        NumberAnimation {
+                            id: coverShrink
+                            target: coverItem
+                            property: "scale"
+                            from: 1
+                            to: 0.75
+                            duration: 500
+                            easing.type: Easing.BezierSpline
+                            easing.bezierCurve: [0.25, 0.1, 0.25, 1, 1, 1]
+                        }
+                        Connections {
+                            target: root.player
+                            function onPlayingChanged(): void {
+                                if (root.player.playing)
+                                    coverSpring.restart();
+                                else
+                                    coverShrink.restart();
                             }
                         }
                     }
@@ -685,7 +718,8 @@ Item {
             if (!pressAnim.running && scale > 0.999)
                 return;
             pressAnim.stop();
-            releaseStep1.from = scale;
+            // 旧关键帧 releasing 0% 固定 scale(0.9)，快速点按时先落回 0.9 再弹出
+            releaseStep1.from = 0.9;
             releaseSeq.start();
         }
         onPressed: {
