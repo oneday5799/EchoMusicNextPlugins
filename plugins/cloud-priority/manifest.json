@@ -17,5 +17,9 @@
   },
   "capabilities": [],
   "contexts": ["main"],
-  "tags": ["云盘", "音源"]
+  "tags": ["云盘", "音源"],
+  "distribution": {
+    "artifact": "artifacts/cloud-priority-1.0.2.echomod",
+    "sha256": "0bd6697efc68b4bb06431f7a9d8d71c9cc3fc50318230d7a7386dd309f944b01"
+  }
 }
