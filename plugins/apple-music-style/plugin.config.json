@@ -1,4 +1,0 @@
-{
-  "entry": "src/entry.ts",
-  "assets": ["qml/Skin.qml", "qml/SkinSettings.qml", "icon.svg", "preview.jpg", "LICENSE"]
-}
