@@ -4,6 +4,7 @@ import QtQuick.Controls.Basic
 import QtQuick.Effects
 import QtQuick.Layouts
 import EchoMusic.Controls
+import EchoMusic.Playback
 import EchoMusic.Theme
 import EchoMusic.PluginSdk
 
@@ -62,6 +63,10 @@ Item {
             "enhanceContrast": root.configuration.values.enhanceContrast === true,
             "fontScale": root.num(root.configuration.values.fontScale, 100, 50, 200),
             "fontWeight": root.num(root.configuration.values.fontWeight, 850, 300, 900),
+            "enableBlur": root.configuration.values.enableBlur !== false,
+            "enableScale": root.configuration.values.enableScale !== false,
+            "enableSpring": root.configuration.values.enableSpring !== false,
+            "fadeWidth": root.num(root.configuration.values.fadeWidth, 50, 0, 100),
             "alignPosition": root.num(root.configuration.values.alignPosition, 48, 0, 100)
         })
 
@@ -77,15 +82,50 @@ Item {
         accentText: "#ffffff"
     }
 
-    readonly property font lyricFont: {
-        const base = Theme.store.lyricBaseFont;
-        base.pixelSize = Math.max(12, Math.round(base.pixelSize * root.s.fontScale / 100));
-        base.weight = Math.round(root.s.fontWeight);
-        return base;
-    }
+    // 旧版 AMLL 字号：clamp(24px, 4.2vh × 缩放, 52px)，vh 取整个页面高度
+    readonly property real lyricFontSize: Math.min(52, Math.max(24, root.height * 0.042 * root.s.fontScale / 100))
+    // 旧版 AMLL 字号：clamp(24px, 4.2vh × 缩放, 52px)，vh 取整个页面高度。
+    // 字体必须经宿主 styledFont 构建：宿主引擎里对 QFont 属性读取的副本
+    // 直接赋 pixelSize/weight 不生效，会静默回落到 13px/400 的宿主默认字号
+    readonly property font lyricFont: Theme.store.styledFont(Theme.store.lyricBaseFont, Math.round(root.lyricFontSize), Math.round(root.s.fontWeight), 0, false, false)
+    // 副歌词字号为最大(10, 字号×0.5)，粗细上限 650，与旧版一致
+    readonly property font secondaryLyricFont: Theme.store.styledFont(Theme.store.lyricBaseFont, Math.max(10, root.lyricFontSize * 0.5), Math.min(650, Math.round(root.s.fontWeight)), 0, false, false)
 
     implicitWidth: 960
     implicitHeight: 640
+
+    // ===== 背景：直接复用宿主"封面歌词"模式的模糊封面背景 =====
+    // 渲染器即宿主 EchoMusic.Playback 的 PlaybackBlurredBackground（与内建
+    // 封面歌词页同一 fluid 着色器、同一封面交叉淡化管线）；包裹逻辑对照
+    // 宿主 PlaybackBackground：底色 lyricBackground(封面主色) 500ms 渐变、
+    // 磨砂/透明度材质、模糊未就绪或无封面时只显示底色四边形。
+    readonly property bool hostFrosted: Theme.store.windowFrosted
+    readonly property real hostMaterialOpacity: 1 - Theme.store.transparency / 100
+    readonly property color hostCoverColor: root.player.snapshot.coverColor ?? "#20242c"
+    readonly property color hostBaseColor: Theme.store.lyricBackground(root.hostCoverColor)
+    property color hostDisplayedBaseColor: root.hostBaseColor
+    Behavior on hostDisplayedBaseColor {
+        ColorAnimation {
+            duration: Theme.store.motionEnabled ? 500 : 0
+        }
+    }
+    readonly property bool hostBlurActive: root.visible && root.coverUrl.toString().length > 0 && !root.hostFrosted && root.hostMaterialOpacity > 0
+    // 背景律动取宿主歌词设置 backgroundRhythm（settings.host 授权后经 read/observe 同步）
+    property bool hostRhythm: false
+    readonly property bool hostRhythmActive: root.hostBlurActive && root.hostRhythm && root.motion
+    property real hostPhase: 0
+    Component.onCompleted: {
+        const read = root.plugin.settings.read('lyrics');
+        const applyRead = () => {
+            if (read.state === 2)
+                root.hostRhythm = read.result.backgroundRhythm === true;
+        };
+        read.completed.connect(applyRead);
+        applyRead();
+        root.plugin.settings.observe('apple-music-style-background-rhythm', 'lyrics', values => {
+            root.hostRhythm = values.backgroundRhythm === true;
+        });
+    }
 
     // 无封面时的基础底色，与宿主封面占位观感一致
     Rectangle {
@@ -101,33 +141,38 @@ Item {
             }
         }
     }
-
-    // 封面模糊背景：GPU 模糊一次成型，封面变化才重新采样
-    Image {
-        id: backdrop
-        anchors.fill: parent
-        anchors.margins: -60
-        source: root.coverUrl
-        fillMode: Image.PreserveAspectCrop
-        cache: false
-        asynchronous: true
-        visible: false
-    }
-    MultiEffect {
-        anchors.fill: backdrop
-        source: backdrop
-        blurEnabled: true
-        blurMax: 64
-        blur: 1
-        saturation: 0.2
-        brightness: -0.35
-        autoPaddingEnabled: false
-        visible: backdrop.status === Image.Ready
-    }
+    // 与宿主一致：只显示一个最终背景四边形，避免叠加 alpha 累积
     Rectangle {
         anchors.fill: parent
-        color: "#40000000"
-        visible: backdrop.status === Image.Ready
+        visible: !(bgLoader.item && bgLoader.item.ready)
+        color: root.hostFrosted ? Qt.rgba(0, 0, 0, 0.55) : Theme.withAlpha(root.hostDisplayedBaseColor, root.hostMaterialOpacity)
+    }
+    Loader {
+        id: bgLoader
+        anchors.fill: parent
+        active: root.hostBlurActive
+        sourceComponent: PlaybackBlurredBackground {
+            anchors.fill: parent
+            coverSource: root.player.coverUrl
+            rhythm: root.hostRhythmActive
+            phase: root.hostPhase
+            baseColor: root.hostDisplayedBaseColor
+            backgroundOpacity: root.hostMaterialOpacity
+        }
+    }
+    // 与宿主 PlaybackBackground 一致：律动相位按 30fps 上限推进
+    FrameAnimation {
+        running: root.hostRhythmActive && bgLoader.item && bgLoader.item.ready && root.player.playing && Theme.store.motionEnabled
+        property real accumulated: 0
+        onRunningChanged: accumulated = 0
+        onTriggered: {
+            accumulated += Math.min(frameTime, 0.1);
+            if (accumulated >= 1 / 30) {
+                const remainder = accumulated % (1 / 30);
+                root.hostPhase += accumulated - remainder;
+                accumulated = remainder;
+            }
+        }
     }
 
     // ===== 左栏 =====
@@ -162,24 +207,8 @@ Item {
                     Layout.preferredHeight: leftContent.coverSize
                     Layout.bottomMargin: leftContent.coverGap
 
-                    Rectangle {
-                        id: shadowSource
-                        anchors.fill: parent
-                        radius: 14
-                        color: "#000000"
-                        visible: false
-                    }
-                    MultiEffect {
-                        anchors.fill: parent
-                        anchors.margins: -26
-                        source: shadowSource
-                        shadowEnabled: true
-                        shadowBlur: 0.6
-                        shadowColor: "#73000000"
-                        shadowVerticalOffset: 12
-                        autoPaddingEnabled: false
-                        visible: root.coverUrl !== ""
-                    }
+                    // 封面直接叠在封面模糊背景上：MultiEffect 阴影会把纯黑
+                    // 源矩形一并画出，暂停缩小时露出一圈黑底，故不使用阴影
                     EchoCover {
                         anchors.fill: parent
                         source: root.player.coverUrl
@@ -483,19 +512,28 @@ Item {
         anchors.bottomMargin: 24
         visible: root.wide
 
-        // 对齐位置：把歌词视图中心从 50% 移到设置值；收缩限制在 35% 内保证可用
-        readonly property real alignOffset: height * (2 * root.s.alignPosition / 100 - 1)
-        readonly property real topInset: alignOffset > 0 ? Math.min(alignOffset, height * 0.35) : 0
-        readonly property real bottomInset: alignOffset < 0 ? Math.min(-alignOffset, height * 0.35) : 0
-
-        EchoPluginLyricsView {
+        // AMLL 风格歌词流：时间轴/弹簧滚动/逐词扫掠与间奏点在插件侧实现
+        LyricFlow {
+            id: lyrics
             page: root.page
             anchors.fill: parent
-            anchors.topMargin: rightPanel.topInset
-            anchors.bottomMargin: rightPanel.bottomInset
+            fontSize: root.lyricFontSize
             baseFont: root.lyricFont
-            playedColor: "#ffffff"
-            unplayedColor: root.s.enhanceContrast ? "#ffffffff" : "#ebffffff"
+            secondaryFont: root.secondaryLyricFont
+            // 演唱行 #fff，未唱行 rgba(255,255,255,0.92)，与旧版一致
+            // 演唱行 #fff；未唱部分对照宿主 LyricColors 默认 20% 白（AMLL 明暗比），
+            // 扫掠前沿才有可感知的明暗对比
+            textColor: "#ffffff"
+            unplayedColor: Qt.rgba(1, 1, 1, 0.2)
+            focusPosition: root.s.alignPosition / 100
+            wordFade: root.s.fadeWidth / 100
+            blurEnabled: root.s.enableBlur
+            scaleEnabled: root.s.enableScale
+            springEnabled: root.s.enableSpring
+            // 副歌词透明度：普通 0.56，增强对比度 0.72
+            sublineOpacity: root.s.enhanceContrast ? 0.72 : 0.56
+            lineWidthAspect: 0.86
+            pageHeight: root.height
         }
 
         // 上下渐隐，对应旧版 mask-image 12%/88% 边缘遮罩

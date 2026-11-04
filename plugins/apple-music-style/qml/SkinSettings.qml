@@ -112,7 +112,7 @@ ColumnLayout {
             }
             Label {
                 Layout.fillWidth: true
-                text: qsTr("保留层次感，同时提高封面背景上的文字可读性。")
+                text: qsTr("提高副歌词（翻译/音译）的亮度，改善封面背景上的可读性。")
                 font: Theme.font(12, Theme.regularWeight)
                 color: Theme.floating.secondaryText
                 wrapMode: Text.Wrap
@@ -122,6 +122,90 @@ ColumnLayout {
             checked: settingsRoot.configuration.values.enhanceContrast === true
             Accessible.name: qsTr("增强对比度")
             onToggled: settingsRoot.patch("enhanceContrast", checked)
+        }
+    }
+
+    RowLayout {
+        Layout.fillWidth: true
+        spacing: 14
+
+        ColumnLayout {
+            Layout.fillWidth: true
+            spacing: 4
+
+            Label {
+                text: qsTr("非活动行模糊")
+                font: Theme.font(13, 700)
+                color: Theme.floating.text
+            }
+            Label {
+                Layout.fillWidth: true
+                text: qsTr("未播放的歌词行随距离增加模糊，聚焦当前行。")
+                font: Theme.font(12, Theme.regularWeight)
+                color: Theme.floating.secondaryText
+                wrapMode: Text.Wrap
+            }
+        }
+        EchoSwitch {
+            checked: settingsRoot.configuration.values.enableBlur !== false
+            Accessible.name: qsTr("非活动行模糊")
+            onToggled: settingsRoot.patch("enableBlur", checked)
+        }
+    }
+
+    RowLayout {
+        Layout.fillWidth: true
+        spacing: 14
+
+        ColumnLayout {
+            Layout.fillWidth: true
+            spacing: 4
+
+            Label {
+                text: qsTr("非活动行缩小")
+                font: Theme.font(13, 700)
+                color: Theme.floating.text
+            }
+            Label {
+                Layout.fillWidth: true
+                text: qsTr("未播放的歌词行略微缩小，逐词上浮动效随之启停。")
+                font: Theme.font(12, Theme.regularWeight)
+                color: Theme.floating.secondaryText
+                wrapMode: Text.Wrap
+            }
+        }
+        EchoSwitch {
+            checked: settingsRoot.configuration.values.enableScale !== false
+            Accessible.name: qsTr("非活动行缩小")
+            onToggled: settingsRoot.patch("enableScale", checked)
+        }
+    }
+
+    RowLayout {
+        Layout.fillWidth: true
+        spacing: 14
+
+        ColumnLayout {
+            Layout.fillWidth: true
+            spacing: 4
+
+            Label {
+                text: qsTr("弹簧滚动")
+                font: Theme.font(13, 700)
+                color: Theme.floating.text
+            }
+            Label {
+                Layout.fillWidth: true
+                text: qsTr("歌词行按行间时间差以弹簧动效依次滚动到位。")
+                font: Theme.font(12, Theme.regularWeight)
+                color: Theme.floating.secondaryText
+                wrapMode: Text.Wrap
+            }
+        }
+        EchoSwitch {
+            checked: settingsRoot.configuration.values.enableSpring !== false
+            Accessible.name: qsTr("弹簧滚动")
+            onToggled: settingsRoot.patch("enableSpring", checked)
         }
     }
 
@@ -144,6 +228,17 @@ ColumnLayout {
         to: 900
         current: settingsRoot.num(settingsRoot.configuration.values.fontWeight, 850, 300, 900)
         onCommitted: nextValue => settingsRoot.patch("fontWeight", nextValue)
+    }
+
+    SettingSlider {
+        Layout.fillWidth: true
+        title: qsTr("逐词渐变宽度")
+        hint: qsTr("逐词亮起边缘的柔化宽度，0 为硬边。")
+        suffix: "%"
+        from: 0
+        to: 100
+        current: settingsRoot.num(settingsRoot.configuration.values.fadeWidth, 50, 0, 100)
+        onCommitted: nextValue => settingsRoot.patch("fadeWidth", nextValue)
     }
 
     SettingSlider {

@@ -4,7 +4,7 @@
   "id": "apple-music-style",
   "name": "Apple Music 风格播放页",
   "version": "1.0.0",
-  "description": "完整播放页皮肤：双栏布局，左侧封面与播放控制，右侧宿主原生逐字歌词，封面模糊背景。",
+  "description": "完整播放页皮肤：双栏布局，左侧封面与播放控制，右侧 AMLL 风格逐字歌词（GlyphRun 原生塑形与 GPU 扫掠），封面模糊背景。",
   "author": "Oneday5799",
   "license": "MIT",
   "icon": "icon.svg",
@@ -19,14 +19,17 @@
       "commands",
       "ui.lyricsPage",
       "playback.context",
-      "ui.navigation"
+      "ui.navigation",
+      "text.glyphs",
+      "graphics.glyphRun.canvas",
+      "settings.host"
     ]
   },
-  "capabilities": ["lyricsPage", "navigation"],
+  "capabilities": ["lyricsPage", "navigation", "hostSettings"],
   "contexts": ["main"],
   "tags": ["播放页", "歌词", "皮肤"],
   "distribution": {
     "artifact": "artifacts/apple-music-style-1.0.0.echomod",
-    "sha256": "f7f77467f1b2e5581b03fff404642beaa2ad57b30092e8f3aba63ec1150a4b99"
+    "sha256": "8620da37e1eb61c15e2a87e47eaed3585357a396432a4ee151f17cf21956f2b1"
   }
 }

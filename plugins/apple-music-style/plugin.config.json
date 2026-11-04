@@ -1,4 +1,15 @@
 {
   "entry": "src/entry.ts",
-  "assets": ["qml/Skin.qml", "qml/SkinSettings.qml", "icon.svg", "preview.jpg", "LICENSE"]
+  "assets": [
+    "qml/Skin.qml",
+    "qml/SkinSettings.qml",
+    "qml/LyricFlow.qml",
+    "qml/AmllLine.qml",
+    "qml/AmllLineMotion.qml",
+    "qml/AmllSpring.qml",
+    "qml/AmllInterlude.qml",
+    "icon.svg",
+    "preview.jpg",
+    "LICENSE"
+  ]
 }
