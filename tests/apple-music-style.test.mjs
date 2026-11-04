@@ -174,4 +174,14 @@ test('AMLL renderer wiring keeps the old plugin behavior in the skin', async () 
   assert.ok(config.assets.includes('qml/LyricFlow.qml'));
   assert.ok(!config.shaders?.length, '扫掠不再依赖着色器');
   assert.ok(!config.assets.some((asset) => asset.startsWith('shaders/')));
+  // 播放控制与播放顺序按钮样式对照旧插件：旧版内联 SVG 资产 + .amms-ctrl-btn 尺寸/配色
+  assert.ok(skin.includes('AmCtrlButton'), '播放控制按钮必须使用旧版样式组件');
+  assert.ok(skin.includes('icons/shuffle.svg'), '随机播放使用旧版图标');
+  assert.ok(skin.includes('icons/loop.svg'), '列表循环使用旧版图标');
+  assert.ok(skin.includes('icons/skip.svg'), '上一首/下一首使用旧版图标');
+  assert.ok(skin.includes('icons/pause.svg') && skin.includes('icons/play.svg'));
+  assert.ok(skin.includes('anchors.leftMargin: -13'), '两侧模式钮外扩 13px（旧版 margin 0 -13px）');
+  assert.ok(skin.includes('alpha: root.playMode === 2 ? 1 : 0.5'), '随机激活态全白、非激活 0.5 白');
+  for (const icon of ['shuffle', 'skip', 'play', 'pause', 'loop'])
+    assert.ok(config.assets.includes(`qml/icons/${icon}.svg`), `缺少旧版图标资产 ${icon}.svg`);
 });

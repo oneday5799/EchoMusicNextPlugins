@@ -10,6 +10,11 @@
     "qml/AmllInterlude.qml",
     "icon.svg",
     "preview.jpg",
-    "LICENSE"
+    "LICENSE",
+    "qml/icons/shuffle.svg",
+    "qml/icons/skip.svg",
+    "qml/icons/play.svg",
+    "qml/icons/pause.svg",
+    "qml/icons/loop.svg"
   ]
 }

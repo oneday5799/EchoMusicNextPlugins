@@ -436,34 +436,36 @@ Item {
                 }
 
                 // 播放控制：随机 | 上一首/播放/下一首 | 列表循环
+                // 布局与尺寸逐项对照旧插件（.amms-playback-controls）：两侧 48px 模式钮
+                // 外扩 13px（margin 0 -13px），中央 72px 钮组间距 16px
                 Item {
                     Layout.fillWidth: true
                     Layout.preferredHeight: 72
 
-                    EchoIconButton {
+                    AmCtrlButton {
                         anchors.left: parent.left
+                        anchors.leftMargin: -13
                         anchors.verticalCenter: parent.verticalCenter
-                        glyph: "arrows-shuffle"
-                        text: qsTr("随机播放")
-                        colors: root.am
-                        foreground: root.playMode === 2 ? "#ffffff" : "#80ffffff"
+                        box: 48
+                        glyphSize: 22
+                        alpha: root.playMode === 2 ? 1 : 0.5
+                        asset: "icons/shuffle.svg"
+                        label: qsTr("随机播放")
                         enabled: root.page.active && root.player.hasTrack
-                        implicitWidth: 48
-                        implicitHeight: 48
                         onClicked: root.page.command("mode", {
                             "value": 2
                         })
                     }
-                    EchoIconButton {
+                    AmCtrlButton {
                         anchors.right: parent.right
+                        anchors.rightMargin: -13
                         anchors.verticalCenter: parent.verticalCenter
-                        glyph: "repeat"
-                        text: qsTr("列表循环")
-                        colors: root.am
-                        foreground: root.playMode === 0 ? "#ffffff" : "#80ffffff"
+                        box: 48
+                        glyphSize: 22
+                        alpha: root.playMode === 0 ? 1 : 0.5
+                        asset: "icons/loop.svg"
+                        label: qsTr("列表循环")
                         enabled: root.page.active && root.player.hasTrack
-                        implicitWidth: 48
-                        implicitHeight: 48
                         onClicked: root.page.command("mode", {
                             "value": 0
                         })
@@ -472,25 +474,31 @@ Item {
                         anchors.centerIn: parent
                         spacing: 16
 
-                        AmTransportButton {
-                            glyph: "player-skip-back"
+                        AmCtrlButton {
+                            box: 72
+                            glyphSize: 42
+                            alpha: 0.75
+                            asset: "icons/skip.svg"
                             label: qsTr("上一首")
-                            iconSize: 34
                             enabled: root.page.active && root.player.hasTrack
                             onClicked: root.page.command("previous")
                         }
-                        AmTransportButton {
-                            glyph: root.player.playing ? "pause" : "play"
+                        AmCtrlButton {
+                            box: 72
+                            glyphSize: 36
+                            alpha: 1
+                            asset: root.player.playing ? "icons/pause.svg" : "icons/play.svg"
                             label: root.player.playing ? qsTr("暂停") : qsTr("播放")
-                            iconSize: 36
-                            foreground: "#ffffff"
                             enabled: root.page.active && root.player.hasTrack
                             onClicked: root.page.command("toggle")
                         }
-                        AmTransportButton {
-                            glyph: "player-skip-forward"
+                        AmCtrlButton {
+                            box: 72
+                            glyphSize: 42
+                            alpha: 0.75
+                            asset: "icons/skip.svg"
+                            mirror: true
                             label: qsTr("下一首")
-                            iconSize: 34
                             enabled: root.page.active && root.player.hasTrack
                             onClicked: root.page.command("next")
                         }
@@ -600,43 +608,112 @@ Item {
         }
     }
 
-    // 播放控制圆钮，对应旧版 72px 大按钮的按压缩放
-    component AmTransportButton: AbstractButton {
-        id: transportButton
-        property string glyph
+    // 播放控制圆钮，样式逐项对照旧插件 .amms-ctrl-btn（style.css）：
+    // 48/72px 圆钮；悬停 15% 白圆底（background 0.18s 过渡）；图标为旧版内联 SVG
+    // 打包资产（白色，透明度着色：常态 0.75、随机/循环 0.5、激活与播放钮全白）；
+    // 按压时序 = 旧版 pressing/holding/releasing 关键帧——压下 0.2s 缩至 0.8，
+    // 长按 0.3s 回弹 0.9，释放 0.3s 弹至 1.1 再回 1（释放期间忽略新按压）。
+    component AmCtrlButton: AbstractButton {
+        id: ctrl
         property string label
-        property real iconSize: 34
-        property color foreground: "#c0ffffff"
+        property string asset
+        property real box: 72
+        property real glyphSize: 36
+        property real alpha: 0.75
+        property bool mirror: false
 
-        implicitWidth: 72
-        implicitHeight: 72
+        implicitWidth: box
+        implicitHeight: box
         hoverEnabled: true
         Accessible.name: label
-        scale: pressed ? 0.86 : 1
-        Behavior on scale {
-            enabled: root.motion
+        transformOrigin: Item.Center
+        function endPress(): void {
+            holdTimer.stop();
+            if (!pressAnim.running && scale > 0.999)
+                return;
+            pressAnim.stop();
+            releaseStep1.from = scale;
+            releaseSeq.start();
+        }
+        onPressed: {
+            // 释放弹回期间忽略新按压（旧版 btnReleasing 守卫）
+            if (releaseSeq.running)
+                return;
+            releaseSeq.stop();
+            pressAnim.from = scale;
+            pressAnim.to = 0.8;
+            pressAnim.restart();
+            holdTimer.restart();
+        }
+        onReleased: endPress()
+        onCanceled: endPress()
+
+        Timer {
+            id: holdTimer
+            interval: 200
+            onTriggered: {
+                pressAnim.stop();
+                holdAnim.from = ctrl.scale;
+                holdAnim.to = 0.9;
+                holdAnim.restart();
+            }
+        }
+        NumberAnimation {
+            id: pressAnim
+            target: ctrl
+            property: "scale"
+            duration: 200
+            easing.type: Easing.BezierSpline
+            easing.bezierCurve: [0.25, 0.1, 0.25, 1, 1, 1]
+        }
+        NumberAnimation {
+            id: holdAnim
+            target: ctrl
+            property: "scale"
+            duration: 300
+            easing.type: Easing.BezierSpline
+            easing.bezierCurve: [0.25, 0.1, 0.25, 1, 1, 1]
+        }
+        SequentialAnimation {
+            id: releaseSeq
             NumberAnimation {
-                duration: 140
-                easing.type: Easing.OutCubic
+                id: releaseStep1
+                target: ctrl
+                property: "scale"
+                to: 1.1
+                duration: 200
+                easing.type: Easing.BezierSpline
+                easing.bezierCurve: [0.25, 0.1, 0.25, 1, 1, 1]
+            }
+            NumberAnimation {
+                target: ctrl
+                property: "scale"
+                to: 1
+                duration: 100
+                easing.type: Easing.BezierSpline
+                easing.bezierCurve: [0.25, 0.1, 0.25, 1, 1, 1]
             }
         }
         background: Rectangle {
             radius: width / 2
-            color: transportButton.enabled && transportButton.hovered ? "#26ffffff" : "transparent"
+            color: ctrl.enabled && ctrl.hovered ? "#26ffffff" : "transparent"
             Behavior on color {
-                enabled: root.motion
                 ColorAnimation {
-                    duration: 150
+                    duration: 180
                 }
             }
         }
         contentItem: Item {
-            EchoIcon {
+            Image {
                 anchors.centerIn: parent
-                width: transportButton.iconSize
-                height: transportButton.iconSize
-                name: transportButton.glyph
-                color: transportButton.foreground
+                width: ctrl.glyphSize
+                height: ctrl.glyphSize
+                source: ctrl.asset
+                sourceSize: Qt.size(ctrl.glyphSize, ctrl.glyphSize)
+                fillMode: Image.PreserveAspectFit
+                mirror: ctrl.mirror
+                opacity: ctrl.enabled ? ctrl.alpha : ctrl.alpha * 0.6
+                smooth: true
             }
         }
     }
