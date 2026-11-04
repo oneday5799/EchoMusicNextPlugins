@@ -30,5 +30,9 @@
   },
   "capabilities": ["appIcons", "localFiles"],
   "contexts": ["main"],
-  "tags": ["图标", "托盘", "快捷方式"]
+  "tags": ["图标", "托盘", "快捷方式"],
+  "distribution": {
+    "artifact": "artifacts/custom-icon-1.0.0.echomod",
+    "sha256": "065baf5da71cb915dbbf5868a26bb427f9ce4ba91b824a3f79b614bc8713f19e"
+  }
 }
