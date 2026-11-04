@@ -12,10 +12,12 @@
     },
     {
       "id": "apple-music-style",
+      "repo": "https://github.com/oneday5799/EchoMusicNextPlugins",
       "path": "plugins/apple-music-style"
     },
     {
       "id": "auto-team-vip",
+      "repo": "https://github.com/oneday5799/EchoMusicNextPlugins",
       "path": "plugins/auto-team-vip"
     },
     {
