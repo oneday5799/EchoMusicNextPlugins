@@ -38,5 +38,9 @@
     "kugouVerification"
   ],
   "contexts": ["main"],
-  "tags": ["组队", "VIP"]
+  "tags": ["组队", "VIP"],
+  "distribution": {
+    "artifact": "artifacts/auto-team-vip-1.2.7.echomod",
+    "sha256": "9556d39865714c70083d94bc71dba184b052ba8b7d6d97e7cbbc46f656f04892"
+  }
 }
