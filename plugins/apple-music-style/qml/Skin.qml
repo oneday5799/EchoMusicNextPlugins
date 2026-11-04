@@ -379,9 +379,11 @@ Item {
 
                     Item {
                         id: track
+                        // 轨道盒顶对齐（旧版流式布局：信息块 16px 间距后紧跟轨道），
+                        // 12 + 14 + 时间行恰好占满 46px 段高，时间行不再侵入按钮悬停区
+                        anchors.top: parent.top
                         anchors.left: parent.left
                         anchors.right: parent.right
-                        anchors.verticalCenter: parent.verticalCenter
                         height: 12
 
                         Rectangle {
