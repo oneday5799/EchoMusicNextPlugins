@@ -9,7 +9,8 @@
 //   - 组队接口改为直连 gateway.kugou.com 的 /youth/v1/ut/*（与旧宿主内置模块逐位对齐），
 //     签名/加密在插件内实现（src/crypto.ts）。
 //   - 验证码走 ctx.kugou.verify(eventId)，由宿主现有验证界面承接。
-//   - Vue 弹窗改为原生 QML 页面（qml/TeamPanel.qml），经标题栏 ★ 动作打开。
+//   - Vue teleport 弹窗改为原生 QML：标题栏 ★ 打开主窗口共享弹层（默认入口），
+//     弹层不可用时回退页面面板。
 
 import { awaitOperation, type EchoPluginContext, type EchoPluginDialog } from 'echo:plugin-sdk';
 import {

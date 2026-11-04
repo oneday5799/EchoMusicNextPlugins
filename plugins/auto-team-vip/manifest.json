@@ -41,6 +41,6 @@
   "tags": ["组队", "VIP"],
   "distribution": {
     "artifact": "artifacts/auto-team-vip-1.2.7.echomod",
-    "sha256": "9556d39865714c70083d94bc71dba184b052ba8b7d6d97e7cbbc46f656f04892"
+    "sha256": "37cb2372535d6dd530004c9976c1f874efa0ea0ff8af5ad1c10f68aee710a393"
   }
 }

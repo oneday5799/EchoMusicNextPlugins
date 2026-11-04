@@ -568,7 +568,8 @@ test('manual mode auto-creates a kugou team while keeping the pool untouched', a
   assert.equal(m.state.lastError, null);
 });
 
-test('manual mode skips doomed create when the device is already in a joined team', async () => {
+test('manual mode also creates its own team when the account already joined one', async () => {
+  let created = false;
   const m = mockServices({
     autoEnabled: false,
     gatewayRoutes: {
@@ -581,18 +582,25 @@ test('manual mode skips doomed create when the device is already in a joined tea
       '/youth/v1/ut/get_my_team_info': () => ({
         ok: true,
         status: 200,
-        body: teamInfoBody(null, [{ team_code: 'OTHERS', member_count: 2 }]),
+        body: teamInfoBody(created ? { team_code: 'MINE', member_count: 1 } : null, [
+          { team_code: 'OTHERS', member_count: 2 },
+        ]),
         headers: {},
       }),
+      '/youth/v1/ut/create_team': () => {
+        created = true;
+        return { ok: true, status: 200, body: { status: 1, error_code: 0 }, headers: {} };
+      },
     },
   });
   const runner = createRunner(m.services);
   await runner.requestRun('startup', { force: true });
-  // 设备已被加入的队伍占用（酷狗单队约束）：不发起注定被拒的 create，直接展示加入状态
+  // 建队与加入相互独立：已加入他人队伍也不妨碍建自己的队，面板两维度都展示
   assert.equal(
-    m.calls.gateway.some((r) => new URL(r.url).pathname === '/youth/v1/ut/create_team'),
-    false,
+    m.calls.gateway.filter((r) => new URL(r.url).pathname === '/youth/v1/ut/create_team').length,
+    1,
   );
+  assert.equal(m.state.myCode, 'MINE');
   assert.equal(m.state.joinedCode, 'OTHERS');
   assert.equal(m.state.lastError, null);
   assert.deepEqual(
@@ -857,8 +865,9 @@ test('a create_team rejected as already-created surfaces the existing team witho
 
   assert.equal(m.state.myCode, 'MINE');
   assert.ok(m.calls.gateway.some((call) => call.url.endsWith('/create_team')));
-  // 创建队（即使未满员）占用设备：join 仅探得 pool_empty 即转建队，不消耗租约、不报错
-  assert.equal(m.state.lastError, null);
+  // 前置建队取回已有队伍码后照常租码：池空仅武装退避并提示等待，不消耗租约
+  assert.equal(m.state.lastError.code, 'pool_empty');
+  assert.equal(runner.poolEmptyBackoff.step, 1);
   assert.equal(
     m.calls.pool.some((call) => call.path === '/v2/join/result'),
     false,
@@ -964,6 +973,15 @@ test('a captain rejected by 143005 stops leasing for the period', async () => {
     false,
   );
   assert.equal(m.state.lastError, null);
+
+  // 账号切换：143005 是账号资格问题，新账号不应继承本设备上的退回状态
+  await runner.resetForAccountChange();
+  m.calls.pool.length = 0;
+  await runner.requestRun('third', { force: true });
+  assert.equal(
+    m.calls.pool.some((call) => call.path === '/v2/join'),
+    true,
+  );
 });
 
 test('a full created team alone is terminal: no pool join, no error', async () => {
@@ -1152,7 +1170,7 @@ test('a persistently unreadable created code stops without joining the pool', as
   await runner.requestRun('startup', { force: true });
 
   assert.equal(m.state.lastError && m.state.lastError.code, 'created_team_unreadable');
-  // 设备已绑定自己创建的队伍：报错后终止本轮，不消耗租约、不在酷狗侧发起 join
+  // 本期已有创建队但酷狗查不到码：报错后终止本轮，不消耗租约、不在酷狗侧发起 join
   assert.equal(
     m.calls.pool.some((call) => call.path === '/v2/join/result'),
     false,
@@ -1335,7 +1353,8 @@ test('a cached created code from another account or period is not shown', async 
   assert.equal(m.state.myCode, '');
 });
 
-test('a fresh device leases a code, joins and confirms with a snapshot without creating a team', async () => {
+test('a fresh device creates its team upfront, then leases a code and joins another team', async () => {
+  let created = false;
   let joinedCode = '';
   const m = mockServices({
     gatewayRoutes: {
@@ -1348,9 +1367,16 @@ test('a fresh device leases a code, joins and confirms with a snapshot without c
       '/youth/v1/ut/get_my_team_info': () => ({
         ok: true,
         status: 200,
-        body: teamInfoBody(null, joinedCode ? [{ team_code: joinedCode, member_count: 2 }] : []),
+        body: teamInfoBody(
+          created ? { team_code: 'MINE', member_count: 1 } : null,
+          joinedCode ? [{ team_code: joinedCode, member_count: 2 }] : [],
+        ),
         headers: {},
       }),
+      '/youth/v1/ut/create_team': () => {
+        created = true;
+        return { ok: true, status: 200, body: { status: 1, error_code: 0 }, headers: {} };
+      },
       '/youth/v1/ut/join_team': () => {
         joinedCode = 'JOINCODE';
         return { ok: true, status: 200, body: { status: 1, error_code: 0 }, headers: {} };
@@ -1383,21 +1409,20 @@ test('a fresh device leases a code, joins and confirms with a snapshot without c
   assert.equal(report.result, 'success');
   const confirmSnapshot = m.calls.pool[3].payload;
   assert.equal(confirmSnapshot.joined.code, 'JOINCODE');
+  assert.equal(confirmSnapshot.created.code, 'MINE');
   assert.equal(confirmSnapshot.token, 'POOL-TOKEN');
   assert.equal(m.store.poolTokens['12345'], 'POOL-TOKEN');
   assert.equal(m.state.joined, true);
   assert.equal(m.state.joinedCode, 'JOINCODE');
-  // joiner-first：无队伍的设备先租码加入，不预建队（创建队会占用设备变成队长终态）
-  assert.equal(m.state.myCode, '');
+  // 前置建队：无队伍即创建并把码供入码池；建队与加入相互独立，建完照常租码加入他人
+  assert.equal(m.state.myCode, 'MINE');
   assert.equal(m.state.lastError, null);
-  assert.equal(
-    m.calls.gateway.some((call) => call.url.endsWith('/create_team')),
-    false,
-  );
+  assert.equal(m.calls.gateway.filter((call) => call.url.endsWith('/create_team')).length, 1);
 });
 
 test('a captcha-protected join is verified through the host and retried once', async () => {
   let joinAttempts = 0;
+  let created = false;
   const m = mockServices({
     gatewayRoutes: {
       '/youth/v1/ut/get_period_info': () => ({
@@ -1410,11 +1435,15 @@ test('a captcha-protected join is verified through the host and retried once', a
         ok: true,
         status: 200,
         body: teamInfoBody(
-          null,
+          created ? { team_code: 'MINE', member_count: 1 } : null,
           joinAttempts >= 2 ? [{ team_code: 'JOINCODE', member_count: 2 }] : [],
         ),
         headers: {},
       }),
+      '/youth/v1/ut/create_team': () => {
+        created = true;
+        return { ok: true, status: 200, body: { status: 1, error_code: 0 }, headers: {} };
+      },
       '/youth/v1/ut/join_team': () => {
         joinAttempts += 1;
         if (joinAttempts === 1)
@@ -1445,7 +1474,7 @@ test('a captcha-protected join is verified through the host and retried once', a
   assert.equal(m.state.joined, true);
 });
 
-test('pool_empty falls back to creating a team and registers the code with a snapshot', async () => {
+test('pool_empty after the upfront create only arms the wait and reports the empty pool', async () => {
   let created = false;
   const m = mockServices({
     gatewayRoutes: {
@@ -1479,20 +1508,18 @@ test('pool_empty falls back to creating a team and registers the code with a sna
   const runner = createRunner(m.services);
   await runner.requestRun('startup', { force: true });
 
-  // 池空转建队：成队后补一次快照把新码注册入池，等待队员租用，不报错误
+  // 前置建队的码经首次快照入池；池空不再补建队，仅武装退避并如实提示
   const snapshots = m.calls.pool.filter((call) => call.path === '/v2/snapshot');
-  assert.equal(snapshots.length, 2);
-  assert.equal(snapshots[1].payload.created.code, 'MINE');
+  assert.equal(snapshots.length, 1);
+  assert.equal(snapshots[0].payload.created.code, 'MINE');
   assert.equal(m.state.myCode, 'MINE');
-  assert.equal(m.state.lastError, null);
-  assert.ok(m.calls.gateway.some((call) => call.url.endsWith('/create_team')));
-  assert.equal(
-    m.calls.pool.some((call) => call.path === '/v2/join'),
-    true,
-  );
+  assert.equal(m.state.lastError.code, 'pool_empty');
+  assert.match(m.state.lastError.message, /耐心等待/);
+  assert.equal(runner.poolEmptyBackoff.step, 1);
+  assert.equal(m.calls.gateway.filter((call) => call.url.endsWith('/create_team')).length, 1);
 });
 
-test('a failed pool_empty create arms the empty backoff and reports the create error', async () => {
+test('a failed upfront create does not block leasing; the empty pool still arms its backoff', async () => {
   const m = mockServices({
     gatewayRoutes: {
       '/youth/v1/ut/get_period_info': () => ({
@@ -1527,14 +1554,17 @@ test('a failed pool_empty create arms the empty backoff and reports the create e
   const runner = createRunner(m.services);
   await runner.requestRun('startup', { force: true });
 
-  assert.equal(m.state.lastError.code, 'create_team_failed');
-  assert.match(m.state.lastError.message, /活动未开始/);
+  // 建队失败不阻断本轮：快照与租码照常进行；池空退避武装，下轮自动重试建队
+  assert.ok(m.calls.pool.some((call) => call.path === '/v2/snapshot'));
+  assert.ok(m.calls.pool.some((call) => call.path === '/v2/join'));
+  assert.equal(m.state.lastError.code, 'pool_empty');
   assert.equal(runner.poolEmptyBackoff.step, 1);
   assert.equal(runner.poolEmptyBackoff.nextAttemptAt, m.clock() + 20 * 60_000);
 });
 
 test('full/invalid join failures exclude the code and retry within the round', async () => {
   let joinAttempts = 0;
+  let created = false;
   const m = mockServices({
     gatewayRoutes: {
       '/youth/v1/ut/get_period_info': () => ({
@@ -1546,9 +1576,16 @@ test('full/invalid join failures exclude the code and retry within the round', a
       '/youth/v1/ut/get_my_team_info': () => ({
         ok: true,
         status: 200,
-        body: teamInfoBody(null, joinAttempts >= 2 ? [{ team_code: 'C1', member_count: 2 }] : []),
+        body: teamInfoBody(
+          created ? { team_code: 'MINE', member_count: 1 } : null,
+          joinAttempts >= 2 ? [{ team_code: 'C1', member_count: 2 }] : [],
+        ),
         headers: {},
       }),
+      '/youth/v1/ut/create_team': () => {
+        created = true;
+        return { ok: true, status: 200, body: { status: 1, error_code: 0 }, headers: {} };
+      },
       '/youth/v1/ut/join_team': () => {
         joinAttempts += 1;
         if (joinAttempts === 1)
@@ -1602,6 +1639,12 @@ test('a device-bound 143005 with no visible team stops with a plain-language err
         body: teamInfoBody(null, []),
         headers: {},
       }),
+      '/youth/v1/ut/create_team': () => ({
+        ok: true,
+        status: 200,
+        body: { status: 1, error_code: 0 },
+        headers: {},
+      }),
       '/youth/v1/ut/join_team': () => ({
         ok: true,
         status: 502,
@@ -1623,7 +1666,7 @@ test('a device-bound 143005 with no visible team stops with a plain-language err
   const runner = createRunner(m.services);
   await runner.requestRun('startup', { force: true });
   assert.equal(m.state.lastError.code, 'device_already_bound');
-  // 详情携带原始 myinfo 响应：设备绑定来源不可见时可复制定位
+  // 详情携带原始 myinfo 响应：酷狗声称设备已绑定而查询侧看不到队伍时可复制定位
   assert.ok(
     typeof m.state.lastError.detail.myTeamInfoBody === 'string' &&
       m.state.lastError.detail.myTeamInfoBody.length > 0,
@@ -1640,6 +1683,7 @@ test('transient pool failures retry once on every pool call, not just join', asy
   let snapshotCalls = 0;
   let resultCalls = 0;
   let joined = false;
+  let created = false;
   const m = mockServices({
     gatewayRoutes: {
       '/youth/v1/ut/get_period_info': () => ({
@@ -1651,9 +1695,16 @@ test('transient pool failures retry once on every pool call, not just join', asy
       '/youth/v1/ut/get_my_team_info': () => ({
         ok: true,
         status: 200,
-        body: teamInfoBody(null, joined ? [{ team_code: 'JOINCODE', member_count: 2 }] : []),
+        body: teamInfoBody(
+          created ? { team_code: 'MINE', member_count: 1 } : null,
+          joined ? [{ team_code: 'JOINCODE', member_count: 2 }] : [],
+        ),
         headers: {},
       }),
+      '/youth/v1/ut/create_team': () => {
+        created = true;
+        return { ok: true, status: 200, body: { status: 1, error_code: 0 }, headers: {} };
+      },
       '/youth/v1/ut/join_team': () => {
         joined = true;
         return { ok: true, status: 200, body: { status: 1, error_code: 0 }, headers: {} };

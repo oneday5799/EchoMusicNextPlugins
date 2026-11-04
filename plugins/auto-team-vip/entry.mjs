@@ -996,9 +996,6 @@ function createRunner(services) {
     return __async(this, null, function* () {
       var _a, _b;
       if (current.created) return { myInfo: current, stop: false };
-      if (current.joined) {
-        return { myInfo: current, stop: false };
-      }
       if (deviceCreatedPeriods.has(periodId)) {
         const again = yield getMyTeamInfo(auth, periodId);
         ensureActive();
@@ -1431,20 +1428,29 @@ function createRunner(services) {
           return;
         }
         if (!autoOn) {
-          const ensured = yield ensureTeamCreated(
+          const ensured2 = yield ensureTeamCreated(
             auth,
             periodId,
             uid,
             myInfo,
             "可稍后重试，或手动输入组队码加入他人队伍"
           );
-          if (ensured.stop) return;
-          myInfo = ensured.myInfo;
+          if (ensured2.stop) return;
+          myInfo = ensured2.myInfo;
           lastSnapshotAt = services.now();
           applyTeamInfo(myInfo);
           clearIfNoNewError();
           return;
         }
+        const ensured = yield ensureTeamCreated(
+          auth,
+          periodId,
+          uid,
+          myInfo,
+          "仍可加入其他队伍，下轮自动重试建队"
+        );
+        if (ensured.stop) return;
+        myInfo = ensured.myInfo;
         applyTeamInfo(myInfo);
         const snap = yield doSnapshot(periodId, uid, myInfo);
         lastSnapshotAt = services.now();
@@ -1545,21 +1551,10 @@ function createRunner(services) {
           }
           if (data.reason === "pool_empty" || !data.code) {
             poolEmptyBackoffStart(poolEmptyBackoff, services.now());
-            const ensured = yield ensureTeamCreated(
-              auth,
+            setLastError("暂无可加入的队伍，可手动组队或耐心等待", "pool_empty", {
               periodId,
-              uid,
-              myInfo,
-              "稍后自动重试，或手动输入组队码加入他人队伍"
-            );
-            if (ensured.stop) return;
-            myInfo = ensured.myInfo;
-            applyTeamInfo(myInfo);
-            if (myInfo.created) {
-              yield doSnapshot(periodId, uid, myInfo);
-              lastSnapshotAt = services.now();
-              clearIfNoNewError();
-            }
+              uid
+            });
             return;
           }
           if (!data.lease_id || !data.code) {
@@ -1633,7 +1628,7 @@ function createRunner(services) {
                 uid,
                 code,
                 errorCode: failure.errorCode,
-                // 携带原始 myinfo 响应：设备绑定来源（创建队/加入队）在查询侧不可见时，
+                // 携带原始 myinfo 响应：酷狗声称设备已绑定而查询侧看不到任何队伍时，
                 // 复制错误详情即可拿到 join 列表真实字段结构，用于定位解析缺口
                 myTeamInfoBody: truncateBody(JSON.stringify(verify.raw) || "")
               });
@@ -1733,6 +1728,7 @@ function createRunner(services) {
     void loadDisabledPeriods();
     versionMismatchReported = false;
     deviceBoundToastShown = false;
+    joinBlockedPeriods.clear();
     lastRunAt = 0;
     lastSnapshotAt = 0;
     lastFullAt = 0;
