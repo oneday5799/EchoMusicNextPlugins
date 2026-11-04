@@ -323,7 +323,10 @@ Item {
                     }
                 }
 
-                // 进度条 + 时间 + 音质徽标
+                // 进度条 + 时间 + 音质徽标：布局对照旧插件——轨道盒固定 12px（--bar-h），
+                // 可见条在盒的竖直中线上放大（悬停/拖动 1.5 倍 = 18px），不推动下方时间行；
+                // 高度过渡 0.5s ease；停留 ≥100ms 后离开播放 0.5s 弹簧回落
+                // （旧 amms-progress-spring：18 → 6 → 12），悬停重新进入则冻结当前高度过渡放大
                 Item {
                     id: progressSection
                     Layout.fillWidth: true
@@ -336,29 +339,66 @@ Item {
                     property bool dragging: false
                     readonly property real shownFraction: dragging ? dragFraction : fraction
                     property string dragRevision: ""
+                    property real hoverStart: 0
+                    // 可见条高度：悬停/拖动 18px，静息 12px；轨道盒高度不变
+                    property real barHeight: progressArea.containsMouse || progressSection.dragging ? 18 : 12
+                    Behavior on barHeight {
+                        enabled: root.motion && !springSeq.running
+                        NumberAnimation {
+                            duration: 500
+                            easing.type: Easing.BezierSpline
+                            easing.bezierCurve: [0.25, 0.1, 0.25, 1, 1, 1]
+                        }
+                    }
+                    function springSettle(): void {
+                        // 旧 handleProgressMouseLeave：停留 ≥100ms 后离开才播放弹簧
+                        if (!progressArea.containsMouse && !progressSection.dragging && Date.now() - hoverStart >= 100)
+                            springSeq.restart();
+                    }
+                    SequentialAnimation {
+                        id: springSeq
+                        // 关键帧对照旧版：0% 18px → 60% 6px → 100% 12px（0.5s ease）
+                        NumberAnimation {
+                            target: progressSection
+                            property: "barHeight"
+                            from: 18
+                            to: 6
+                            duration: 300
+                            easing.type: Easing.BezierSpline
+                            easing.bezierCurve: [0.25, 0.1, 0.25, 1, 1, 1]
+                        }
+                        NumberAnimation {
+                            target: progressSection
+                            property: "barHeight"
+                            to: 12
+                            duration: 200
+                            easing.type: Easing.BezierSpline
+                            easing.bezierCurve: [0.25, 0.1, 0.25, 1, 1, 1]
+                        }
+                    }
 
-                    Rectangle {
+                    Item {
                         id: track
                         anchors.left: parent.left
                         anchors.right: parent.right
                         anchors.verticalCenter: parent.verticalCenter
-                        height: progressArea.containsMouse || progressSection.dragging ? 18 : 12
-                        radius: height / 2
-                        color: "#33ffffff"
+                        height: 12
 
-                        Behavior on height {
-                            enabled: root.motion
-                            NumberAnimation {
-                                duration: 220
-                                easing.type: Easing.OutCubic
-                            }
+                        Rectangle {
+                            id: bar
+                            anchors.left: parent.left
+                            anchors.right: parent.right
+                            anchors.verticalCenter: parent.verticalCenter
+                            height: progressSection.barHeight
+                            radius: height / 2
+                            color: "#33ffffff"
                         }
                         Rectangle {
                             id: fill
                             anchors.left: parent.left
                             anchors.verticalCenter: parent.verticalCenter
-                            width: Math.max(height, track.width * progressSection.shownFraction)
-                            height: parent.height
+                            width: Math.max(progressSection.barHeight, track.width * progressSection.shownFraction)
+                            height: progressSection.barHeight
                             radius: height / 2
                             color: "#ffffff"
                         }
@@ -370,6 +410,13 @@ Item {
                         hoverEnabled: true
                         cursorShape: Qt.PointingHandCursor
                         enabled: root.page.active && root.player.hasTrack && progressSection.durationMs > 0
+                        onContainsMouseChanged: {
+                            // 重新进入时打断弹簧：Behavior 从当前高度过渡到悬停态（旧版冻结 --fill-h）
+                            if (containsMouse)
+                                progressSection.hoverStart = Date.now();
+                            else
+                                progressSection.springSettle();
+                        }
 
                         function fractionAt(x: real): real {
                             // MouseArea 上下左右各扩 8px 命中区，换算回轨道坐标
@@ -391,14 +438,18 @@ Item {
                                 "value": Math.round(fraction * progressSection.durationMs),
                                 "revision": progressSection.dragRevision
                             });
+                            progressSection.springSettle();
                         }
-                        onCanceled: progressSection.dragging = false
+                        onCanceled: {
+                            progressSection.dragging = false;
+                            progressSection.springSettle();
+                        }
                     }
                     RowLayout {
                         anchors.left: parent.left
                         anchors.right: parent.right
                         anchors.top: track.bottom
-                        anchors.topMargin: 8
+                        anchors.topMargin: 14
                         spacing: 8
 
                         Label {
