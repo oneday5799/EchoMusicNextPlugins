@@ -1,4 +1,9 @@
 {
   "repository": "https://github.com/hoowhoami/EchoMusicNextPlugins",
-  "plugins": ["plugins/spectrum-visualizer", "plugins/apple-music-style", "plugins/auto-team-vip"]
+  "plugins": [
+    "plugins/spectrum-visualizer",
+    "plugins/apple-music-style",
+    "plugins/auto-team-vip",
+    "plugins/webdav-music"
+  ]
 }

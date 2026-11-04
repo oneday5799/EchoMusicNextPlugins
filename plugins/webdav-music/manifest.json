@@ -1,0 +1,39 @@
+{
+  "format": "echomod",
+  "schemaVersion": 1,
+  "id": "webdav-music",
+  "name": "WebDAV 音乐",
+  "version": "1.0.0",
+  "description": "连接 WebDAV 服务器，浏览、搜索并播放网盘中的音乐文件，支持内嵌与酷狗歌词封面。",
+  "author": "Oneday5799",
+  "license": "MIT",
+  "icon": "icon.svg",
+  "kind": "qml-js",
+  "entry": "entry.mjs",
+  "requires": {
+    "hostVersion": ">=0.1.0",
+    "sdkVersion": ">=1.0.0 <2.0.0",
+    "features": [
+      "lifecycle",
+      "operations",
+      "commands",
+      "storage",
+      "net.request",
+      "playback.audioSource",
+      "playback.queues",
+      "playback.controls",
+      "lyrics.resolvers",
+      "ui.pages",
+      "ui.sidebar",
+      "ui.settings",
+      "ui.state",
+      "ui.toast",
+      "ui.dialogs",
+      "tasks.full",
+      "kugou.api"
+    ]
+  },
+  "capabilities": ["unrestrictedNetwork", "audioSource", "lyrics", "kugouApi"],
+  "contexts": ["main"],
+  "tags": ["WebDAV", "音源", "网盘", "歌词"]
+}
