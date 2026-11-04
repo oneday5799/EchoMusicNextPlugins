@@ -2,10 +2,7 @@
   "repository": "https://github.com/hoowhoami/EchoMusicNextPlugins",
   "plugins": [
     "plugins/spectrum-visualizer",
-    "plugins/cloud-priority",
     "plugins/apple-music-style",
-    "plugins/auto-team-vip",
-    "plugins/custom-icon"
+    "plugins/auto-team-vip"
   ]
 }
-
