@@ -520,7 +520,7 @@ Item {
                 required qualityLabel
                 property bool pooled: false
                 width: songList.width
-                geometry: songList.geometry
+                geometry: listGeometry
                 showAlbum: root.selectedAlbum.length === 0
                 active: resourceId.length > 0 && resourceId === root.currentTrackId
                 playing: root.plugin.player.playing
