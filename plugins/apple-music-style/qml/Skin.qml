@@ -406,9 +406,27 @@ Item {
                     readonly property real fraction: durationMs > 0 ? Math.min(1, Math.max(0, root.player.positionMs / durationMs)) : 0
                     property real dragFraction: 0
                     property bool dragging: false
-                    readonly property real shownFraction: dragging ? dragFraction : fraction
+                    // seek 异步：释放后闩住目标进度，等播放位置真正到达再交还（否则先闪回旧进度）
+                    property bool seekPending: false
+                    property real seekFraction: 0
+                    readonly property real shownFraction: dragging ? dragFraction : (seekPending ? seekFraction : fraction)
                     property string dragRevision: ""
                     property real hoverStart: 0
+                    onFractionChanged: {
+                        // 到达判定：位置落在目标 ±600ms 内即解除闩锁；超时由 seekGuard 兜底
+                        if (seekPending && Math.abs(fraction - seekFraction) * durationMs <= 600)
+                            seekPending = false;
+                    }
+                    function beginSeek(target: real): void {
+                        seekFraction = target;
+                        seekPending = true;
+                        seekGuard.restart();
+                    }
+                    Timer {
+                        id: seekGuard
+                        interval: 1500
+                        onTriggered: progressSection.seekPending = false
+                    }
                     // 可见条高度：悬停/拖动 18px，静息 12px；轨道盒高度不变
                     property real barHeight: progressArea.containsMouse || progressSection.dragging ? 18 : 12
                     Behavior on barHeight {
@@ -495,6 +513,7 @@ Item {
                         }
                         onPressed: mouse => {
                             progressSection.dragging = true;
+                            progressSection.seekPending = false;
                             progressSection.dragRevision = root.player.revision;
                             progressSection.dragFraction = fractionAt(mouse.x);
                         }
@@ -505,6 +524,7 @@ Item {
                         onReleased: mouse => {
                             const fraction = fractionAt(mouse.x);
                             progressSection.dragging = false;
+                            progressSection.beginSeek(fraction);
                             root.page.command("seek", {
                                 "value": Math.round(fraction * progressSection.durationMs),
                                 "revision": progressSection.dragRevision
@@ -524,7 +544,7 @@ Item {
                         spacing: 8
 
                         Label {
-                            text: root.formatTime(progressSection.dragging ? progressSection.shownFraction * progressSection.durationMs : root.player.positionMs)
+                            text: root.formatTime(progressSection.dragging || progressSection.seekPending ? progressSection.shownFraction * progressSection.durationMs : root.player.positionMs)
                             font: Theme.font(12, Theme.mediumWeight)
                             color: "#80ffffff"
                         }
@@ -550,7 +570,7 @@ Item {
                             }
                         }
                         Label {
-                            text: "-" + root.formatTime(Math.max(0, progressSection.durationMs - root.player.positionMs))
+                            text: "-" + root.formatTime(Math.max(0, progressSection.durationMs - (progressSection.dragging || progressSection.seekPending ? progressSection.shownFraction * progressSection.durationMs : root.player.positionMs)))
                             font: Theme.font(12, Theme.mediumWeight)
                             color: "#80ffffff"
                         }
