@@ -26,6 +26,7 @@ import {
   lyricKeyOf,
   makeSongId,
   makeSourceId,
+  normalizeSortDescending,
   normalizeSortKey,
   parseSourceId,
   parseTitleArtist,
@@ -235,9 +236,18 @@ test('filterSongs 与 sortSongs', () => {
   c.title = 'Banana';
   d.title = 'Apple';
   assert.deepEqual(sortSongs([c, d], 'title'), [d, c]);
+  assert.deepEqual(sortSongs([c, d], 'title', true), [c, d]);
   assert.deepEqual(sortSongs([a, b], 'size'), [b, a]);
+  assert.deepEqual(sortSongs([a, b], 'size', true), [a, b]);
   // b lives at /a.mp3, a at /b.mp3: filename order puts b first.
   assert.deepEqual(sortSongs([a, b], 'name'), [b, a]);
+  a.durationMs = 3000;
+  b.durationMs = 1500;
+  assert.deepEqual(sortSongs([a, b], 'duration'), [b, a]);
+  assert.equal(normalizeSortDescending(2), true);
+  assert.equal(normalizeSortDescending(1), false);
+  assert.equal(normalizeSortDescending(undefined), false);
+  assert.equal(normalizeSortDescending('desc'), true);
   assert.equal(normalizeSortKey('size'), 'size');
   assert.equal(normalizeSortKey('bogus'), 'title');
   assert.equal(normalizeSortKey(undefined), 'title');

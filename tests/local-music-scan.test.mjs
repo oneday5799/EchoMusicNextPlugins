@@ -469,6 +469,11 @@ test('端到端：添加文件夹 → 扫描 → 页命令 → 播放与音源�
     assert.ok(unknown);
     assert.ok(unknown.cover.startsWith('data:image/jpeg'), '文件夹封面应作为专辑封面回退');
 
+    // Row cover lookup mirrors what the page sends after each page load.
+    const covers = await commands.get('library.covers')({ ids: [flacRow.id, mp3Row.id] });
+    assert.equal(covers.covers[flacRow.id], unknown.cover);
+    assert.equal(covers.covers[mp3Row.id], undefined, '无封面的曲目不应有条目');
+
     // Keyword filtering mirrors what the page sends.
     const filtered = await commands.get('library.page')({ offset: 0, limit: 10, keyword: '标签' });
     assert.equal(filtered.total, 1);

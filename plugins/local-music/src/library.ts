@@ -251,7 +251,7 @@ export function filterSongs(songs: SongInit[], filter: SongFilter): SongInit[] {
   return result;
 }
 
-export type SongSortKey = 'title' | 'artist' | 'album' | 'name' | 'size';
+export type SongSortKey = 'title' | 'artist' | 'album' | 'name' | 'size' | 'duration';
 
 const SORTERS: { [key in SongSortKey]: (a: SongInit, b: SongInit) => number } = {
   title: (a, b) => compareText(a.title, b.title) || compareText(a.path, b.path),
@@ -259,6 +259,7 @@ const SORTERS: { [key in SongSortKey]: (a: SongInit, b: SongInit) => number } = 
   album: (a, b) => compareText(albumKeyOf(a), albumKeyOf(b)) || compareText(a.title, b.title),
   name: (a, b) => compareText(a.path, b.path),
   size: (a, b) => b.size - a.size,
+  duration: (a, b) => a.durationMs - b.durationMs || compareText(a.path, b.path),
 };
 
 export function normalizeSortKey(value: JsonValue | undefined): SongSortKey {
@@ -266,9 +267,15 @@ export function normalizeSortKey(value: JsonValue | undefined): SongSortKey {
   return 'title';
 }
 
-export function sortSongs(songs: SongInit[], sort: SongSortKey): SongInit[] {
+/** The host sort header signals 1 = ascending, 2 = descending. */
+export function normalizeSortDescending(value: JsonValue | undefined): boolean {
+  return value === 2 || value === 'desc';
+}
+
+export function sortSongs(songs: SongInit[], sort: SongSortKey, descending = false): SongInit[] {
   const sorted = songs.slice();
   sorted.sort(SORTERS[sort]);
+  if (descending && sorted.length > 1) sorted.reverse();
   return sorted;
 }
 

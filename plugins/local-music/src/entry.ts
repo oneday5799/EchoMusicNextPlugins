@@ -38,6 +38,7 @@ import {
   filterSongs,
   groupAlbums,
   lyricKeyOf,
+  normalizeSortDescending,
   normalizeSortKey,
   parseSourceId,
   qualityForExtension,
@@ -621,12 +622,14 @@ function viewFilter(args: Record<string, JsonValue>): {
   folderId: string;
   album: string;
   sort: SongSortKey;
+  descending: boolean;
 } {
   return {
     keyword: argString(args, 'keyword'),
     folderId: argString(args, 'folderId'),
     album: argString(args, 'album'),
     sort: normalizeSortKey(args ? args.sort : undefined),
+    descending: normalizeSortDescending(args ? args.sortDir : undefined),
   };
 }
 
@@ -634,7 +637,7 @@ function collectionView(args: Record<string, JsonValue>): SongInit[] {
   const filter = viewFilter(args);
   const key = JSON.stringify(filter);
   if (key !== viewCacheKey) {
-    viewCacheSongs = sortSongs(filterSongs(librarySongs, filter), filter.sort);
+    viewCacheSongs = sortSongs(filterSongs(librarySongs, filter), filter.sort, filter.descending);
     viewCacheKey = key;
   }
   return viewCacheSongs;
@@ -663,6 +666,7 @@ async function libraryAlbums(args: Record<string, JsonValue>): Promise<JsonValue
   const visible = sortSongs(
     filterSongs(librarySongs, { keyword, folderId, album: '' }),
     normalizeSortKey(args ? args.sort : undefined),
+    normalizeSortDescending(args ? args.sortDir : undefined),
   );
   const albums = groupAlbums(visible).filter(
     (album) => !keyword || album.name.toLowerCase().indexOf(keyword.trim().toLowerCase()) >= 0,
@@ -681,6 +685,25 @@ async function libraryAlbums(args: Record<string, JsonValue>): Promise<JsonValue
     albumRow(album.name, album.count, covers[index] ?? ''),
   );
   return { ready: true, total: albums.length, offset, limit, albums: rows };
+}
+
+/** Cover lookup for the song rows the page currently displays. */
+async function libraryCovers(args: Record<string, JsonValue>): Promise<JsonValue> {
+  if (!libraryReady) return { covers: {} };
+  const ctx = requireContext();
+  const ids = argStringArray(args, 'ids');
+  const covers: { [key: string]: JsonValue } = {};
+  await Promise.all(
+    ids.map(async (id) => {
+      try {
+        const url = await readCover(ctx, id);
+        if (url) covers[id] = url;
+      } catch (error) {
+        // Missing covers simply keep the placeholder art.
+      }
+    }),
+  );
+  return { covers };
 }
 
 // ── Playback ───────────────────────────────────────────────────────────────
@@ -925,6 +948,7 @@ export async function activate(ctx: EchoPluginContext): Promise<void> {
   ctx.registerCommand('library.abort', () => stopScan());
   ctx.registerCommand('library.page', (commandArgs) => libraryPage(commandArgs));
   ctx.registerCommand('library.albums', (commandArgs) => libraryAlbums(commandArgs));
+  ctx.registerCommand('library.covers', (commandArgs) => libraryCovers(commandArgs));
   ctx.registerCommand('play', (commandArgs) => playCommand(commandArgs));
 
   ctx.ui.setState({ settingsRevision, scan: null, libraryRevision: 0 });
