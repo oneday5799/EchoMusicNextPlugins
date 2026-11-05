@@ -757,12 +757,30 @@ Item {
             stickyTop: pageHeader.height
             height: toolbarColumn.implicitHeight
 
+            // Shared rule: one hairline between the tab row and the sort
+            // header. Like the host pages it overlays the tab row's last
+            // device row instead of occupying a layout row, so the sort
+            // header and its own bottom divider keep the host's exact
+            // offsets. The shared control parks the line on a whole device
+            // row under fractional Windows scaling.
+            EchoDivider {
+                objectName: "localMusicToolbarDivider"
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.leftMargin: root.contentInset
+                anchors.rightMargin: root.contentInset
+                y: tabsRow.height - 1
+                height: 1
+                lineColor: Theme.subtleBorder
+            }
+
             ColumnLayout {
                 id: toolbarColumn
                 anchors.fill: parent
                 spacing: 0
 
                 RowLayout {
+                    id: tabsRow
                     objectName: "localMusicToolbarRow"
                     Layout.fillWidth: true
                     Layout.preferredHeight: 56
@@ -826,17 +844,6 @@ Item {
                         visible: !root.albumGridActive
                         onClicked: root.locateCurrent()
                     }
-                }
-                // Shared rule: one hairline between the tab row and the sort
-                // header; SongListHeader draws its own bottom divider. The
-                // shared control parks the line on a whole device row, so
-                // fractional Windows scaling cannot straddle two rows.
-                EchoDivider {
-                    objectName: "localMusicToolbarDivider"
-                    Layout.fillWidth: true
-                    Layout.leftMargin: root.contentInset
-                    Layout.rightMargin: root.contentInset
-                    lineColor: Theme.subtleBorder
                 }
                 SongListHeader {
                     visible: !root.albumGridActive
