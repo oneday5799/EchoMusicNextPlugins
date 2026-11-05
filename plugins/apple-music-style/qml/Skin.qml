@@ -215,9 +215,16 @@ Item {
                         source: root.player.coverUrl
                         cornerRadius: 14
                         colors: root.am
+                        // 切歌换图期间保留旧图（同 PortraitBackdrop）：避免 Image 加载期
+                        // hasArtwork 短暂失效使圆角遮罩 Loader 反复重建——封面闪烁与卡顿来源
+                        retainWhileLoading: true
                         // 封面弹簧对照旧插件 coverAnim（500ms ease 关键帧）：
                         // 播放 0.75 → 1.1（60%） → 1；暂停 1 → 0.75；挂载时直接落位不动画
-                        Component.onCompleted: scale = root.player.playing ? 1 : 0.75
+                        property bool lastPlaying: false
+                        Component.onCompleted: {
+                            scale = root.player.playing ? 1 : 0.75;
+                            lastPlaying = root.player.playing;
+                        }
                         SequentialAnimation {
                             id: coverSpring
                             NumberAnimation {
@@ -250,11 +257,40 @@ Item {
                         }
                         Connections {
                             target: root.player
+                            // 按封面实际呈现收敛：只在该动的端点间驱动弹簧，
+                            // 切歌后自动起播时封面已在满尺寸，不重复弹簧
+                            function syncCoverAnimated(): void {
+                                if (root.player.playing) {
+                                    if (coverItem.scale < 0.9)
+                                        coverSpring.restart();
+                                } else {
+                                    if (coverItem.scale > 0.9)
+                                        coverShrink.restart();
+                                }
+                            }
                             function onPlayingChanged(): void {
-                                if (root.player.playing)
-                                    coverSpring.restart();
-                                else
-                                    coverShrink.restart();
+                                // 播放态 NOTIFY 与曲名/封面等共用 changed 信号，按真实变化去重；
+                                // 切歌加载期 playing 会 False→True 抖动，只记账不驱动封面
+                                if (root.player.loading) {
+                                    coverItem.lastPlaying = root.player.playing;
+                                    return;
+                                }
+                                if (coverItem.lastPlaying === root.player.playing)
+                                    return;
+                                coverItem.lastPlaying = root.player.playing;
+                                syncCoverAnimated();
+                            }
+                            function onLoadingChanged(): void {
+                                // 加载完成后收敛到最终播放态（加载期被跳过的状态在此落位；
+                                // 连续播放跨曲时封面已在满尺寸，弹簧不触发）
+                                if (root.player.loading)
+                                    return;
+                                if (coverItem.lastPlaying !== root.player.playing) {
+                                    coverItem.lastPlaying = root.player.playing;
+                                    syncCoverAnimated();
+                                } else if (root.player.playing !== (coverItem.scale > 0.9)) {
+                                    syncCoverAnimated();
+                                }
                             }
                         }
                     }
