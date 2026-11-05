@@ -100,8 +100,8 @@ test('normalizeSettings 去重并回退默认值', () => {
     onlineFetch: true,
   });
   assert.deepEqual(settings.folders, [
-    { id: 'a', name: '音乐' },
-    { id: 'b', name: '' },
+    { id: 'a', name: '音乐', path: '' },
+    { id: 'b', name: '', path: '' },
   ]);
   assert.equal(settings.readEmbedded, true);
   assert.equal(settings.onlineFetch, true);

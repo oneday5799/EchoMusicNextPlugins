@@ -99,8 +99,18 @@ const GRANT = {
 
 /** File tree: path → {size, directory}. */
 function makeFilesContext(tree, options = {}) {
+  // grantId is parameterized so tests can simulate the host ledger re-issuing
+  // the same directory under a new id after reinstall.
+  const grantId = options.grantId || 'g1';
+  const revision = options.grantRevision || 'r1';
+  const grant = {
+    ...GRANT,
+    id: grantId,
+    revision,
+    file: { grantId, revision, path: '' },
+  };
   const entries = Object.entries(tree).map(([path, info]) => ({
-    file: { grantId: 'g1', revision: 'r1', path },
+    file: { grantId, revision, path },
     name: path.split('/').pop(),
     size: info.size ?? 10,
     modifiedAt: 0,
@@ -110,7 +120,7 @@ function makeFilesContext(tree, options = {}) {
   return {
     listGrants() {
       const op = new FakeOperation();
-      op.resolve([GRANT]);
+      op.resolve([grant]);
       return op;
     },
     revoke() {
@@ -185,7 +195,7 @@ function makeFilesContext(tree, options = {}) {
     },
     requestDirectory() {
       const op = new FakeOperation();
-      op.resolve({ canceled: false, directory: GRANT });
+      op.resolve({ canceled: false, directory: grant });
       return op;
     },
   };
@@ -606,6 +616,58 @@ test('缓存预热：第二次激活直接就绪', async () => {
     assert.equal(info.count, 2);
     const page = await second.commands.get('library.page')({ offset: 0, limit: 10 });
     assert.equal(page.total, 2);
+  } finally {
+    await second.deactivate();
+  }
+});
+
+test('授权重发：重装后按路径自动认领文件夹', async () => {
+  // Session 1: grant g1, folder added normally.
+  const store = new Map();
+  const first = await activateWith(entryTree(), {}, store);
+  try {
+    const added = await first.commands.get('folders.add')({});
+    assert.equal(added.ok, true);
+    assert.equal(added.id, 'g1');
+    const snapshot = await first.commands.get('settings.get')({});
+    assert.equal(snapshot.folders[0].path, 'C:/Music', '路径应随文件夹持久化');
+  } finally {
+    await first.deactivate();
+  }
+
+  // Session 2: the ledger re-issued the same directory as grant g2 (e.g.
+  // after uninstall/reinstall). Activation must re-claim it by path instead
+  // of showing a dead "unavailable" folder, and scanning must work again.
+  const second = await activateWith(entryTree(), { grantId: 'g2', grantRevision: 'r2' }, store);
+  try {
+    const snapshot = await second.commands.get('settings.get')({});
+    assert.equal(snapshot.folders.length, 1, '不应出现重复或残留的死条目');
+    assert.equal(snapshot.folders[0].id, 'g2', '应自动认领重发的授权');
+    assert.equal(snapshot.folders[0].name, 'Music', '保留用户改过的名称');
+    assert.equal(snapshot.folders[0].available, true);
+
+    // The persisted settings store carries the adopted id too.
+    assert.equal(store.get('settings').folders[0].id, 'g2');
+    assert.equal(store.get('settings').folders[0].path, 'C:/Music');
+
+    // The old cache referenced the dead grant id, so one rescan rebuilds it
+    // under the adopted id — the folder itself survived, which is the point.
+    const staleInfo = await second.commands.get('library.info')({});
+    assert.equal(staleInfo.available, 1, '认领后的文件夹应可用');
+    assert.equal(staleInfo.stale, true, '旧缓存应标记为过期');
+    assert.deepEqual(await second.commands.get('library.scan')({}), { started: true });
+    await waitFor(() => second.published.some((entry) => entry.scan && entry.scan.done === true));
+    const info = await pollInfo(second.commands, (value) => value && value.ready);
+    assert.equal(info.ready, true);
+    assert.equal(info.count, 2);
+
+    // Re-adding the already re-claimed directory reports a duplicate instead
+    // of duplicating the row.
+    const added = await second.commands.get('folders.add')({});
+    assert.equal(added.ok, false);
+    assert.equal(added.duplicate, true);
+    const after = await second.commands.get('settings.get')({});
+    assert.equal(after.folders.length, 1);
   } finally {
     await second.deactivate();
   }

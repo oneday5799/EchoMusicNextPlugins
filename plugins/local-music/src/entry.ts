@@ -102,6 +102,8 @@ let registrations: EchoPluginRegistration[] = [];
 /** grantId → current FileReference, refreshed on activation and on failure. */
 let grantRefs = new Map<string, FileReference>();
 let grantPaths = new Map<string, string>();
+/** normalized display path → grant id, for re-claiming re-issued grants. */
+let grantPathsIndex = new Map<string, string>();
 let librarySongs: SongInit[] = [];
 let libraryById = new Map<string, SongInit>();
 let libraryReady = false;
@@ -146,18 +148,25 @@ function folderIdsOf(value: LocalSettings): string[] {
   return value.folders.map((folder) => folder.id);
 }
 
+function normalizeDisplayPath(value: string): string {
+  return value
+    .replace(/\\/g, '/')
+    .replace(/[\\/]+$/, '')
+    .toLowerCase();
+}
+
 function displayPathOf(folderId: string): string {
   const display = grantPaths.get(folderId);
   if (display) return display;
   const folder = findFolder(settings, folderId);
-  return folder ? folder.name || folderId : '';
+  return folder ? folder.path || folder.name || folderId : '';
 }
 
 function folderLabel(folderId: string): string {
   const folder = findFolder(settings, folderId);
   if (folder && folder.name) return folder.name;
-  const display = grantPaths.get(folderId);
-  if (display) return baseName(display.replace(/[\\/]+$/, '')) || display;
+  const display = grantPaths.get(folderId) || folder?.path || '';
+  if (display) return baseName(display) || display;
   return folderId;
 }
 
@@ -173,19 +182,51 @@ function usableFolders(): ScanFolder[] {
 async function refreshGrants(ctx: EchoPluginContext): Promise<void> {
   const refs = new Map<string, FileReference>();
   const paths = new Map<string, string>();
+  const pathIndex = new Map<string, string>();
   try {
     const grants = await awaitOperation(ctx.files.listGrants());
     for (const grant of grants ?? []) {
       const record: FileGrant = grant;
-      if (record.revoked || !record.available || !record.file) continue;
+      if (record.revoked || !record.file) continue;
+      const display = record.displayPath || record.name || '';
+      if (display) pathIndex.set(normalizeDisplayPath(display), record.id);
+      if (!record.available) continue;
       refs.set(record.id, record.file);
-      paths.set(record.id, record.displayPath || record.name || '');
+      paths.set(record.id, display);
     }
   } catch (error) {
     // Grants stay empty; commands report unavailable folders.
   }
   grantRefs = refs;
   grantPaths = paths;
+  grantPathsIndex = pathIndex;
+}
+
+/**
+ * Re-links settings folders whose grant disappeared but whose directory is
+ * granted again under a new id (the host ledger drops grants that belong to
+ * an installation that no longer exists, e.g. after uninstall/reinstall).
+ * Adopting the new grant id keeps the user's folder list intact instead of
+ * quietly dying as "unavailable".
+ */
+async function reconcileFolders(ctx: EchoPluginContext): Promise<void> {
+  let changed = false;
+  const folders = settings.folders.map((folder) => {
+    if (grantRefs.has(folder.id) || !folder.path) return folder;
+    const reclaimed = grantPathsIndex.get(normalizeDisplayPath(folder.path));
+    if (!reclaimed || reclaimed === folder.id) return folder;
+    changed = true;
+    return { ...folder, id: reclaimed };
+  });
+  if (!changed) return;
+  settings = { ...settings, folders };
+  try {
+    await awaitOperation(ctx.io.writeValue(SETTINGS_KEY, settingsToValue(settings)));
+    settingsRevision += 1;
+    publishState();
+  } catch (error) {
+    // The re-claim still works for this session even if the persist failed.
+  }
 }
 
 function refFor(folderId: string): FileReference | null {
@@ -541,7 +582,11 @@ function folderSignatureOf(value: LocalSettings): string {
 
 function settingsToValue(value: LocalSettings): JsonValue {
   return {
-    folders: value.folders.map((folder) => ({ id: folder.id, name: folder.name })),
+    folders: value.folders.map((folder) => ({
+      id: folder.id,
+      name: folder.name,
+      path: folder.path,
+    })),
     readEmbedded: value.readEmbedded,
     onlineFetch: value.onlineFetch,
   };
@@ -577,12 +622,28 @@ async function addFolder(): Promise<JsonValue> {
     return { ok: false, canceled: true };
   }
   const grant: FileGrant = selection.directory;
+  const displayPath = grant.displayPath || grant.name || '';
   await refreshGrants(ctx);
-  if (findFolder(settings, grant.id)) {
-    return { ok: false, duplicate: true, message: '该文件夹已在列表中' };
+  // A dead entry for the same directory (its grant died with a previous
+  // installation) is re-claimed in place instead of duplicating the row.
+  const normalized = normalizeDisplayPath(displayPath);
+  const staleIndex = settings.folders.findIndex(
+    (folder) =>
+      folder.id === grant.id || (folder.path && normalizeDisplayPath(folder.path) === normalized),
+  );
+  if (staleIndex >= 0) {
+    const stale = settings.folders[staleIndex];
+    if (stale.id === grant.id && stale.path) {
+      return { ok: false, duplicate: true, message: '该文件夹已在列表中' };
+    }
+    const name = stale.name || suggestFolderName(grant);
+    const folders = settings.folders.slice();
+    folders[staleIndex] = { id: grant.id, name, path: displayPath };
+    await persistSettings({ ...settings, folders });
+    return { ok: true, id: grant.id, name, reclaimed: true };
   }
   const name = suggestFolderName(grant);
-  const folders = settings.folders.concat([{ id: grant.id, name }]);
+  const folders = settings.folders.concat([{ id: grant.id, name, path: displayPath }]);
   await persistSettings({ ...settings, folders });
   return { ok: true, id: grant.id, name };
 }
@@ -609,7 +670,7 @@ async function renameFolder(args: Record<string, JsonValue>): Promise<JsonValue>
   if (!folder) return { ok: false, message: '文件夹不存在' };
   const name = argString(args, 'name').trim();
   const folders = settings.folders.map((entry) =>
-    entry.id === id ? { id: entry.id, name } : entry,
+    entry.id === id ? { id: entry.id, name, path: entry.path } : entry,
   );
   await persistSettings({ ...settings, folders });
   return { ok: true };
@@ -898,8 +959,10 @@ export async function activate(ctx: EchoPluginContext): Promise<void> {
   settings = normalizeSettings((await awaitOperation(ctx.io.readValue(SETTINGS_KEY))) as JsonValue);
   // Resolve grant revisions up front: the settings page, resolvers and scans
   // all rely on grantRefs, and a not-yet-loaded map would flash folders as
-  // unavailable.
+  // unavailable. Re-claim folders whose grant was re-issued under a new
+  // installation before anything renders them as unavailable.
   await refreshGrants(ctx);
+  await reconcileFolders(ctx);
   tagReader = createTagReader(ctx, refFor);
   lyricEngine = createLyricEngine(ctx, {
     onlineFetch: () => settings.onlineFetch,

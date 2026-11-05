@@ -9,6 +9,9 @@ export interface LocalFolderConfig {
   id: string;
   /** Editable display name; may be empty (pages then show the grant path). */
   name: string;
+  /** Display path captured at grant time; re-claims the folder when the
+   * host ledger re-issues grants under a new installation. */
+  path: string;
 }
 
 export interface LocalSettings {
@@ -36,7 +39,11 @@ function normalizeFolder(value: JsonValue | undefined): LocalFolderConfig | null
   const record = value as { [key: string]: JsonValue };
   const id = typeof record.id === 'string' ? record.id.trim() : '';
   if (!id) return null;
-  return { id, name: typeof record.name === 'string' ? record.name.trim() : '' };
+  return {
+    id,
+    name: typeof record.name === 'string' ? record.name.trim() : '',
+    path: typeof record.path === 'string' ? record.path : '',
+  };
 }
 
 export function normalizeSettings(value: JsonValue | undefined): LocalSettings {
