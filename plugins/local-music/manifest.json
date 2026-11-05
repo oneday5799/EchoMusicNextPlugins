@@ -33,10 +33,11 @@
       "ui.toast",
       "ui.dialogs",
       "tasks.full",
-      "kugou.api"
+      "kugou.api",
+      "cover.themed"
     ]
   },
-  "capabilities": ["localFiles", "audioSource", "lyrics", "kugouApi"],
+  "capabilities": ["localFiles", "audioSource", "lyrics", "kugouApi", "cover"],
   "contexts": ["main"],
   "tags": ["本地", "音源", "标签", "歌词"]
 }

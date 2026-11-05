@@ -76,6 +76,8 @@ Item {
     }
     readonly property string headerTitle: selectedAlbum.length > 0 ? selectedAlbum : "本地音乐"
     readonly property string headerSubtitle: {
+        if (root.scanRunning)
+            return root.scanLabel || "正在扫描…";
         if (root.albumGridActive)
             return `共 ${root.albumTotal} 张专辑`;
         if (root.libraryReady)
@@ -84,6 +86,18 @@ Item {
             return "添加音乐文件夹后开始扫描";
         return "尚未扫描，点击「重新扫描」建立曲库";
     }
+
+    readonly property string headerCoverUrl: {
+        if (root.selectedAlbum.length > 0)
+            return root.selectedAlbumCover();
+        for (let i = 0; i < root.albumRows.length; i++) {
+            if (root.albumRows[i].coverUrl.length > 0)
+                return root.albumRows[i].coverUrl;
+        }
+        return root.libraryCoverUrl;
+    }
+    /** Themed fallback art so the header always shows a playlist cover. */
+    property string libraryCoverUrl: ""
 
     function formatDuration(ms) {
         if (!isFinite(ms) || ms <= 0)
@@ -425,6 +439,13 @@ Item {
         resetView()
 
     Component.onCompleted: {
+        if (plugin.cover) {
+            try {
+                libraryCoverUrl = plugin.cover.createThemedIconCoverUrl({ icon: "music" });
+            } catch (error) {
+                libraryCoverUrl = "";
+            }
+        }
         const state = plugin.ui.state;
         scanState = state && state.scan ? state.scan : {};
         const revision = state && typeof state.libraryRevision === "number" ? state.libraryRevision : 0;
@@ -474,7 +495,7 @@ Item {
             // Visible even when empty so the shared footer carries the
             // empty state, like CatalogSongList's footer.
             visible: !root.albumGridActive && !root.pageLoading
-            topMargin: pageHeader.height + toolbar.height + 8
+            topMargin: detailHeader.expandedHeight + toolbar.height + 8
             bottomMargin: 48
             model: root.pageRows
             reuseItems: true
@@ -588,7 +609,7 @@ Item {
             visible: root.albumGridActive
             pageActive: root.pageActive && root.albumGridActive
             pageContainer: viewport
-            topMargin: pageHeader.height + toolbar.height + 8
+            topMargin: detailHeader.expandedHeight + toolbar.height + 8
             bottomMargin: 48
             sourceModel: root.albumRows
             loading: root.albumsLoading && root.albumRows.length === 0
@@ -607,7 +628,7 @@ Item {
             reuseItems: true
             cacheBuffer: 0
             model: 8
-            topMargin: pageHeader.height + toolbar.height + 8
+            topMargin: detailHeader.expandedHeight + toolbar.height + 8
             EchoViewPoolGuard {
                 targetView: skeletonList
             }
@@ -626,87 +647,73 @@ Item {
             id: pageHeader
             container: viewport
             flowPosition: 0
-            height: headerBody.implicitHeight + root.contentInset * 2
+            // The shared sliver header collapses from 176 to 56 as the list
+            // scrolls; the sticky toolbar rides on its animated height while
+            // the flow positions below use the fixed expanded height.
+            height: detailHeader.implicitHeight
 
-            RowLayout {
-                id: headerBody
-                anchors.left: parent.left
-                anchors.right: parent.right
-                anchors.margins: root.contentInset
-                spacing: 16
-
-                EchoCover {
-                    Layout.preferredWidth: 64
-                    Layout.preferredHeight: 64
-                    visible: root.selectedAlbum.length > 0
-                    source: root.selectedAlbumCover()
-                    placeholderGlyph: "music"
+            SongDetailHeader {
+                id: detailHeader
+                anchors.fill: parent
+                scrollTop: viewport.scrollTop
+                heading: root.headerTitle
+                typeLabel: "LOCAL"
+                subtitle: root.headerSubtitle
+                playable: root.libraryReady && root.songTotal > 0
+                showBatchAction: false
+                resourceActive: root.pageActive
+                loading: root.scanRunning && !root.libraryReady
+                coverComponent: Component {
+                    EchoCover {
+                        objectName: "localLibraryCover"
+                        source: root.headerCoverUrl
+                        resourceActive: root.pageActive
+                        cornerRadius: Theme.mediaRadius / detailHeader.coverScale
+                        placeholderGlyph: "vinyl"
+                        placeholderGlyphSize: 32
+                    }
                 }
-                ColumnLayout {
-                    Layout.fillWidth: true
-                    spacing: 4
+                leadingActions: Component {
+                    EchoSoftButton {
+                        visible: root.selectedAlbum.length > 0
+                        text: "返回专辑"
+                        glyph: "arrow-left"
+                        onClicked: root.selectedAlbum = ""
+                    }
+                }
+                additionalActions: Component {
+                    RowLayout {
+                        spacing: 8
 
+                        EchoSoftButton {
+                            text: "重新扫描"
+                            glyph: "refresh-source"
+                            onClicked: root.startScan()
+                        }
+                        EchoSoftButton {
+                            text: "设置"
+                            glyph: "settings"
+                            onClicked: root.openSettings()
+                        }
+                    }
+                }
+                collapsedActions: Component {
                     RowLayout {
                         spacing: 8
 
                         EchoIconButton {
-                            visible: root.selectedAlbum.length > 0
-                            glyph: "arrow-left"
-                            tooltipText: "返回专辑列表"
-                            onClicked: root.selectedAlbum = ""
+                            glyph: "refresh-source"
+                            tooltipText: "重新扫描"
+                            onClicked: root.startScan()
                         }
-                        Label {
-                            text: root.headerTitle
-                            font: Theme.font(20, Theme.semiboldWeight)
-                            color: Theme.text
-                            elide: Text.ElideRight
-                        }
-                        EchoBadge {
-                            visible: root.libraryReady && !root.albumGridActive
-                            count: root.songTotal
-                            tone: EchoBadge.Neutral
+                        EchoIconButton {
+                            glyph: "settings"
+                            tooltipText: "插件设置"
+                            onClicked: root.openSettings()
                         }
                     }
-                    Label {
-                        Layout.fillWidth: true
-                        text: root.headerSubtitle
-                        font: Theme.font(12, Theme.regularWeight)
-                        color: Theme.secondaryText
-                        elide: Text.ElideRight
-                    }
-                    Label {
-                        Layout.fillWidth: true
-                        visible: root.scanRunning || root.scanDone || root.scanAborted || root.scanError.length > 0
-                        text: {
-                            if (root.scanError.length > 0)
-                                return `扫描失败：${root.scanError}`;
-                            if (root.scanDone)
-                                return `扫描完成，共 ${root.scanCount} 首`;
-                            if (root.scanAborted)
-                                return `扫描已中止，已保留 ${root.scanCount} 首`;
-                            return root.scanLabel || "正在扫描…";
-                        }
-                        font: Theme.font(11, Theme.regularWeight)
-                        color: root.scanError.length > 0 ? Theme.colors.danger : Theme.accentText
-                        elide: Text.ElideRight
-                    }
                 }
-                EchoSoftButton {
-                    text: "播放全部"
-                    glyph: "player-play"
-                    enabled: root.libraryReady
-                    onClicked: root.playAll()
-                }
-                EchoIconButton {
-                    glyph: "refresh-source"
-                    tooltipText: "重新扫描"
-                    onClicked: root.startScan()
-                }
-                EchoIconButton {
-                    glyph: "settings"
-                    tooltipText: "插件设置"
-                    onClicked: root.openSettings()
-                }
+                onPlayRequested: root.playAll()
             }
         }
 
@@ -714,8 +721,8 @@ Item {
             id: toolbar
             container: viewport
             visible: true
-            flowPosition: pageHeader.height
-            stickyTop: 0
+            flowPosition: detailHeader.expandedHeight
+            stickyTop: pageHeader.height
             height: toolbarColumn.implicitHeight
 
             ColumnLayout {
