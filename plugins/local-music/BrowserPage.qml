@@ -828,14 +828,15 @@ Item {
                     }
                 }
                 // Shared rule: one hairline between the tab row and the sort
-                // header; SongListHeader draws its own bottom divider.
-                Rectangle {
+                // header; SongListHeader draws its own bottom divider. The
+                // shared control parks the line on a whole device row, so
+                // fractional Windows scaling cannot straddle two rows.
+                EchoDivider {
                     objectName: "localMusicToolbarDivider"
                     Layout.fillWidth: true
                     Layout.leftMargin: root.contentInset
                     Layout.rightMargin: root.contentInset
-                    Layout.preferredHeight: 1
-                    color: Theme.subtleBorder
+                    lineColor: Theme.subtleBorder
                 }
                 SongListHeader {
                     visible: !root.albumGridActive
