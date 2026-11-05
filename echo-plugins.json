@@ -24,6 +24,11 @@
       "id": "custom-icon",
       "repo": "https://github.com/oneday5799/EchoMusicNextPlugins",
       "path": "plugins/custom-icon"
+    },
+    {
+      "id": "local-music",
+      "repo": "https://github.com/oneday5799/EchoMusicNextPlugins",
+      "path": "plugins/local-music"
     }
   ]
 }
