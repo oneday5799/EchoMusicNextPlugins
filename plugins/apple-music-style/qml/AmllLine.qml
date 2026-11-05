@@ -380,11 +380,12 @@ Item {
                 list.push(pose);
                 continue;
             }
-            // 跨越簇：每像素恰好一层 —— 16 段互斥亮度切片 + 两端截段。
+            // 跨越簇：每像素恰好一层 —— 48 段互斥亮度切片（亚像素宽，像素内 2-3 段
+            // 覆盖互补平均，边界 dip 被抹平）+ 两端截段。
             // 叠层方案会让同一字形的抗锯齿边缘覆盖率复利（变粗、偏亮），
             // 互斥切片不叠层；切片边缘由 clip 的 fwidth 抗锯齿衔接，
             // 亮度步进 (亮−暗)/16 不可辨。同簇多层 pose 需互异 instance。
-            const slices = 16;
+            const slices = 48;
             const brightA = line.brightColor.a, dimA = line.dimColor.a;
             const bc = line.brightColor;
             if (oL > 1) {
