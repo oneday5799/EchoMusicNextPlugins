@@ -77,7 +77,9 @@ QtObject {
         __anchor = restart ? now : start;
         __hold = intro && !restart ? 0 : 500;
         available = start >= 0 && end > start && end - __anchor - __hold - 1000 >= 910;
-        timeMs = now;
+        // 不得给 timeMs 赋值：会摧毁 LyricFlow 的声明式绑定
+        // （timeMs: waiting && live ? renderTime : 0），时间只剩 configure 时刻的静态值，
+        // 间奏演出全程不再逐帧求值，圆点永远停在透明
         __evaluate();
     }
     onTimeMsChanged: __evaluate()

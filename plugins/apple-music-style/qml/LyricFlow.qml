@@ -559,8 +559,14 @@ Item {
                     Item {
                         objectName: "amllInterludeRow"
                         opacity: interludeAnim.opacity
-                        scale: flow.motion ? interludeAnim.scaleFactor : 1
-                        transformOrigin: Item.Center
+                        // 呼吸缩放绕三点组自身中心（AMLL CSS transform-origin 为内容盒），
+                        // 用行中心会把圆点推向左边缘外
+                        transform: Scale {
+                            origin.x: flow.fontSize * 1.63
+                            origin.y: line.headerHeight / 2
+                            xScale: flow.motion ? interludeAnim.scaleFactor : 1
+                            yScale: xScale
+                        }
                         width: line.width
                         height: line.headerHeight
                         Repeater {
