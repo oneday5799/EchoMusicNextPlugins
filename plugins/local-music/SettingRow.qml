@@ -10,18 +10,6 @@ Item {
     property string title: ""
     property string hint: ""
     property bool switchRow: false
-    property bool divider: true
-    readonly property bool followsVisibleRow: {
-        if (!parent)
-            return false;
-        let previous = false;
-        for (const sibling of parent.children) {
-            if (sibling === row)
-                return previous;
-            previous = previous || sibling.visible;
-        }
-        return previous;
-    }
     property Component editor
     implicitHeight: Math.max(58, 20 + Math.max(copy.implicitHeight, control.implicitHeight))
     RowLayout {
@@ -60,14 +48,5 @@ Item {
             Layout.fillHeight: false
             sourceComponent: row.editor
         }
-    }
-    Rectangle {
-        objectName: "localMusicSettingsDivider"
-        visible: row.divider && row.followsVisibleRow
-        anchors.left: parent.left
-        anchors.right: parent.right
-        anchors.top: parent.top
-        height: 1
-        color: Theme.floatingBorder
     }
 }

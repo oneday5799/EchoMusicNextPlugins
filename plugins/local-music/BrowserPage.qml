@@ -827,6 +827,16 @@ Item {
                         onClicked: root.locateCurrent()
                     }
                 }
+                // Shared rule: one hairline between the tab row and the sort
+                // header; SongListHeader draws its own bottom divider.
+                Rectangle {
+                    objectName: "localMusicToolbarDivider"
+                    Layout.fillWidth: true
+                    Layout.leftMargin: root.contentInset
+                    Layout.rightMargin: root.contentInset
+                    Layout.preferredHeight: 1
+                    color: Theme.subtleBorder
+                }
                 SongListHeader {
                     visible: !root.albumGridActive
                     Layout.fillWidth: true
@@ -837,13 +847,6 @@ Item {
                     sortField: root.sortField
                     sortDirection: root.sortDirection
                     onSortPicked: field => root.changeSort(field)
-                }
-                Rectangle {
-                    objectName: "localMusicToolbarDivider"
-                    x: root.contentInset
-                    width: Math.max(0, parent.width - root.contentInset * 2)
-                    height: 1
-                    color: Theme.subtleBorder
                 }
             }
         }

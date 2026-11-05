@@ -208,14 +208,6 @@ ColumnLayout {
                             Layout.fillWidth: true
                             implicitHeight: 52
 
-                            Rectangle {
-                                anchors.left: parent.left
-                                anchors.right: parent.right
-                                anchors.top: parent.top
-                                height: 1
-                                color: Theme.floatingBorder
-                                visible: folderGroup.index > 0
-                            }
                             RowLayout {
                                 anchors.fill: parent
                                 anchors.leftMargin: 18
