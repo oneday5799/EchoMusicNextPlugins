@@ -50,7 +50,7 @@ Item {
     property int songTotal: 0
     property bool pageLoading: false
     property bool loadingMore: false
-    readonly property bool hasMore: libraryReady && !albumTab && pageRows.length < songTotal
+    readonly property bool hasMore: libraryReady && !albumGridActive && pageRows.length < songTotal
 
     property var albumRows: []
     property int albumTotal: 0
@@ -107,6 +107,10 @@ Item {
                 const message = operation.errorMessage || "操作失败";
                 errorMessage = message;
                 plugin.toast.danger(message);
+                // Failure still settles the request so loading states and
+                // epoch guards never strand a skeleton view.
+                if (callback)
+                    callback(null);
             }
         };
         operation.completed.connect(handler);
@@ -138,7 +142,9 @@ Item {
 
     function refreshSettings(reload) {
         run("settings.get", {}, function (result) {
-            folders = result && Array.isArray(result.folders) ? result.folders : [];
+            if (!result)
+                return;
+            folders = Array.isArray(result.folders) ? result.folders : [];
             if (folderFilter.length > 0 && !folderKnown(folderFilter))
                 folderFilter = "";
             if (reload)
@@ -148,27 +154,30 @@ Item {
 
     function reloadLibrary() {
         run("library.info", {}, function (result) {
-            libraryReady = !!result && result.ready === true;
-            libraryCount = result && typeof result.count === "number" ? result.count : 0;
-            folderCount = result && typeof result.folders === "number" ? result.folders : 0;
-            pageRows = [];
-            songTotal = 0;
-            albumRows = [];
-            albumTotal = 0;
-            if (!libraryReady)
+            if (!result)
                 return;
-            if (albumGridActive)
-                albumsLoad();
-            else
-                pageLoad();
+            libraryReady = result.ready === true;
+            libraryCount = typeof result.count === "number" ? result.count : 0;
+            folderCount = typeof result.folders === "number" ? result.folders : 0;
+            resetView();
         });
     }
 
+    // Monotonic request epochs: only the newest view request may land, so a
+    // late reply from a superseded sort/filter cannot append foreign rows.
+    property int pageEpoch: 0
+    property int albumEpoch: 0
+
     function resetView() {
+        pageEpoch += 1;
+        albumEpoch += 1;
         pageRows = [];
         songTotal = 0;
         albumRows = [];
         albumTotal = 0;
+        pageLoading = false;
+        loadingMore = false;
+        albumsLoading = false;
         if (!libraryReady)
             return;
         if (albumGridActive)
@@ -212,8 +221,8 @@ Item {
             pageRows = next;
     }
 
-    function fetchCovers() {
-        const ids = pageRows.filter(function (entry) {
+    function fetchCovers(rows) {
+        const ids = rows.filter(function (entry) {
             return entry.coverUrl.length === 0;
         }).map(function (entry) {
             return entry.resourceId;
@@ -228,6 +237,7 @@ Item {
     function pageLoad() {
         if (!libraryReady)
             return;
+        const epoch = ++pageEpoch;
         pageLoading = true;
         run("library.page", {
             offset: pageRows.length,
@@ -238,21 +248,26 @@ Item {
             sort: sortKey,
             sortDir: sortDirection
         }, function (result) {
+            if (epoch !== pageEpoch)
+                return;
             pageLoading = false;
-            if (!result || !result.ready) {
+            if (!result)
+                return;
+            if (!result.ready) {
                 libraryReady = false;
                 return;
             }
             songTotal = result.total || 0;
             const rows = (result.songs || []).map(rowModel);
             pageRows = pageRows.concat(rows);
-            fetchCovers();
+            fetchCovers(rows);
         });
     }
 
     function loadMore() {
         if (!hasMore || loadingMore || pageLoading)
             return;
+        const epoch = pageEpoch;
         loadingMore = true;
         run("library.page", {
             offset: pageRows.length,
@@ -263,19 +278,22 @@ Item {
             sort: sortKey,
             sortDir: sortDirection
         }, function (result) {
+            if (epoch !== pageEpoch)
+                return;
             loadingMore = false;
             if (!result || !result.ready)
                 return;
             songTotal = result.total || 0;
             const rows = (result.songs || []).map(rowModel);
             pageRows = pageRows.concat(rows);
-            fetchCovers();
+            fetchCovers(rows);
         });
     }
 
     function albumsLoad() {
         if (!libraryReady)
             return;
+        const epoch = ++albumEpoch;
         albumsLoading = true;
         run("library.albums", {
             offset: albumRows.length,
@@ -285,8 +303,12 @@ Item {
             sort: sortKey,
             sortDir: sortDirection
         }, function (result) {
+            if (epoch !== albumEpoch)
+                return;
             albumsLoading = false;
-            if (!result || !result.ready) {
+            if (!result)
+                return;
+            if (!result.ready) {
                 libraryReady = false;
                 return;
             }
@@ -351,7 +373,9 @@ Item {
                 break;
             }
         }
-        const local = songMenu.mapFromItem(null, sceneX, sceneY);
+        // Popups have no mapFromItem; map the scene point onto the page, the
+        // popup's parent, and open there like the host menus do.
+        const local = root.mapFromItem(null, sceneX, sceneY);
         songMenu.popup(local.x, local.y);
     }
 
@@ -481,7 +505,9 @@ Item {
                 playing: root.plugin.player.playing
                 playbackLoading: root.plugin.player.loading
                 playbackAvailable: root.libraryReady
-                actionsAvailable: true
+                // No favorite ledger for local files; leaving this false
+                // disables the heart instead of offering a dead toggle.
+                actionsAvailable: false
                 resourceActive: root.pageActive && !pooled
                 contextTarget: root.menuSongId.length > 0 && resourceId === root.menuSongId
                 ListView.onPooled: pooled = true
@@ -495,6 +521,7 @@ Item {
                 }
                 onDoubleClicked: if (!row.pendingPlay)
                     root.playAt(index)
+                onCommentsRequested: id => root.plugin.toast.info("本地歌曲暂不支持评论")
                 onMoreRequested: (id, sceneX, sceneY) => root.showSongMenu(id, sceneX, sceneY)
                 TapHandler {
                     acceptedButtons: Qt.RightButton
