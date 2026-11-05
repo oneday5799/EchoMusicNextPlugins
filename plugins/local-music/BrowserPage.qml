@@ -42,6 +42,7 @@ Item {
 
     property bool libraryReady: false
     property int libraryCount: 0
+    property int libraryAlbums: 0
     property int folderCount: 0
 
     // Cumulative rows: paging appends at the list end like the shared
@@ -64,8 +65,6 @@ Item {
     readonly property bool scanDone: !!root.scanState && root.scanState.done === true
     readonly property bool scanAborted: !!root.scanState && root.scanState.aborted === true
     readonly property string scanError: root.scanState && typeof root.scanState.error === "string" ? root.scanState.error : ""
-    readonly property string scanLabel: root.scanState && typeof root.scanState.label === "string" ? root.scanState.label : ""
-    readonly property int scanCount: root.scanState && typeof root.scanState.count === "number" ? root.scanState.count : 0
 
     property string errorMessage: ""
     readonly property int contentInset: 24
@@ -75,17 +74,9 @@ Item {
         return snapshot && snapshot.hasTrack ? snapshot.track.id : "";
     }
     readonly property string headerTitle: selectedAlbum.length > 0 ? selectedAlbum : "本地音乐"
-    readonly property string headerSubtitle: {
-        if (root.scanRunning)
-            return root.scanLabel || "正在扫描…";
-        if (root.albumGridActive)
-            return `共 ${root.albumTotal} 张专辑`;
-        if (root.libraryReady)
-            return `共 ${root.songTotal} 首`;
-        if (root.folderCount === 0)
-            return "添加音乐文件夹后开始扫描";
-        return "尚未扫描，点击「重新扫描」建立曲库";
-    }
+    // Library-wide counts from library.info; the tabs show filtered totals.
+    readonly property string songCountLabel: `${root.libraryCount} 首歌曲`
+    readonly property string albumCountLabel: root.libraryAlbums > 0 ? `${root.libraryAlbums} 张专辑` : ""
 
     readonly property string headerCoverUrl: {
         if (root.selectedAlbum.length > 0)
@@ -172,6 +163,7 @@ Item {
                 return;
             libraryReady = result.ready === true;
             libraryCount = typeof result.count === "number" ? result.count : 0;
+            libraryAlbums = typeof result.albums === "number" ? result.albums : 0;
             folderCount = typeof result.folders === "number" ? result.folders : 0;
             resetView();
         });
@@ -658,7 +650,42 @@ Item {
                 scrollTop: viewport.scrollTop
                 heading: root.headerTitle
                 typeLabel: "LOCAL"
-                subtitle: root.headerSubtitle
+                // Always-visible intro plus the shared metadata count row,
+                // matching the Favorites page header composition.
+                subtitle: "管理本地音乐文件夹并播放本地音乐。"
+                secondaryDetailsComponent: Component {
+                    Flow {
+                        objectName: "localLibraryMetadata"
+                        spacing: 12
+
+                        EchoButtonContent {
+                            objectName: "localLibrarySongCount"
+                            width: Math.min(parent.width, implicitWidth + 4)
+                            height: implicitHeight
+                            horizontalAlignment: Qt.AlignLeft
+                            glyph: "music"
+                            glyphSize: 12
+                            spacing: 6
+                            lineHeight: 16.5
+                            text: root.songCountLabel
+                            font: Theme.font(11, Theme.semiboldWeight)
+                            color: Theme.secondaryText
+                        }
+                        Repeater {
+                            model: [root.albumCountLabel].filter(value => value.length > 0)
+                            delegate: EchoTextTagRow {
+                                required property string modelData
+                                objectName: "localLibraryMetadataField"
+                                width: Math.min(parent.width, implicitWidth + 4)
+                                height: implicitHeight
+                                text: modelData
+                                lineHeight: 16.5
+                                font: Theme.font(11, Theme.semiboldWeight)
+                                color: Theme.secondaryText
+                            }
+                        }
+                    }
+                }
                 playable: root.libraryReady && root.songTotal > 0
                 showBatchAction: false
                 resourceActive: root.pageActive
@@ -673,9 +700,14 @@ Item {
                         placeholderGlyphSize: 32
                     }
                 }
-                leadingActions: Component {
+                // Only supply the slot while drilled in: the host loader stays
+                // visible whenever a component is set, so a hidden button would
+                // still reserve its width as blank space before the actions.
+                leadingActions: root.selectedAlbum.length > 0 ? backActions : null
+                Component {
+                    id: backActions
+
                     EchoSoftButton {
-                        visible: root.selectedAlbum.length > 0
                         text: "返回专辑"
                         glyph: "arrow-left"
                         onClicked: root.selectedAlbum = ""

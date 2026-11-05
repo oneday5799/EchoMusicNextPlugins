@@ -359,6 +359,7 @@ async function libraryInfo(): Promise<JsonValue> {
   return {
     ready: libraryReady,
     count: librarySongs.length,
+    albums: groupAlbums(librarySongs).length,
     truncated: cacheTruncated,
     stale,
     scanning: !!scanJob,
