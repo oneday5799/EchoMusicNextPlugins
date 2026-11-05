@@ -9,6 +9,12 @@ import EchoMusic.PluginSdk
 // 未唱样（暗：未唱色 alpha ×（1 + 高亮量），当前行 0.2 → 0.4 提亮）
 // 与已唱样（亮：未唱色 lerp 播放色，随高亮量渐入）按前沿透明度插值。
 // 簇中点取样即宿主线性渐变在该簇的精确均值；上浮随所属词。
+// 强调词（时长 ≥1s 且全 CJK 或 2–7 字符）按 AMLL emphasize：
+// 逐字交错 rise(.2,.4,.58,1)/fall(.3,0,.58,1) 包络，缩放 1+.1×amount、
+// 推移 −em×.03×amount×(字数/2−序)×scale、常幅正弦浮动（随字起浮，
+// 叠加在 −em×.05 基础上浮之上，落点保持在抬起态）、
+// 白色辉光 halo（半径 min(.3, blur×.3)em，透明度 blur×包络×高亮量）；
+// 缩放围绕簇盒中心（锚点在基线上，需 (1−scale)×中心距补偿）。
 // 不做亮/暗双层叠放：双层在词上浮时错位会露出下层形成重影，
 // 也不经过 layer/ShaderEffect（GlyphRun 的自定义节点经 layer 抓取会丢内容）。
 Item {
@@ -71,24 +77,66 @@ Item {
     readonly property var runDefinition: text.length > 0 ? [{
                 "key": "line",
                 "text": text,
-                "maxWidth": Math.min(4096, Math.max(1, width))
+                "maxWidth": Math.min(4096, Math.max(1, width)),
+                // 辉光贴图预算（合法档位 40/80/160/512/1024）：
+                // 强调词 halo 半径 min(.3, blur×.3)em，em ≤133px 时 ≤40
+                "maxHaloRadius": 40
             }] : []
 
+    function __bez(p: real, x1: real, y1: real, x2: real): real {
+        // 三次贝塞尔 (0,0)(x1,y1)(x2,1)(1,1) 的 y(x) 牛顿求解，
+        // 三条曲线（ease-out、强调升/落包络）终点纵坐标均为 1
+        if (p <= 0)
+            return 0
+        if (p >= 1)
+            return 1
+        let u = p
+        for (let i = 0; i < 8; ++i) {
+            const o = 1 - u
+            const cx = 3 * o * o * u * x1 + 3 * o * u * u * x2 + u * u * u - p
+            if (Math.abs(cx) < 1e-5)
+                break
+            const dx = 3 * o * o * x1 + 6 * o * u * (x2 - x1) + 3 * u * u * (1 - x2)
+            if (Math.abs(dx) < 1e-6)
+                break
+            u = Math.min(1, Math.max(0, u - cx / dx))
+        }
+        const o = 1 - u
+        return 3 * o * o * u * y1 + 3 * o * u * u + u * u * u
+    }
     function __ease(p: real): real {
         // 贝塞尔 (0,0)(0,0)(0.58,1)(1,1)，与宿主逐词上浮一致
-        let u = Math.min(1, Math.max(0, p));
-        for (let i = 0; i < 8; ++i) {
-            const o = 1 - u;
-            const cx = 3 * o * u * u * 0.58 + u * u * u - p;
-            if (Math.abs(cx) < 1e-5)
-                break;
-            const dx = 6 * o * u * (0.58 - 0) + 3 * u * u * (1 - 0.58);
-            if (Math.abs(dx) < 1e-6)
-                break;
-            u = Math.min(1, Math.max(0, u - cx / dx));
+        return __bez(p, 0, 0, 0.58)
+    }
+    function __intensity(x: real): real {
+        // AMLL/宿主强度曲线：不足 1 呈三次方，之后开方
+        return x < 1 ? x * x * x : Math.sqrt(x)
+    }
+    function __emphasized(content: string, duration: real): bool {
+        // 宿主 LyricLine 强调判定：时长 ≥1s 且（全 CJK（≥0x2e80）或去空白 2–7 字符）
+        // V4 引擎没有 codePointAt：手写代理对展开
+        if (duration < 1000)
+            return false
+        const s = String(content).trim()
+        if (!s)
+            return false
+        let cjk = true, units = 0
+        for (let i = 0; i < s.length; ) {
+            const hi = s.charCodeAt(i)
+            let code = hi, width = 1
+            if (hi >= 0xD800 && hi <= 0xDBFF && i + 1 < s.length) {
+                const lo = s.charCodeAt(i + 1)
+                if (lo >= 0xDC00 && lo <= 0xDFFF) {
+                    code = 0x10000 + ((hi - 0xD800) << 10) + (lo - 0xDC00)
+                    width = 2
+                }
+            }
+            if (code < 0x2e80)
+                cjk = false
+            units += 1
+            i += width
         }
-        const o = 1 - u;
-        return 3 * o * u * u * 1 + u * u * u;
+        return cjk || (units >= 2 && units <= 7)
     }
     function refreshLifts(): void {
         const count = line.wordSpans.length;
@@ -145,6 +193,7 @@ Item {
         const spans = [];
         const list = line.words;
         let offset = 0;
+        let lastContent = -1;
         for (let i = 0; i < list.length; ++i) {
             const word = list[i];
             const content = String(word.text ?? "");
@@ -155,6 +204,26 @@ Item {
             const first = __graphemeAt(graphemes, start);
             if (first < 0)
                 continue;
+            // 强调元数据：去空白区间的词元簇序号与总数（AMLL 逐字交错用）。
+            // V4 引擎没有 trimStart/trimEnd：trim 串在原串中必起于首个非空白位置
+            // （其前皆为空白且 trim 串首字符非空白），indexOf 即首空白段长度
+            const trimmed = content.trim();
+            const lead = content.indexOf(trimmed);
+            const trail = content.length - lead - trimmed.length;
+            const trimEnd = start + content.length - trail;
+            let ec = 0, eg = -1;
+            for (let gi = first; gi < graphemes.length; ++gi) {
+                const gs = Number(graphemes[gi].start) || 0;
+                if (gs >= trimEnd)
+                    break;
+                if (gs + (Number(graphemes[gi].length) || 0) <= start + lead)
+                    continue;
+                if (eg < 0)
+                    eg = gi;
+                ++ec;
+            }
+            if (content.trim().length > 0)
+                lastContent = spans.length;
             spans.push({
                     "t0": Number(word.t0) || 0,
                     "t1": Number(word.t1) || 0,
@@ -162,22 +231,36 @@ Item {
                     "u0": start,
                     "u1": start + content.length,
                     // 词首所在词元簇的起点是 pose 的合法锚点（跨词连字时共享簇）
-                    "poseStart": Number(graphemes[first].clusterStart) || 0
+                    "poseStart": Number(graphemes[first].clusterStart) || 0,
+                    "em": __emphasized(content, (Number(word.t1) || 0) - (Number(word.t0) || 0)),
+                    "eg": eg,
+                    "ec": ec,
+                    "last": false
                 });
         }
+        // 句尾词（AMLL lastWord：末词时值 ×1.2、强调量 ×1.6）
+        if (lastContent >= 0)
+            spans[lastContent].last = true;
         for (let i = 0; i < spans.length; ++i)
             spans[i].x1 = i + 1 < spans.length ? spans[i + 1].x0 : (rows.length > 0 ? rows[rows.length - 1].end : 0);
         wordSpans = spans;
         clusterBases = bases;
         refreshLifts();
     }
-    function __clusterLift(start: int): real {
+    function __clusterSpan(start: int): var {
         const spans = line.wordSpans;
         for (let w = 0; w < spans.length; ++w) {
             if (start >= spans[w].u0 && start < spans[w].u1)
-                return line.lifts[w] ?? 0;
+                return spans[w];
         }
-        return 0;
+        return null;
+    }
+    function __clusterLift(start: int): real {
+        const span = line.__clusterSpan(start);
+        if (!span)
+            return 0;
+        const index = line.wordSpans.indexOf(span);
+        return line.lifts[index] ?? 0;
     }
     function __flatPoses(): var {
         if (line.text.length === 0)
@@ -187,6 +270,15 @@ Item {
                 "key": "line",
                 "opacity": line.brightColor.a,
                 "color": line.brightColor
+            }];
+    }
+    function __transitionalPoses(): var {
+        // 换行复用/首帧时塑形指标还是旧文本：整行单 pose（无 start，任意布局合法）。
+        // 若仍按旧簇序号逐簇发 pose，会被提供方整体拒收并回退默认全亮一帧
+        return [{
+                "key": "line",
+                "opacity": line.dimColor.a,
+                "color": line.dimColor
             }];
     }
     // 逐簇 pose：透明度 = 0.5 + (前沿 - 簇中点x) / 软边宽，
@@ -201,11 +293,21 @@ Item {
         const graphemes = m ? m.graphemes : [];
         const bases = line.clusterBases;
         if (line.wordSpans.length === 0 || graphemes.length === 0 || bases.length === 0)
-            return [];
+            return line.__transitionalPoses();
+        // 塑形覆盖长度必须与当前文本一致，否则簇序号是旧文本的，
+        // 发出去会被整体拒收（未知簇）→ 默认全亮闪帧
+        const lastG = graphemes[graphemes.length - 1];
+        if ((Number(lastG.start) || 0) + (Number(lastG.length) || 0) !== line.text.length)
+            return line.__transitionalPoses();
         const list = [];
         const seen = new Set();
         const edge = line.edge, fade = line.fade;
         const darkA = line.dimColor.a, brightA = line.brightColor.a;
+        const em = line.em;
+        const empActive = line.current && line.animateWords && line.highlightAmount > 0;
+        // GlyphRun 缩放围绕簇锚点（中点 x、基线 y），
+        // AMLL 围绕字盒中心：需 (1−scale)×(盒中心−基线) 补偿
+        const centerDy = m.height / 2 - m.baseline;
         for (let i = 0; i < graphemes.length; ++i) {
             const g = graphemes[i];
             const start = Number(g.clusterStart) || 0;
@@ -217,7 +319,7 @@ Item {
             const alpha = darkA + (brightA - darkA) * o;
             if (alpha <= 0.004)
                 continue;
-            list.push({
+            const pose = {
                     "key": "line",
                     "start": start,
                     "y": line.__clusterLift(start),
@@ -227,7 +329,45 @@ Item {
                         line.dimColor.g + (line.brightColor.g - line.dimColor.g) * o,
                         line.dimColor.b + (line.brightColor.b - line.dimColor.b) * o,
                         1)
-                });
+                };
+            // 强调词逐字动画（宿主 LyricLine::pose 同式，包络 rise/fall 分段）
+            const span = line.__clusterSpan(start);
+            if (empActive && span && span.em && span.ec > 0) {
+                const charIndex = i - span.eg;
+                if (charIndex >= 0 && charIndex < span.ec) {
+                    const rawDu = span.t1 - span.t0;
+                    const length = Math.max(1000, rawDu) * (span.last ? 1.2 : 1);
+                    const t = line.timeMs - span.t0;
+                    const stagger = length / 2.5 / span.ec * charIndex;
+                    const phase = Math.min(1, Math.max(0, (t - stagger) / length));
+                    const env = phase < 0.5 ? line.__bez(phase * 2, 0.2, 0.4, 0.58)
+                                            : 1 - line.__bez((phase - 0.5) * 2, 0.3, 0, 0.58);
+                    const amount = Math.min(
+                                1.2, line.__intensity(rawDu / 2000) * 0.6 * (span.last ? 1.6 : 1)) *
+                            env * line.highlightAmount;
+                    const scale = 1 + 0.1 * amount;
+                    // AMLL emphasize float：常幅正弦叠加在基础上浮之上（复合而非替代），
+                    // 落点保持在抬起态；随字自身交错时刻起浮，无提前量
+                    const floatPhase = Math.min(1, Math.max(0, (t - stagger) / (length * 1.4 - 400)));
+                    pose.scale = scale;
+                    pose.x = -em * 0.03 * amount * (span.ec / 2 - charIndex) * scale;
+                    pose.y = -em * 0.05
+                                * line.__ease(Math.min(1, Math.max(0, t / Math.max(1000, rawDu))))
+                                * line.highlightAmount
+                            - em * 0.05 * Math.sin(floatPhase * Math.PI)
+                            + (1 - scale) * centerDy;
+                    const blurBase = Math.min(
+                                0.8, line.__intensity(rawDu / 3000) * 0.5 * (span.last ? 1.5 : 1));
+                    const haloOpacity = blurBase * env * line.highlightAmount;
+                    if (haloOpacity > 0.01)
+                        pose.halos = [{
+                                "radius": Math.min(0.3, blurBase * 0.3) * em,
+                                "opacity": haloOpacity,
+                                "color": Qt.rgba(1, 1, 1, 1)
+                            }];
+                }
+            }
+            list.push(pose);
         }
         return list;
     }
