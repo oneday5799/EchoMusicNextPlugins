@@ -211,11 +211,13 @@ async function refreshGrants(ctx: EchoPluginContext): Promise<void> {
  */
 async function reconcileFolders(ctx: EchoPluginContext): Promise<void> {
   let changed = false;
+  const superseded: string[] = [];
   const folders = settings.folders.map((folder) => {
     if (grantRefs.has(folder.id) || !folder.path) return folder;
     const reclaimed = grantPathsIndex.get(normalizeDisplayPath(folder.path));
     if (!reclaimed || reclaimed === folder.id) return folder;
     changed = true;
+    superseded.push(folder.id);
     return { ...folder, id: reclaimed };
   });
   if (!changed) return;
@@ -226,6 +228,15 @@ async function reconcileFolders(ctx: EchoPluginContext): Promise<void> {
     publishState();
   } catch (error) {
     // The re-claim still works for this session even if the persist failed.
+  }
+  // Retire the superseded grants so the ledger does not accumulate one entry
+  // per re-claim; the host keeps revoked rows but stops listing them.
+  for (const id of superseded) {
+    try {
+      await awaitOperation(ctx.files.revoke(id));
+    } catch (error) {
+      // The grant may already be gone.
+    }
   }
 }
 
@@ -308,8 +319,36 @@ function parsePageArgs(
   };
 }
 
+/**
+ * Grants can transiently read as empty around plugin updates (the host
+ * reloads its file service while the new activation starts). Whenever a
+ * command needs grants, finds folders in settings but an empty grant table,
+ * refresh once and re-claim by path before answering.
+ */
+async function ensureGrants(ctx: EchoPluginContext): Promise<void> {
+  if (settings.folders.length === 0 || grantRefs.size > 0) return;
+  await refreshGrants(ctx);
+  await reconcileFolders(ctx);
+}
+
+async function settingsGet(): Promise<JsonValue> {
+  const ctx = requireContext();
+  await ensureGrants(ctx);
+  return {
+    folders: settings.folders.map((folder) => ({
+      id: folder.id,
+      name: folder.name,
+      path: displayPathOf(folder.id),
+      available: grantRefs.has(folder.id),
+    })),
+    readEmbedded: settings.readEmbedded,
+    onlineFetch: settings.onlineFetch,
+  };
+}
+
 async function libraryInfo(): Promise<JsonValue> {
   const ctx = requireContext();
+  await ensureGrants(ctx);
   let stale = true;
   try {
     const meta = parseCacheMeta(await awaitOperation(ctx.io.readValue(libraryMetaKey())));
@@ -385,7 +424,14 @@ async function runScanJob(ctx: EchoPluginContext, job: ScanJob, epoch: number): 
   };
   let indexed = false;
   try {
-    const folders = usableFolders();
+    let folders = usableFolders();
+    if (folders.length === 0 && settings.folders.length > 0) {
+      // A transient empty grant table (e.g. around a plugin update) must not
+      // fail the scan while the folders themselves are still configured.
+      await refreshGrants(ctx);
+      await reconcileFolders(ctx);
+      folders = usableFolders();
+    }
     if (folders.length === 0) {
       throw new Error('没有可用的音乐文件夹，请先在设置中添加并保持授权有效');
     }
@@ -549,19 +595,6 @@ async function stopScan(): Promise<JsonValue> {
 
 // ── Settings & folders ─────────────────────────────────────────────────────
 
-function settingsGet(): JsonValue {
-  return {
-    folders: settings.folders.map((folder) => ({
-      id: folder.id,
-      name: folder.name,
-      path: displayPathOf(folder.id),
-      available: grantRefs.has(folder.id),
-    })),
-    readEmbedded: settings.readEmbedded,
-    onlineFetch: settings.onlineFetch,
-  };
-}
-
 async function persistSettings(next: LocalSettings): Promise<void> {
   const ctx = requireContext();
   const foldersChanged = folderSignatureOf(settings) !== folderSignatureOf(next);
@@ -640,6 +673,13 @@ async function addFolder(): Promise<JsonValue> {
     const folders = settings.folders.slice();
     folders[staleIndex] = { id: grant.id, name, path: displayPath };
     await persistSettings({ ...settings, folders });
+    if (stale.id !== grant.id) {
+      try {
+        await awaitOperation(ctx.files.revoke(stale.id));
+      } catch (error) {
+        // The superseded grant may already be gone.
+      }
+    }
     return { ok: true, id: grant.id, name, reclaimed: true };
   }
   const name = suggestFolderName(grant);
@@ -1017,6 +1057,24 @@ export async function activate(ctx: EchoPluginContext): Promise<void> {
   ctx.ui.setState({ settingsRevision, scan: null, libraryRevision: 0 });
   lastScanState = null;
   void warmStart(ctx);
+  // Belt and braces: if the grant table reads empty while folders are
+  // configured (a transient window around updates), re-check shortly after
+  // activation and re-claim by path before the user notices anything.
+  if (settings.folders.length > 0 && grantRefs.size === 0) {
+    ctx.setTimer('grant-recheck', 2000, false, () => {
+      void (async () => {
+        const active = context;
+        if (!active) return;
+        try {
+          await refreshGrants(active);
+          await reconcileFolders(active);
+          publishState();
+        } catch (error) {
+          // The next command that needs grants refreshes again anyway.
+        }
+      })();
+    });
+  }
 }
 
 export async function deactivate(): Promise<void> {
