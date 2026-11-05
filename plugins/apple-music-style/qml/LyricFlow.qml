@@ -559,10 +559,11 @@ Item {
                     Item {
                         objectName: "amllInterludeRow"
                         opacity: interludeAnim.opacity
-                        // 呼吸缩放绕三点组自身中心（AMLL CSS transform-origin 为内容盒），
-                        // 用行中心会把圆点推向左边缘外
+                        // 呼吸缩放：水平原点锚定三点组左缘（= 文本对齐线），
+                        // 呼吸只向右扩展，最大 1.25 倍时左缘也不越过歌词区；
+                        // AMLL 的内容盒中心原点在最大档会左探 0.16×字号
                         transform: Scale {
-                            origin.x: flow.fontSize * 1.63
+                            origin.x: flow.fontSize
                             origin.y: line.headerHeight / 2
                             xScale: flow.motion ? interludeAnim.scaleFactor : 1
                             yScale: xScale
