@@ -5,10 +5,11 @@ import EchoMusic.PluginSdk
 // AMLL 风格逐词歌词行。移植宿主 LyricLine / AMLL core 的呈现语义：
 // 一条连续亮度前沿按词时长推进（时值间隙停留），软边宽度 fadeWidth × em × 1.2；
 // 播放中的词上浮 em × 5%；未逐词的行激活时整行点亮。
-// 渲染对照宿主的单层逐像素渐变：每簇一个 pose，颜色与透明度由
+// 渲染对照宿主的单层逐像素渐变：pose 颜色整簇均匀，改用 16 段互斥
+// 亮度切片（pose.clip 以 run 局部坐标逐像素 fwidth 抗锯齿裁剪）铺满
+// 软边段，每像素恰好一层 —— 叠层会复利字形抗锯齿边缘（变粗、偏亮）；
 // 未唱样（暗：未唱色 alpha ×（1 + 高亮量），当前行 0.2 → 0.4 提亮）
-// 与已唱样（亮：未唱色 lerp 播放色，随高亮量渐入）按前沿透明度插值。
-// 簇中点取样即宿主线性渐变在该簇的精确均值；上浮随所属词。
+// 与已唱样（亮：未唱色 lerp 播放色，随高亮量渐入）。上浮随所属词。
 // 强调词（时长 ≥1s 且全 CJK 或 2–7 字符）按 AMLL emphasize：
 // 逐字交错 rise(.2,.4,.58,1)/fall(.3,0,.58,1) 包络，缩放 1+.1×amount、
 // 推移 −em×.03×amount×(字数/2−序)×scale、常幅正弦浮动（随字起浮，
@@ -281,9 +282,11 @@ Item {
                 "color": line.dimColor
             }];
     }
-    // 逐簇 pose：透明度 = 0.5 + (前沿 - 簇中点x) / 软边宽，
-    // 颜色/透明度在未唱样与已唱样之间按该值插值——
-    // 宿主渐变在簇内逐像素线性，簇中点取样即其均匀着色的精确均值。
+    // 逐簇 pose 复现宿主/AMLL 的逐像素渐变前沿：o(x) = 0.5 + (前沿 − x)/软边宽。
+    // GlyphRun 的 pose 颜色整簇均匀，无法在簇内取样新变；
+    // 改用暗基底 + 分级亮带叠加：亮带以 pose.clip（run 局部坐标、
+    // 逐像素 fwidth 抗锯齿）裁出各自亮度线，透明度 1/(N−j+1) 使合成严格线性，
+    // 字内呈现连续明暗新变而非整字跳变。强调变换所有层共享，halo 只挂基底。
     function __sweepPoses(): var {
         if (line.text.length === 0)
             return [];
@@ -302,7 +305,6 @@ Item {
         const list = [];
         const seen = new Set();
         const edge = line.edge, fade = line.fade;
-        const darkA = line.dimColor.a, brightA = line.brightColor.a;
         const em = line.em;
         const empActive = line.current && line.animateWords && line.highlightAmount > 0;
         // GlyphRun 缩放围绕簇锚点（中点 x、基线 y），
@@ -314,24 +316,14 @@ Item {
             if (seen.has(start))
                 continue;
             seen.add(start);
-            const x = (bases[i] ?? 0) + (Number(g.advance) || 0) / 2;
-            const o = Math.min(1, Math.max(0, 0.5 + (edge - x) / fade));
-            const alpha = darkA + (brightA - darkA) * o;
-            if (alpha <= 0.004)
-                continue;
-            const pose = {
-                    "key": "line",
-                    "start": start,
-                    "y": line.__clusterLift(start),
-                    "opacity": alpha,
-                    "color": Qt.rgba(
-                        line.dimColor.r + (line.brightColor.r - line.dimColor.r) * o,
-                        line.dimColor.g + (line.brightColor.g - line.dimColor.g) * o,
-                        line.dimColor.b + (line.brightColor.b - line.dimColor.b) * o,
-                        1)
-                };
-            // 强调词逐字动画（宿主 LyricLine::pose 同式，包络 rise/fall 分段）
+            const gx = Number(g.x) || 0;
+            const advance = Number(g.advance) || 0;
+            const x = bases[i] ?? 0;              // 连续文本坐标簇左缘
+            const rowPrefix = x - gx;             // 所在行的行前缀（clip 用行内局部坐标）
+            const y = line.__clusterLift(start);
             const span = line.__clusterSpan(start);
+            // 强调词逐字动画（宿主 LyricLine::pose 同式，包络 rise/fall 分段）
+            let ex = 0, ey = 0, escale = 1, halos = null;
             if (empActive && span && span.em && span.ec > 0) {
                 const charIndex = i - span.eg;
                 if (charIndex >= 0 && charIndex < span.ec) {
@@ -345,29 +337,150 @@ Item {
                     const amount = Math.min(
                                 1.2, line.__intensity(rawDu / 2000) * 0.6 * (span.last ? 1.6 : 1)) *
                             env * line.highlightAmount;
-                    const scale = 1 + 0.1 * amount;
+                    escale = 1 + 0.1 * amount;
+                    ex = -em * 0.03 * amount * (span.ec / 2 - charIndex) * escale;
                     // AMLL emphasize float：常幅正弦叠加在基础上浮之上（复合而非替代），
                     // 落点保持在抬起态；随字自身交错时刻起浮，无提前量
                     const floatPhase = Math.min(1, Math.max(0, (t - stagger) / (length * 1.4 - 400)));
-                    pose.scale = scale;
-                    pose.x = -em * 0.03 * amount * (span.ec / 2 - charIndex) * scale;
-                    pose.y = -em * 0.05
+                    ey = -em * 0.05
                                 * line.__ease(Math.min(1, Math.max(0, t / Math.max(1000, rawDu))))
                                 * line.highlightAmount
                             - em * 0.05 * Math.sin(floatPhase * Math.PI)
-                            + (1 - scale) * centerDy;
+                            + (1 - escale) * centerDy;
                     const blurBase = Math.min(
                                 0.8, line.__intensity(rawDu / 3000) * 0.5 * (span.last ? 1.5 : 1));
                     const haloOpacity = blurBase * env * line.highlightAmount;
                     if (haloOpacity > 0.01)
-                        pose.halos = [{
+                        halos = [{
                                 "radius": Math.min(0.3, blurBase * 0.3) * em,
                                 "opacity": haloOpacity,
                                 "color": Qt.rgba(1, 1, 1, 1)
                             }];
                 }
             }
-            list.push(pose);
+            // 簇两端亮度：oL（左缘）≥ oR（右缘，亮度沿 x 递减）
+            const oL = 0.5 + (edge - x) / fade;
+            const oR = 0.5 + (edge - x - advance) / fade;
+            if (oR >= 1 || oL <= 0) {
+                // 整簇全亮 / 全暗：单层 pose
+                const pose = {
+                        "key": "line",
+                        "start": start,
+                        "y": y,
+                        "opacity": 1,
+                        "color": oR >= 1 ? line.brightColor : line.dimColor
+                    };
+                if (ex !== 0 || ey !== 0 || escale !== 1) {
+                    pose.x = ex;
+                    pose.y = ey;
+                    pose.scale = escale;
+                }
+                if (halos)
+                    pose.halos = halos;
+                list.push(pose);
+                continue;
+            }
+            // 跨越簇：每像素恰好一层 —— 16 段互斥亮度切片 + 两端截段。
+            // 叠层方案会让同一字形的抗锯齿边缘覆盖率复利（变粗、偏亮），
+            // 互斥切片不叠层；切片边缘由 clip 的 fwidth 抗锯齿衔接，
+            // 亮度步进 (亮−暗)/16 不可辨。同簇多层 pose 需互异 instance。
+            const slices = 16;
+            const brightA = line.brightColor.a, dimA = line.dimColor.a;
+            const bc = line.brightColor;
+            if (oL > 1) {
+                // 全亮段（x ≤ 前沿 − 软边/2）与簇相交：亮核截段
+                const pose = {
+                        "key": "line",
+                        "start": start,
+                        "instance": "c",
+                        "y": y,
+                        "opacity": 1,
+                        "color": line.brightColor,
+                        "clip": {
+                            "x": -100000,
+                            "y": -100000,
+                            "width": (edge - rowPrefix) - fade * 0.5 + 100000,
+                            "height": 200000
+                        }
+                    };
+                if (ex !== 0 || ey !== 0 || escale !== 1) {
+                    pose.x = ex;
+                    pose.y = ey;
+                    pose.scale = escale;
+                }
+                if (halos)
+                    pose.halos = halos;
+                list.push(pose);
+            }
+            for (let k = 1; k <= slices; ++k) {
+                const sl = edge + fade * (0.5 - k / slices);
+                const sr = edge + fade * (0.5 - (k - 1) / slices);
+                if (sl >= x + advance)
+                    continue;   // 切片在簇右侧（k 小时偏右）
+                if (sr <= x)
+                    break;      // 切片已整体越到簇左侧（k 大时偏左）
+                const pose = {
+                        "key": "line",
+                        "start": start,
+                        "instance": "s" + k,
+                        "y": y,
+                        "opacity": dimA + (brightA - dimA) * (k - 0.5) / slices,
+                        "color": Qt.rgba(bc.r, bc.g, bc.b, 1),
+                        "clip": {
+                            "x": sl - rowPrefix,
+                            "y": -100000,
+                            "width": sr - sl,
+                            "height": 200000
+                        }
+                    };
+                if (ex !== 0 || ey !== 0 || escale !== 1) {
+                    pose.x = ex;
+                    pose.y = ey;
+                    pose.scale = escale;
+                }
+                list.push(pose);
+            }
+            if (oR < 0) {
+                // 全暗段（x ≥ 前沿 + 软边/2）与簇相交：暗基底截段
+                const pose = {
+                        "key": "line",
+                        "start": start,
+                        "instance": "d",
+                        "y": y,
+                        "opacity": 1,
+                        "color": line.dimColor,
+                        "clip": {
+                            "x": (edge - rowPrefix) + fade * 0.5,
+                            "y": -100000,
+                            "width": 900000,
+                            "height": 200000
+                        }
+                    };
+                if (ex !== 0 || ey !== 0 || escale !== 1) {
+                    pose.x = ex;
+                    pose.y = ey;
+                    pose.scale = escale;
+                }
+                list.push(pose);
+            }
+            if (halos) {
+                // 强调辉光独立层：形体透明只留 halo，不经 clip 完整环绕
+                const pose = {
+                        "key": "line",
+                        "start": start,
+                        "instance": "h",
+                        "y": y,
+                        "opacity": 1,
+                        "color": Qt.rgba(1, 1, 1, 0),
+                        "halos": halos
+                    };
+                if (ex !== 0 || ey !== 0 || escale !== 1) {
+                    pose.x = ex;
+                    pose.y = ey;
+                    pose.scale = escale;
+                }
+                list.push(pose);
+            }
         }
         return list;
     }
