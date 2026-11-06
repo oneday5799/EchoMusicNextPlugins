@@ -63,6 +63,10 @@ import {
 } from './scan.ts';
 
 const COVER_BUDGET_MS = 1600;
+/** A single KV cover lookup must never stall a browse command: the io
+ * service can leave an operation unsettled, so each lookup races a small
+ * budget and falls back to no cover. */
+const COVER_LOOKUP_BUDGET_MS = 1200;
 const PAGE_LIMIT_MAX = 500;
 const ALBUM_PAGE_LIMIT_MAX = 120;
 const QUEUE_KEY = 'library';
@@ -809,7 +813,7 @@ async function libraryAlbums(args: Record<string, JsonValue>): Promise<JsonValue
   const covers = await Promise.all(
     page.map(async (album) => {
       try {
-        return await readCover(ctx, album.representativeId);
+        return await readCoverBounded(ctx, album.representativeId);
       } catch (error) {
         return '';
       }
@@ -821,6 +825,13 @@ async function libraryAlbums(args: Record<string, JsonValue>): Promise<JsonValue
   return { ready: true, total: albums.length, offset, limit, albums: rows };
 }
 
+/** Cover lookup for the page headers and rows, bounded so a wedged io
+ * operation degrades to a missing cover instead of blocking the caller. */
+async function readCoverBounded(ctx: EchoPluginContext, songId: string): Promise<string> {
+  const value = await raceTimeout(ctx, readCover(ctx, songId), COVER_LOOKUP_BUDGET_MS);
+  return value ?? '';
+}
+
 /** Cover lookup for the song rows the page currently displays. */
 async function libraryCovers(args: Record<string, JsonValue>): Promise<JsonValue> {
   if (!libraryReady) return { covers: {} };
@@ -830,7 +841,7 @@ async function libraryCovers(args: Record<string, JsonValue>): Promise<JsonValue
   await Promise.all(
     ids.map(async (id) => {
       try {
-        const url = await readCover(ctx, id);
+        const url = await readCoverBounded(ctx, id);
         if (url) covers[id] = url;
       } catch (error) {
         // Missing covers simply keep the placeholder art.
@@ -856,7 +867,7 @@ export async function queueCoverForTrack(song: SongInit, cover: string): Promise
 async function coverForTrack(song: SongInit): Promise<string> {
   const ctx = requireContext();
   try {
-    const cached = await readCover(ctx, song.id);
+    const cached = await readCoverBounded(ctx, song.id);
     if (cached) return cached;
   } catch (error) {
     return '';

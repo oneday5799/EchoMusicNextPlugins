@@ -104,7 +104,7 @@ ColumnLayout {
             }
             if (result && result.ok) {
                 plugin.toast.success(`已添加「${result.name || "音乐文件夹"}」`);
-                plugin.toast.info("回到「本地音乐」页面点击「重新扫描」建立曲库");
+                plugin.toast.info("回到「本地音乐」页面点击「扫描」建立曲库");
             }
             loadFolders();
         });
@@ -223,7 +223,7 @@ ColumnLayout {
     SettingsSection {
         Layout.fillWidth: true
         heading: "音乐文件夹"
-        subtitle: "添加多个文件夹建立曲库；移除或重命名立即生效，新增后需重新扫描"
+        subtitle: "添加多个文件夹建立曲库；移除或重命名立即生效，新增后需扫描"
 
         trailing: Component {
             EchoButton {
