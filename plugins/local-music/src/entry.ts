@@ -98,6 +98,14 @@ const SETTINGS_RECOVERY_ATTEMPTS = 5;
  * version when the sweep gains new legacy keys to clean. */
 const STORAGE_SWEEP_KEY = 'storageSweep';
 const STORAGE_SWEEP_VERSION = 1;
+/** Coalescing window for scan progress publishes: each publish drives a
+ * synchronous page re-render, and hundreds per scan saturate the main
+ * thread (visible freeze → scene-graph recursion crash). */
+const SCAN_PROGRESS_INTERVAL_MS = 300;
+/** The task tray widget is another synchronous scene-graph consumer; its
+ * progress only needs to tick about once a second, so it gets its own,
+ * wider window on top of the shared flush. */
+const TASK_PROGRESS_INTERVAL_MS = 1000;
 
 interface SongRowJson extends Record<string, JsonValue> {
   id: string;
@@ -702,6 +710,57 @@ async function persistLibraryCache(ctx: EchoPluginContext, truncated: boolean): 
 
 async function runScanJob(ctx: EchoPluginContext, job: ScanJob, epoch: number): Promise<void> {
   const abortedNow = () => job.aborted || epoch !== scanEpoch;
+  let pendingProgress: Record<string, JsonValue> | null = null;
+  let pendingTaskProgress: { done: number; total: number; label: string } | null = null;
+  let lastProgressFlush = 0;
+  let lastTaskProgress = 0;
+  let progressFlushTimer: { dispose(): void } | null = null;
+  const flushProgress = (): void => {
+    if (progressFlushTimer) {
+      try {
+        progressFlushTimer.dispose();
+      } catch (timerError) {
+        // Timer registration may already be gone during deactivation.
+      }
+      progressFlushTimer = null;
+    }
+    const values = pendingProgress;
+    const task = pendingTaskProgress;
+    pendingProgress = null;
+    pendingTaskProgress = null;
+    if (!values) return;
+    const now = Date.now();
+    lastProgressFlush = now;
+    if (task && now - lastTaskProgress >= TASK_PROGRESS_INTERVAL_MS) {
+      lastTaskProgress = now;
+      try {
+        job.task?.update({ progress: task });
+      } catch (taskError) {
+        // Ignore update races with dismissal.
+      }
+    }
+    publishScan(values);
+  };
+  const reportProgress = (
+    values: Record<string, JsonValue>,
+    task?: { done: number; total: number; label: string },
+  ): void => {
+    pendingProgress = { ...(pendingProgress ?? {}), ...values };
+    if (task) pendingTaskProgress = task;
+    const now = Date.now();
+    if (now - lastProgressFlush >= SCAN_PROGRESS_INTERVAL_MS) {
+      flushProgress();
+      return;
+    }
+    if (!progressFlushTimer) {
+      progressFlushTimer = ctx.setTimer(
+        'scan-progress-flush',
+        Math.max(1, SCAN_PROGRESS_INTERVAL_MS - (now - lastProgressFlush)),
+        false,
+        flushProgress,
+      );
+    }
+  };
   const finishTask = (status: 'completed' | 'error' | 'aborted', label: string, error?: string) => {
     try {
       job.task?.finish(status, { progress: { done: 1, total: 1, label }, error });
@@ -730,12 +789,10 @@ async function runScanJob(ctx: EchoPluginContext, job: ScanJob, epoch: number): 
       onProgress: (progress) => {
         if (abortedNow()) return;
         const label = `已扫描 ${progress.dirs} 个目录，找到 ${progress.found} 首`;
-        try {
-          job.task?.update({ progress: { done: progress.found, total: 0, label } });
-        } catch (taskError) {
-          // Ignore update races with dismissal.
-        }
-        publishScan({ stage: 'scan', running: true, label, found: progress.found });
+        reportProgress(
+          { stage: 'scan', running: true, label, found: progress.found },
+          { done: progress.found, total: 0, label },
+        );
       },
     });
     if (collected.errors.length > 0) {
@@ -751,6 +808,7 @@ async function runScanJob(ctx: EchoPluginContext, job: ScanJob, epoch: number): 
     libraryReady = true;
     await persistLibraryCache(ctx, collected.truncated);
     notifyLibraryChanged();
+    flushProgress();
     publishScan({
       stage: 'enrich',
       running: true,
@@ -768,12 +826,10 @@ async function runScanJob(ctx: EchoPluginContext, job: ScanJob, epoch: number): 
         onProgress: (done) => {
           if (abortedNow()) return;
           const label = `读取标签 ${done}/${total}`;
-          try {
-            job.task?.update({ progress: { done, total, label } });
-          } catch (taskError) {
-            // Ignore update races with dismissal.
-          }
-          publishScan({ stage: 'enrich', running: true, label, found: total });
+          reportProgress(
+            { stage: 'enrich', running: true, label, found: total },
+            { done, total, label },
+          );
         },
       });
       const coverStats = await queueCoverStoreTask(() =>
@@ -782,12 +838,10 @@ async function runScanJob(ctx: EchoPluginContext, job: ScanJob, epoch: number): 
           onProgress: (done, passTotal) => {
             if (abortedNow()) return;
             const label = `整理封面 ${done}/${passTotal}`;
-            try {
-              job.task?.update({ progress: { done, total: passTotal, label } });
-            } catch (taskError) {
-              // Ignore update races with dismissal.
-            }
-            publishScan({ stage: 'enrich', running: true, label, found: total });
+            reportProgress(
+              { stage: 'enrich', running: true, label, found: total },
+              { done, total: passTotal, label },
+            );
           },
         }),
       );
@@ -798,6 +852,7 @@ async function runScanJob(ctx: EchoPluginContext, job: ScanJob, epoch: number): 
     }
     await persistLibraryCache(ctx, cacheTruncated);
     finishTask('completed', `扫描完成，共 ${librarySongs.length} 首`);
+    flushProgress();
     publishScan({ running: false, done: true, count: librarySongs.length });
     notifyLibraryChanged();
   } catch (error) {
@@ -815,6 +870,7 @@ async function runScanJob(ctx: EchoPluginContext, job: ScanJob, epoch: number): 
         'aborted',
         libraryReady ? `扫描已中止，已保留 ${librarySongs.length} 首` : '扫描已中止',
       );
+      flushProgress();
       publishScan({
         running: false,
         aborted: true,
@@ -824,6 +880,7 @@ async function runScanJob(ctx: EchoPluginContext, job: ScanJob, epoch: number): 
     } else {
       const message = error instanceof Error ? error.message : String(error);
       finishTask('error', '扫描失败', message);
+      flushProgress();
       publishScan({ running: false, error: message });
     }
   } finally {

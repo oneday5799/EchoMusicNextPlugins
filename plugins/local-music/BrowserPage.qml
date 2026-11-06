@@ -259,8 +259,13 @@ Item {
             durationText: formatDuration(row.durationMs),
             extraText: "",
             resourceId: row.id,
+            // Host EchoArtistLinks reads `modelData.id.length` per delegate; an
+            // entry without `id` throws on every re-evaluation. Local artists
+            // have no domain id — an empty id keeps the button honestly
+            // disabled (clicks never had a handler) without the throw.
             artistLinks: row.artist ? [{
-                    name: row.artist
+                    name: row.artist,
+                    id: ""
                 }] : [],
             albumId: "",
             original: false,
@@ -713,11 +718,30 @@ Item {
 
     property int lastLibraryRevision: -1
 
+    // Every publish hands over a fresh state object; assigning it re-evaluates
+    // every banner binding and each of those re-renders rakes the scene graph
+    // (EchoUiPart attach/detach + EchoPixelSnap refresh cascades). Skip the
+    // write when no rendered field actually moved so steady phases cost zero.
+    function scanStateEquals(a, b) {
+        if (a === b)
+            return true;
+        if (!a || !b || typeof a !== "object" || typeof b !== "object")
+            return false;
+        const keys = ["stage", "running", "label", "found", "error", "done"];
+        for (let i = 0; i < keys.length; i++) {
+            if (a[keys[i]] !== b[keys[i]])
+                return false;
+        }
+        return true;
+    }
+
     Connections {
         target: root.plugin.ui
         function onStateChanged() {
             const state = root.plugin.ui.state;
-            root.scanState = state && state.scan ? state.scan : {};
+            const next = state && state.scan ? state.scan : {};
+            if (!root.scanStateEquals(root.scanState, next))
+                root.scanState = next;
             const revision = state && typeof state.libraryRevision === "number" ? state.libraryRevision : -1;
             if (revision >= 0 && revision !== root.lastLibraryRevision) {
                 root.lastLibraryRevision = revision;
