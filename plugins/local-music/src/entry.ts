@@ -271,6 +271,23 @@ function indexLibrary(songs: SongInit[]): void {
 let viewCacheKey = '';
 let viewCacheSongs: SongInit[] = [];
 
+// TEMP DIAGNOSTICS — remove once the blank album drill-in is rooted. Toasts
+// vanish before they can be relayed, so every browse request and reply is
+// persisted into a small ring of KV slots and read back from values.sqlite.
+const DIAG_SLOTS = 12;
+let diagSeq = 0;
+function persistViewDiag(ctx: EchoPluginContext, entry: Record<string, JsonValue>): void {
+  try {
+    diagSeq += 1;
+    const slot = diagSeq % DIAG_SLOTS;
+    awaitOperation(
+      ctx.io.writeValue(`__diag:${slot}`, { seq: diagSeq, at: Date.now(), ...entry }),
+    ).catch(() => undefined);
+  } catch (error) {
+    // Diagnostics are best-effort and must never disturb the command path.
+  }
+}
+
 function publishState(): void {
   const ctx = context;
   if (!ctx) return;
@@ -785,6 +802,15 @@ async function libraryPage(args: Record<string, JsonValue>): Promise<JsonValue> 
   if (!libraryReady) return { ready: false, total: 0, offset: 0, limit: 0, songs: [] };
   const { offset, limit } = parsePageArgs(args, PAGE_LIMIT_MAX);
   const view = collectionView(args);
+  // TEMP DIAGNOSTIC — remove once the blank album drill-in is rooted.
+  persistViewDiag(requireContext(), {
+    kind: 'page',
+    argsJson: JSON.stringify(args),
+    songs: librarySongs.length,
+    view: view.length,
+    firstAlbum: view.length > 0 ? albumKeyOf(view[0]) : '',
+    sampleAlbums: JSON.stringify(librarySongs.slice(0, 3).map((song) => song.album)),
+  });
   const page = view.slice(offset, offset + limit);
   return {
     ready: true,
@@ -809,6 +835,14 @@ async function libraryAlbums(args: Record<string, JsonValue>): Promise<JsonValue
   const albums = groupAlbums(visible).filter(
     (album) => !keyword || album.name.toLowerCase().indexOf(keyword.trim().toLowerCase()) >= 0,
   );
+  // TEMP DIAGNOSTIC — remove once the blank album drill-in is rooted.
+  persistViewDiag(requireContext(), {
+    kind: 'albums',
+    argsJson: JSON.stringify(args),
+    songs: librarySongs.length,
+    view: albums.length,
+    firstName: albums.length > 0 ? albums[0].name : '',
+  });
   const page = albums.slice(offset, offset + limit);
   const covers = await Promise.all(
     page.map(async (album) => {
@@ -1138,6 +1172,14 @@ export async function activate(ctx: EchoPluginContext): Promise<void> {
   ctx.registerCommand('library.page', (commandArgs) => libraryPage(commandArgs));
   ctx.registerCommand('library.albums', (commandArgs) => libraryAlbums(commandArgs));
   ctx.registerCommand('library.covers', (commandArgs) => libraryCovers(commandArgs));
+  // TEMP DIAGNOSTIC — remove once the blank album drill-in is rooted.
+  ctx.registerCommand('library.diag', (commandArgs) => {
+    persistViewDiag(requireContext(), {
+      kind: argString(commandArgs, 'kind'),
+      payload: argString(commandArgs, 'payload'),
+    });
+    return { ok: true };
+  });
   ctx.registerCommand('play', (commandArgs) => playCommand(commandArgs));
 
   ctx.ui.setState({ settingsRevision, scan: null, libraryRevision: 0 });

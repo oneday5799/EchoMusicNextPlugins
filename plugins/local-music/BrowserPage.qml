@@ -208,6 +208,16 @@ Item {
     function resetView(reason) {
         // TEMP DIAGNOSTIC — remove once the phantom reset is rooted.
         plugin.toast.info(`[reset diag] ${reason || "?"} pageEpoch=${pageEpoch + 1} tab=${viewTab} album=${selectedAlbum.length > 0 ? selectedAlbum : "-"}`);
+        run("library.diag", {
+            kind: "reset",
+            payload: JSON.stringify({
+                reason: reason || "?",
+                tab: viewTab,
+                album: selectedAlbum,
+                ready: libraryReady,
+                rows: pageRows.length
+            })
+        }, null);
         pageEpoch += 1;
         albumEpoch += 1;
         pageRows = [];
@@ -302,6 +312,21 @@ Item {
                     return;
                 }
                 pageLoading = false;
+                // TEMP DIAGNOSTIC — remove once the blank drill-in is rooted.
+                run("library.diag", {
+                    kind: "page-reply",
+                    payload: JSON.stringify({
+                        epoch,
+                        epochNow: pageEpoch,
+                        albumArg: selectedAlbum,
+                        hasResult: !!result,
+                        ready: !!result && result.ready === true,
+                        total: result ? result.total : -1,
+                        songsKind: result ? Object.prototype.toString.call(result.songs) : "none",
+                        songsLen: result && result.songs ? result.songs.length : -1,
+                        first: result && result.songs && result.songs.length > 0 ? JSON.stringify(result.songs[0]) : ""
+                    })
+                }, null);
                 if (!result) {
                     plugin.toast.warning("[page diag] 回复为 null（操作失败）");
                     return;
@@ -403,6 +428,20 @@ Item {
                     return;
                 }
                 albumsLoading = false;
+                // TEMP DIAGNOSTIC — remove once the blank drill-in is rooted.
+                run("library.diag", {
+                    kind: "albums-reply",
+                    payload: JSON.stringify({
+                        epoch,
+                        epochNow: albumEpoch,
+                        hasResult: !!result,
+                        ready: !!result && result.ready === true,
+                        total: result ? result.total : -1,
+                        albumsKind: result ? Object.prototype.toString.call(result.albums) : "none",
+                        albumsLen: result && result.albums ? result.albums.length : -1,
+                        first: result && result.albums && result.albums.length > 0 ? JSON.stringify(result.albums[0]) : ""
+                    })
+                }, null);
                 if (!result) {
                     plugin.toast.warning("[albums diag] 回复为 null（操作失败）");
                     return;
