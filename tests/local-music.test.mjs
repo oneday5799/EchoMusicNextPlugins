@@ -479,6 +479,140 @@ test('USLT 同步歌词（chi 语言描述符 + UTF-16 BOM）', () => {
   assert.equal(tags.lyric, text);
 });
 
+function id3HeaderMajor(major, bodyLength, flags) {
+  const header = new Uint8Array(10);
+  header[0] = 0x49;
+  header[1] = 0x44;
+  header[2] = 0x33;
+  header[3] = major;
+  header[5] = flags || 0;
+  header[6] = (bodyLength >>> 21) & 0x7f;
+  header[7] = (bodyLength >>> 14) & 0x7f;
+  header[8] = (bodyLength >>> 7) & 0x7f;
+  header[9] = bodyLength & 0x7f;
+  return header;
+}
+
+function syncsafeBytes(value) {
+  const out = new Uint8Array(4);
+  out[0] = (value >>> 21) & 0x7f;
+  out[1] = (value >>> 14) & 0x7f;
+  out[2] = (value >>> 7) & 0x7f;
+  out[3] = value & 0x7f;
+  return out;
+}
+
+function id3Frame24(id, flags2, body) {
+  const head = new Uint8Array(10);
+  for (let i = 0; i < 4; i++) head[i] = id.charCodeAt(i);
+  head[4] = (body.length >>> 21) & 0x7f;
+  head[5] = (body.length >>> 14) & 0x7f;
+  head[6] = (body.length >>> 7) & 0x7f;
+  head[7] = body.length & 0x7f;
+  head[9] = flags2;
+  const out = new Uint8Array(10 + body.length);
+  out.set(head, 0);
+  out.set(body, 10);
+  return out;
+}
+
+function id3Frame22(id, payload) {
+  const head = new Uint8Array(6);
+  for (let i = 0; i < 3; i++) head[i] = id.charCodeAt(i);
+  head[3] = (payload.length >>> 16) & 0xff;
+  head[4] = (payload.length >>> 8) & 0xff;
+  head[5] = payload.length & 0xff;
+  const out = new Uint8Array(6 + payload.length);
+  out.set(head, 0);
+  out.set(payload, 6);
+  return out;
+}
+
+/** 写入端 unsynchronisation：每个 0xFF 后补一个 0x00。 */
+function unsynchronise(bytes) {
+  const out = [];
+  for (let i = 0; i < bytes.length; i++) {
+    out.push(bytes[i]);
+    if (bytes[i] === 0xff) out.push(0x00);
+  }
+  return new Uint8Array(out);
+}
+
+function apicPayload(art) {
+  const payload = new Uint8Array(14 + art.length);
+  payload[0] = 0; // latin-1
+  payload.set(utf8Bytes('image/jpeg'), 1);
+  payload[11] = 0; // mime 终止
+  payload[12] = 3; // front cover
+  payload[13] = 0; // 空描述终止
+  payload.set(art, 14);
+  return payload;
+}
+
+test('ID3v2.4 扩展头按 syncsafe 语义跳过', () => {
+  // 扩展头声明 6 字节且该值含 4 个长度字节本身：第一帧应落在 10+6。
+  const ext = concatBytes([syncsafeBytes(6), new Uint8Array([1, 0])]);
+  const payload = concatBytes([new Uint8Array([3]), utf8Bytes('标题')]);
+  const frame = id3Frame('TIT2', payload);
+  const bytes = concatBytes([id3HeaderMajor(4, ext.length + frame.length, 0x40), ext, frame]);
+  const tags = parseAudioTags(bytes);
+  assert.equal(tags.title, '标题');
+});
+
+test('ID3v2.3 标签级 unsynchronisation 恢复封面字节', () => {
+  const art = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46]);
+  const frame = id3Frame('APIC', apicPayload(art));
+  const body = unsynchronise(frame);
+  const bytes = concatBytes([id3HeaderMajor(3, body.length, 0x80), body]);
+  const tags = parseAudioTags(bytes);
+  assert.equal(tags.coverMime, 'image/jpeg');
+  assert.deepEqual(Array.from(tags.coverData), Array.from(art));
+});
+
+test('ID3v2.4 帧级 unsynchronisation 与数据长度指示器', () => {
+  const art = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0x11, 0x22]);
+  // 帧体 = 4 字节 syncsafe 原始长度 + unsynchronised 内容；
+  // 帧尺寸字段按存储字节计（含插入字节与长度指示器）。
+  const body = concatBytes([syncsafeBytes(14 + art.length), unsynchronise(apicPayload(art))]);
+  const frame = id3Frame24('APIC', 0x03, body);
+  const bytes = concatBytes([id3HeaderMajor(4, frame.length), frame]);
+  const tags = parseAudioTags(bytes);
+  assert.deepEqual(Array.from(tags.coverData), Array.from(art));
+});
+
+test('ID3v2.2 标签解析（TT2 文本与 PIC 封面）', () => {
+  const title = id3Frame22('TT2', new Uint8Array([0, 84, 105, 116, 108, 101]));
+  const art = new Uint8Array([0xff, 0xd8, 0x11, 0x22]);
+  const pic = new Uint8Array(6 + art.length);
+  pic[0] = 0; // latin-1
+  pic.set(utf8Bytes('JPG'), 1);
+  pic[4] = 3; // front cover
+  pic[5] = 0; // 空描述终止
+  pic.set(art, 6);
+  const frames = [title, id3Frame22('PIC', pic)];
+  const bodyLength = frames.reduce((total, part) => total + part.length, 0);
+  const bytes = concatBytes([id3HeaderMajor(2, bodyLength), ...frames]);
+  const tags = parseAudioTags(bytes);
+  assert.equal(tags.title, 'Title');
+  assert.equal(tags.coverMime, 'image/jpg');
+  assert.deepEqual(Array.from(tags.coverData), Array.from(art));
+});
+
+test('APIC UTF-16 描述缺失终止符时不产出垃圾封面', () => {
+  // 描述按 UTF-16 BOM 写入但永不结束：封面应判 null 而非把描述当图像数据。
+  const desc = new Uint8Array([0xff, 0xfe, 0x01, 0x5c, 0x62, 0x97]);
+  const payload = new Uint8Array(1 + 10 + 1 + 1 + desc.length);
+  payload[0] = 1;
+  payload.set(utf8Bytes('image/jpeg'), 1);
+  payload[11] = 0;
+  payload[12] = 3;
+  payload.set(desc, 13);
+  const frame = id3Frame('APIC', payload);
+  const bytes = concatBytes([id3Header(frame.length), frame]);
+  const tags = parseAudioTags(bytes);
+  assert.equal(tags.coverData, null);
+});
+
 test('FLAC STREAMINFO 时长 + Vorbis 注释 + 封面', () => {
   function block(type, payload, last) {
     const head = new Uint8Array(4);

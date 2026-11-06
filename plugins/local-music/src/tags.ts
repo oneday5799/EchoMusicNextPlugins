@@ -1,6 +1,6 @@
-// Audio tag readers for ID3v2.3/2.4 and FLAC streams. Only the header bytes
-// (first 256 KiB by convention) are fetched over the wire, so every parser
-// works on a bounded Uint8Array view.
+// Audio tag readers for ID3v2.2/2.3/2.4 and FLAC streams. Only the header
+// bytes (first 256 KiB by convention) are fetched over the wire, so every
+// parser works on a bounded Uint8Array view.
 
 import { bytesToBase64, latin1Decode, utf16Decode, utf8Decode } from './codec.ts';
 
@@ -28,6 +28,34 @@ function emptyTags(): AudioTags {
 
 function viewOf(bytes: Uint8Array): DataView {
   return new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+}
+
+/** Syncsafe 28-bit integer: four 7-bit groups, no byte has the high bit. */
+function syncsafeSize(bytes: Uint8Array, offset: number): number {
+  return (
+    ((bytes[offset] & 127) << 21) |
+    ((bytes[offset + 1] & 127) << 14) |
+    ((bytes[offset + 2] & 127) << 7) |
+    (bytes[offset + 3] & 127)
+  );
+}
+
+/** Reverses ID3 unsynchronisation: writers insert a 0x00 after every 0xFF
+ * byte so audio players never see a false MPEG sync; readers must drop
+ * those 0x00 bytes before decoding frame content. */
+function deUnsynchronise(bytes: Uint8Array, start: number, end: number): Uint8Array {
+  let inserted = 0;
+  for (let i = start; i < end - 1; i += 1) {
+    if (bytes[i] === 255 && bytes[i + 1] === 0) inserted += 1;
+  }
+  const out = new Uint8Array(end - start - inserted);
+  let write = 0;
+  for (let i = start; i < end; i += 1) {
+    out[write] = bytes[i];
+    write += 1;
+    if (bytes[i] === 255 && i + 1 < end && bytes[i + 1] === 0) i += 1;
+  }
+  return out;
 }
 
 function decodeId3String(bytes: Uint8Array, encoding: number, start: number, end: number): string {
@@ -116,12 +144,17 @@ function readId3Picture(
   if (offset >= end) return null;
   offset += 1;
   if (encoding === 1 || encoding === 2) {
+    // UTF-16 description ends with a 00 00 terminator; without one the
+    // "image data" would start inside the description text.
+    let found = -1;
     for (let i = offset; i + 1 < end; i += 2) {
       if (bytes[i] === 0 && bytes[i + 1] === 0) {
-        offset = i + 2;
+        found = i;
         break;
       }
     }
+    if (found < 0) return null;
+    offset = found + 2;
   } else {
     let i = offset;
     while (i < end && bytes[i] !== 0) i += 1;
@@ -164,42 +197,67 @@ function parseId3v2(bytes: Uint8Array): AudioTags | null {
   if (bytes.length < 10) return null;
   if (bytes[0] !== 73 || bytes[1] !== 68 || bytes[2] !== 51) return null;
   const major = bytes[3];
-  if (major !== 3 && major !== 4) return null;
+  if (major !== 2 && major !== 3 && major !== 4) return null;
   const flags = bytes[5];
-  // Syncsafe 28-bit size, one 7-bit group per byte.
-  const size =
-    ((bytes[6] & 127) << 21) |
-    ((bytes[7] & 127) << 14) |
-    ((bytes[8] & 127) << 7) |
-    (bytes[9] & 127);
+  const size = syncsafeSize(bytes, 6);
   let offset = 10;
-  if ((flags & 64) !== 0 && offset + 4 <= bytes.length) {
+  if (major !== 2 && (flags & 64) !== 0 && offset + 4 <= bytes.length) {
+    // Extended header. v2.3's declared size excludes the four size bytes
+    // themselves; v2.4's is a syncsafe integer that includes them.
     const view = viewOf(bytes);
-    offset += 4 + view.getUint32(offset);
+    offset += major === 4 ? syncsafeSize(bytes, offset) : 4 + view.getUint32(offset);
   }
-  const limit = Math.min(bytes.length, 10 + size);
+  const declaredEnd = Math.min(bytes.length, 10 + size);
+  // v2.2/v2.3 unsynchronise the whole tag body: restore it into a clean
+  // copy before the frame walk. v2.4 moved the flag to the frame level and
+  // its tag-level bit must not be applied (the frame sizes would not match).
+  let body = bytes;
+  let base = offset;
+  let limit = declaredEnd;
+  if (major !== 4 && (flags & 128) !== 0) {
+    body = deUnsynchronise(bytes, base, declaredEnd);
+    base = 0;
+    limit = body.length;
+  }
+  const view = viewOf(body);
   const tags = emptyTags();
+  const headerSize = major === 2 ? 6 : 10;
+  const idLength = major === 2 ? 3 : 4;
+  const idPattern = major === 2 ? /^[A-Z0-9]{3}$/ : /^[A-Z0-9]{4}$/;
   let found = false;
-  while (offset + 10 <= limit) {
-    const id = String.fromCharCode(
-      bytes[offset],
-      bytes[offset + 1],
-      bytes[offset + 2],
-      bytes[offset + 3],
-    );
-    if (!/^[A-Z0-9]{4}$/.test(id)) break;
-    const view = viewOf(bytes);
+  while (base + headerSize <= limit) {
+    let id = '';
+    for (let i = 0; i < idLength; i += 1) {
+      id += String.fromCharCode(body[base + i]);
+    }
+    if (!idPattern.test(id)) break;
     const frameSize =
-      major === 4
-        ? ((bytes[offset + 4] & 127) << 21) |
-          ((bytes[offset + 5] & 127) << 14) |
-          ((bytes[offset + 6] & 127) << 7) |
-          (bytes[offset + 7] & 127)
-        : view.getUint32(offset + 4);
-    if (frameSize <= 0 || offset + 10 + frameSize > limit) break;
-    applyId3Frame(tags, id, bytes, offset + 10, offset + 10 + frameSize, false);
+      major === 2
+        ? (body[base + 3] << 16) | (body[base + 4] << 8) | body[base + 5]
+        : major === 4
+          ? syncsafeSize(body, base + 4)
+          : view.getUint32(base + 4);
+    if (frameSize <= 0 || base + headerSize + frameSize > limit) break;
+    const dataStart = base + headerSize;
+    const dataEnd = dataStart + frameSize;
+    let frameBytes = body;
+    let frameStart = dataStart;
+    let frameEnd = dataEnd;
+    if (major === 4) {
+      // v2.4 frame format flags: 0x01 = data-length indicator (4 syncsafe
+      // bytes ahead of the content), 0x02 = frame-level unsynchronisation.
+      const frameFlags = body[base + 9];
+      if ((frameFlags & 1) !== 0 && frameSize > 4) frameStart += 4;
+      if ((frameFlags & 2) !== 0) {
+        const clean = deUnsynchronise(body, frameStart, frameEnd);
+        frameBytes = clean;
+        frameStart = 0;
+        frameEnd = clean.length;
+      }
+    }
+    applyId3Frame(tags, id, frameBytes, frameStart, frameEnd, major === 2);
     found = true;
-    offset += 10 + frameSize;
+    base = dataEnd;
   }
   return found ? tags : null;
 }
@@ -357,10 +415,6 @@ function flacMetadataExtent(bytes: Uint8Array, start: number): number {
   return bytes.length + 1;
 }
 
-/** Byte count a bounded tag read must cover: the declared ID3 size when the
- * tag extends past the window, and the FLAC metadata extent when a block
- * (typically the picture) claims bytes beyond it. 0 when the buffer already
- * holds everything the headers declare. */
 /** Absolute end of the declared ID3v2 tag (header included), or 0 when the
  * buffer does not open with an ID3v2 tag. */
 function id3EndOffset(bytes: Uint8Array): number {
@@ -381,17 +435,15 @@ export function tagReadTarget(bytes: Uint8Array): number {
   return target;
 }
 
-/** Declared ID3v2.3/2.4 tag size (header excluded), or -1 when the buffer is
- * not an ID3v2 tag. Used to re-read files whose tag extends past the
- * bounded probe window. */
+/** Declared ID3v2.2/2.3/2.4 tag size (header excluded), or -1 when the
+ * buffer is not an ID3v2 tag. Used to re-read files whose tag extends past
+ * the bounded probe window. */
 export function id3TagSize(bytes: Uint8Array): number {
   if (bytes.length < 10) return -1;
   if (bytes[0] !== 73 || bytes[1] !== 68 || bytes[2] !== 51) return -1;
   const major = bytes[3];
-  if (major !== 3 && major !== 4) return -1;
-  return (
-    ((bytes[6] & 127) << 21) | ((bytes[7] & 127) << 14) | ((bytes[8] & 127) << 7) | (bytes[9] & 127)
-  );
+  if (major !== 2 && major !== 3 && major !== 4) return -1;
+  return syncsafeSize(bytes, 6);
 }
 
 export function parseAudioTags(bytes: Uint8Array): AudioTags | null {
