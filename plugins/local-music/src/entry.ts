@@ -494,17 +494,103 @@ function queuePersistCover(
   queueCoverStoreTask(() => persistCoverEntry(ctx, song, hash, url)).catch(() => undefined);
 }
 
+/** Temporary diagnostic snapshot for the cover-cache investigation; the
+ * activation cleanup drops the previous one, the latest pass overwrites it. */
+async function writeCoverDiag(ctx: EchoPluginContext, payload: JsonValue): Promise<void> {
+  try {
+    await awaitOperation(ctx.io.writeValue('__diag', payload));
+  } catch (error) {
+    // Diagnostics are best-effort.
+  }
+}
+
+let backfillTimer: { dispose(): void } | null = null;
+
+/** A cache-restored library has no cover pass behind it — the pass runs
+ * during scans — so after an update covers stay empty until the next scan.
+ * Shortly after a warm start, fill missing per-song entries in the
+ * background from embedded tags only: online completion stays a play-time
+ * behavior and the folder-image map is something only a scan rebuilds. */
+function queueWarmCoverBackfill(ctx: EchoPluginContext): void {
+  if (backfillTimer) {
+    try {
+      backfillTimer.dispose();
+    } catch (error) {
+      // Already fired or disposed.
+    }
+  }
+  backfillTimer = ctx.setTimer('cover-backfill', 1500, false, () => {
+    backfillTimer = null;
+    void runWarmCoverBackfill(ctx);
+  });
+}
+
+async function runWarmCoverBackfill(ctx: EchoPluginContext): Promise<void> {
+  if (context !== ctx || scanJob || !libraryReady || librarySongs.length === 0) return;
+  const epoch = scanEpoch;
+  const shouldAbort = () => scanJob !== null || epoch !== scanEpoch;
+  try {
+    const store = await readCoverStore(ctx);
+    const missing = librarySongs.filter((song) => !store.map[song.id]).length;
+    if (missing === 0) return;
+    // Through the store chain so a scan starting mid-backfill serializes
+    // behind it instead of interleaving map flushes.
+    const stats = await queueCoverStoreTask(() =>
+      resolveScanCovers(ctx, { shouldAbort }, { allowOnline: false }),
+    );
+    if (shouldAbort()) return;
+    await reconcileCoverStore(ctx, libraryById);
+    if (stats.after > stats.before) notifyLibraryChanged();
+    void writeCoverDiag(ctx, { stage: 'warm', missing, ...stats });
+  } catch (error) {
+    void writeCoverDiag(ctx, {
+      stage: 'warm-error',
+      message: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
 interface ScanCoverCallbacks {
   shouldAbort: () => boolean;
   onProgress?: (done: number, total: number) => void;
 }
 
+interface ScanCoverOptions {
+  /** Warm-start backfills skip the Kugou rep lookup: online completion is
+   * a play-time/scan-time behavior, not a launch-time one. */
+  allowOnline?: boolean;
+}
+
+interface CoverPassStats {
+  songs: number;
+  before: number;
+  after: number;
+  embedded: number;
+  tagFailures: number;
+  oversized: number;
+  reps: number;
+  repFolder: number;
+  repOnline: number;
+}
+
 async function resolveScanCovers(
   ctx: EchoPluginContext,
   callbacks: ScanCoverCallbacks,
-): Promise<void> {
+  options: ScanCoverOptions = {},
+): Promise<CoverPassStats> {
   const store = await readCoverStore(ctx);
   const reader = settings.readEmbedded ? tagReader : null;
+  const stats: CoverPassStats = {
+    songs: librarySongs.length,
+    before: Object.keys(store.map).length,
+    after: 0,
+    embedded: 0,
+    tagFailures: 0,
+    oversized: 0,
+    reps: 0,
+    repFolder: 0,
+    repOnline: 0,
+  };
   try {
     let total = librarySongs.length;
     let done = 0;
@@ -532,8 +618,15 @@ async function resolveScanCovers(
             reader.readTags(song.folderId, song.path),
             COVER_BUDGET_MS,
           );
+          if (!tags) stats.tagFailures += 1;
+          if (tags && tags.coverData && tags.coverData.length > COVER_STORE_LIMIT) {
+            stats.oversized += 1;
+          }
           url = embeddedCoverUrl(tags);
-          if (url && tags && tags.coverData) hash = coverHashOfBytes(tags.coverData);
+          if (url && tags && tags.coverData) {
+            hash = coverHashOfBytes(tags.coverData);
+            stats.embedded += 1;
+          }
         }
         if (url && hash) {
           store.map[song.id] = coverEntryFor(hash, song.size);
@@ -558,12 +651,18 @@ async function resolveScanCovers(
       const rep = libraryById.get(album.representativeId);
       if (rep) reps.push(rep);
     }
+    stats.reps = reps.length;
     total += reps.length;
     for (const rep of reps) {
       if (callbacks.shouldAbort()) throw new Error('扫描已中止');
       const folderCoverPath = dirCovers.get(`${rep.folderId}|${dirNameOf(rep.path)}`) ?? '';
       let url = await folderCoverUrl(ctx, refFor, rep.folderId, folderCoverPath);
-      if (!url && settings.onlineFetch) url = await kugouCover(ctx, rep.title, rep.artist);
+      if (url) {
+        stats.repFolder += 1;
+      } else if (settings.onlineFetch && options.allowOnline !== false) {
+        url = await kugouCover(ctx, rep.title, rep.artist);
+        if (url) stats.repOnline += 1;
+      }
       if (url) {
         const hash = coverHashOfText(url);
         store.map[rep.id] = coverEntryFor(hash, rep.size);
@@ -573,6 +672,8 @@ async function resolveScanCovers(
       announce();
     }
     await writeCoverStore(ctx, store);
+    stats.after = Object.keys(store.map).length;
+    return stats;
   } finally {
     // Keep partial results on abort; a broken write simply leaves the store
     // as it was.
@@ -668,7 +769,7 @@ async function runScanJob(ctx: EchoPluginContext, job: ScanJob, epoch: number): 
           publishScan({ stage: 'enrich', running: true, label, found: total });
         },
       });
-      await queueCoverStoreTask(() =>
+      const coverStats = await queueCoverStoreTask(() =>
         resolveScanCovers(ctx, {
           shouldAbort: abortedNow,
           onProgress: (done, passTotal) => {
@@ -685,6 +786,12 @@ async function runScanJob(ctx: EchoPluginContext, job: ScanJob, epoch: number): 
       );
       await reconcileCoverStore(ctx, libraryById);
       await reconcileLyricStore(ctx, libraryById);
+      void writeCoverDiag(ctx, {
+        stage: 'scan',
+        readEmbedded: settings.readEmbedded,
+        onlineFetch: settings.onlineFetch,
+        ...coverStats,
+      });
     }
     await persistLibraryCache(ctx, cacheTruncated);
     finishTask('completed', `扫描完成，共 ${librarySongs.length} 首`);
@@ -1256,6 +1363,7 @@ async function warmStart(ctx: EchoPluginContext): Promise<void> {
       // Restored songs change what pages should render, so bump the
       // revision even during activation.
       notifyLibraryChanged();
+      queueWarmCoverBackfill(ctx);
     }
   } catch (error) {
     // A broken cache simply means the page asks for a rescan.
@@ -1397,6 +1505,14 @@ export async function deactivate(): Promise<void> {
       // Task already dismissed.
     }
     scanJob = null;
+  }
+  if (backfillTimer) {
+    try {
+      backfillTimer.dispose();
+    } catch (error) {
+      // Timer already fired.
+    }
+    backfillTimer = null;
   }
   for (const registration of registrations.splice(0, registrations.length)) {
     try {

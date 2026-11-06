@@ -23,8 +23,11 @@ const MAX_TAG_READ = 4 * 1024 * 1024;
 const FOLDER_COVER_LIMIT = 1024 * 1024;
 const METADATA_TIMEOUT_MS = 10000;
 const KUGOU_TIMEOUT_MS = 2500;
-/** Embedded art larger than this is skipped to keep the KV store light. */
-export const COVER_STORE_LIMIT = 384 * 1024;
+/** Embedded art above this is not persisted. The KV caps a single value at
+ * 1 MiB, so the base64 data URL (×4/3) must stay well under it — 640 KB of
+ * art becomes an ~853 KB value. Most real front covers fit; larger ones
+ * fall back to folder image or online completion. */
+export const COVER_STORE_LIMIT = 640 * 1024;
 const ENRICH_POOL = 6;
 const TAG_CACHE_LIMIT = 300;
 

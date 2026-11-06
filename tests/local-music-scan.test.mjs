@@ -1009,6 +1009,41 @@ test('播放补全：在线封面持久化后不再重复请求', async () => {
   }
 });
 
+test('暖启动封面补全：缓存就绪后无需重扫', async () => {
+  const artA = artBytes(1, 64);
+  const store = new Map();
+  const first = await activateWith({ 'a.mp3': { size: 100 } }, {}, store);
+  patchReadBytes(first, { 'a.mp3': mp3WithCover(artA) });
+  try {
+    await first.commands.get('folders.add')({});
+    await scanAndWait(first);
+    // Simulate a library cached by an older build: songs present, the new
+    // cover store never populated.
+    store.delete('coverMap');
+    store.delete('coverHashes');
+  } finally {
+    await first.deactivate();
+  }
+
+  const second = await activateWith({ 'a.mp3': { size: 100 } }, {}, store);
+  patchReadBytes(second, { 'a.mp3': mp3WithCover(artA) });
+  try {
+    const info = await pollInfo(second.commands, (value) => value && value.ready);
+    assert.equal(info.ready, true, '缓存应使曲库直接就绪');
+    // The background backfill persists covers without any rescan.
+    await waitFor(() => {
+      const map = second.store.get('coverMap');
+      return map && Object.keys(map).length === 1;
+    }, 5000);
+    const page = await second.commands.get('library.page')({ offset: 0, limit: 10 });
+    const covers = await second.commands.get('library.covers')({ ids: [page.songs[0].id] });
+    assert.equal(covers.covers[page.songs[0].id], artUrl(artA));
+    assert.equal(second.store.get('__diag').stage, 'warm');
+  } finally {
+    await second.deactivate();
+  }
+});
+
 test('歌词持久化与清除命令', async () => {
   const remote = 'https://cdn.example.com/a.jpg';
   const store = new Map();
