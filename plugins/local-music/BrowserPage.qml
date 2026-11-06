@@ -1,5 +1,6 @@
 pragma ComponentBehavior: Bound
 import QtQuick
+import QtQml.Models
 import QtQuick.Controls.Basic
 import QtQuick.Layouts
 import EchoMusic.Shell
@@ -56,6 +57,24 @@ Item {
     property var albumRows: []
     property int albumTotal: 0
     property bool albumsLoading: false
+
+    // The views take ListModels instead of the JS arrays: reassigning an
+    // array model is a wholesale QML model reset, which regenerates every
+    // delegate and snaps the view back to the top — with cover batches
+    // arriving mid-scroll that reset fired on every batch. ListModel
+    // delivers appends and per-row updates as insert/dataChanged
+    // notifications with the model identity untouched, so the scroll
+    // position survives and EchoViewPoolGuard never re-attaches. The JS
+    // arrays stay the source of truth for counts, offsets and lookups.
+    ListModel {
+        id: songModel
+    }
+    ListModel {
+        id: albumModel
+    }
+    // songId -> index inside pageRows, kept in step by appendSongRows so
+    // cover batches can setProperty instead of rebuilding the model.
+    property var songIndexById: ({})
 
     // Right-click menu target keeps the host's context-target row fill.
     property string menuSongId: ""
@@ -199,8 +218,8 @@ Item {
     function resetView() {
         pageEpoch += 1;
         albumEpoch += 1;
-        pageRows = [];
-        albumRows = [];
+        clearSongRows();
+        clearAlbumRows();
         pageLoading = false;
         loadingMore = false;
         albumsLoading = false;
@@ -240,6 +259,32 @@ Item {
         };
     }
 
+    /** Push rows into the song list: the JS array stays the source of truth
+     * (counts, offsets, lookups) while the ListModel carries the display.
+     * append() notifies the view incrementally instead of resetting it. */
+    function appendSongRows(rows) {
+        for (let i = 0; i < rows.length; i++)
+            songIndexById[rows[i].resourceId] = pageRows.length + i;
+        pageRows = pageRows.concat(rows);
+        songModel.append(rows);
+    }
+
+    function clearSongRows() {
+        pageRows = [];
+        songIndexById = ({});
+        songModel.clear();
+    }
+
+    function appendAlbumRows(rows) {
+        albumRows = albumRows.concat(rows);
+        albumModel.append(rows);
+    }
+
+    function clearAlbumRows() {
+        albumRows = [];
+        albumModel.clear();
+    }
+
     /** Cover delivery for song rows. Delegates request their own cover as
      * they enter the view and the requests batch into small library.covers
      * calls: a whole-page batch of full-size data URLs reaches tens of MB
@@ -256,28 +301,9 @@ Item {
         onTriggered: root.requestCoverBatch()
     }
 
-    /** Reassigning a plain JS-array model is a full model reset: the view
-     * regenerates its delegates and snaps back to the top. Cover batches
-     * and page appends only swap row data, never the layout (row heights
-     * are uniform), so put the view back in the same synchronous pass —
-     * forceLayout flushes the reset relayout before the restore, and no
-     * frame paints the snapped position. Same preservation that
-     * EchoViewPoolGuard applies on model reattachment, applied inline
-     * because its delayed save runs after the reset has already lost the
-     * position. */
-    function reassignRows(view, update) {
-        const y = view.contentY;
-        const current = view.currentIndex;
-        update();
-        view.forceLayout();
-        view.currentIndex = current;
-        view.contentY = y;
-    }
-
     function applyCovers(result, requestedIds) {
         const covers = result && result.covers ? result.covers : {};
         const truncated = !!(result && result.truncated);
-        let changed = false;
         for (let i = 0; i < requestedIds.length; i++) {
             const id = requestedIds[i];
             if (covers[id])
@@ -291,19 +317,18 @@ Item {
                 coverMisses[id] = true;
             }
         }
-        const next = pageRows.map(function (entry) {
-            const url = covers[entry.resourceId];
-            if (!url || entry.coverUrl === url)
-                return entry;
-            changed = true;
-            const clone = Object.assign({}, entry);
-            clone.coverUrl = url;
-            return clone;
-        });
-        if (changed)
-            reassignRows(songList, function () {
-                pageRows = next;
-            });
+        // setProperty emits dataChanged for just that row — visible
+        // delegates rebind their cover in place, no view reset involved.
+        const ids = Object.keys(covers);
+        for (let i = 0; i < ids.length; i++) {
+            const id = ids[i];
+            const url = covers[id];
+            const index = songIndexById[id];
+            if (!url || index === undefined || !pageRows[index] || pageRows[index].coverUrl === url)
+                continue;
+            pageRows[index].coverUrl = url;
+            songModel.setProperty(index, "coverUrl", url);
+        }
         if (Object.keys(coverRequests).length > 0 && !coverBatchTimer.running)
             coverBatchTimer.restart();
     }
@@ -373,7 +398,7 @@ Item {
                 return;
             }
             songTotal = result.total || 0;
-            pageRows = pageRows.concat((result.songs || []).map(rowModel));
+            appendSongRows((result.songs || []).map(rowModel));
         });
     }
 
@@ -400,10 +425,7 @@ Item {
                 return;
             }
             songTotal = result.total || 0;
-            // An append must not yank the list back to the top mid-scroll.
-            reassignRows(songList, function () {
-                pageRows = pageRows.concat((result.songs || []).map(rowModel));
-            });
+            appendSongRows((result.songs || []).map(rowModel));
         });
     }
 
@@ -448,7 +470,7 @@ Item {
                 return;
             }
             albumTotal = result.total || 0;
-            albumRows = albumRows.concat(albumRowsFrom(result));
+            appendAlbumRows(albumRowsFrom(result));
         });
     }
 
@@ -475,10 +497,7 @@ Item {
             if (!result || !result.ready)
                 return;
             albumTotal = result.total || 0;
-            // Appends keep the grid's scroll position, like the song list.
-            reassignRows(albumGrid, function () {
-                albumRows = albumRows.concat(albumRowsFrom(result));
-            });
+            appendAlbumRows(albumRowsFrom(result));
         });
     }
 
@@ -638,7 +657,7 @@ Item {
             visible: !root.albumGridActive && !root.pageLoading
             topMargin: detailHeader.expandedHeight + toolbar.height + 8
             bottomMargin: 48
-            model: root.pageRows
+            model: songModel
             reuseItems: true
             cacheBuffer: 240
             boundsBehavior: Flickable.StopAtBounds
@@ -757,7 +776,7 @@ Item {
             pageContainer: viewport
             topMargin: detailHeader.expandedHeight + toolbar.height + 8
             bottomMargin: 48
-            sourceModel: root.albumRows
+            sourceModel: albumModel
             loading: root.albumsLoading && root.albumRows.length === 0
             hasMore: root.albumGridActive && root.albumRows.length < root.albumTotal
             loadingMore: root.albumsLoading
