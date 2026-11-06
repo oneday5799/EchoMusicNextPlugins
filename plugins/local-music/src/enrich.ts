@@ -15,7 +15,7 @@ import type {
 import { cancelOperationAfter, raceTimeout } from './async.ts';
 import { asArrayBuffer, bytesToBase64, coerceJsonArray } from './codec.ts';
 import { extensionOf, type SongInit } from './library.ts';
-import { coverDataUrl, id3TagSize, parseAudioTags, type AudioTags } from './tags.ts';
+import { coverDataUrl, parseAudioTags, tagReadTarget, type AudioTags } from './tags.ts';
 
 const HEAD_PROBE_BYTES = 256 * 1024;
 const TAG_REREAD_MARGIN = 64 * 1024;
@@ -322,8 +322,9 @@ function imageMimeFor(extension: string): string {
   return 'image/jpeg';
 }
 
-/** Bounded header read that follows the ID3 declared size when the probe
- * window was too small to hold the whole tag. */
+/** Bounded header read that follows the declared ID3 size or FLAC metadata
+ * extent when the probe window was too small to hold them — a large
+ * embedded picture is the usual culprit and hides the cover entirely. */
 async function readTagBytes(
   context: EchoPluginContext,
   ref: FileReference,
@@ -335,18 +336,17 @@ async function readTagBytes(
     const buffer = asArrayBuffer(probe && probe.bytes);
     if (!buffer || buffer.byteLength === 0) return null;
     const bytes = new Uint8Array(buffer);
-    const declared = id3TagSize(bytes);
-    if (declared > 0 && declared + 10 > bytes.byteLength) {
-      const wanted = Math.min(declared + 10 + TAG_REREAD_MARGIN, MAX_TAG_READ);
-      try {
-        const full = await awaitOperation(context.files.readBytes(ref, { maxBytes: wanted }));
-        const fullBuffer = asArrayBuffer(full && full.bytes);
-        if (fullBuffer && fullBuffer.byteLength > bytes.byteLength) {
-          return new Uint8Array(fullBuffer);
-        }
-      } catch (error) {
-        // Fall back to the probe below; a truncated tag beats nothing.
+    const declared = tagReadTarget(bytes);
+    if (declared <= bytes.byteLength) return bytes;
+    const wanted = Math.min(declared + TAG_REREAD_MARGIN, MAX_TAG_READ);
+    try {
+      const full = await awaitOperation(context.files.readBytes(ref, { maxBytes: wanted }));
+      const fullBuffer = asArrayBuffer(full && full.bytes);
+      if (fullBuffer && fullBuffer.byteLength > bytes.byteLength) {
+        return new Uint8Array(fullBuffer);
       }
+    } catch (error) {
+      // Fall back to the probe below; a truncated tag beats nothing.
     }
     return bytes;
   } catch (error) {

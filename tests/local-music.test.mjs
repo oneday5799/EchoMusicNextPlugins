@@ -34,7 +34,12 @@ import {
   sortSongs,
   songFromEntry,
 } from '../plugins/local-music/src/library.ts';
-import { coverDataUrl, id3TagSize, parseAudioTags } from '../plugins/local-music/src/tags.ts';
+import {
+  coverDataUrl,
+  id3TagSize,
+  parseAudioTags,
+  tagReadTarget,
+} from '../plugins/local-music/src/tags.ts';
 import { coerceJsonArray } from '../plugins/local-music/src/codec.ts';
 
 function utf8Bytes(text) {
@@ -383,6 +388,59 @@ function id3Header(bodyLength) {
   return header;
 }
 
+function flacBlock(type, payload, last) {
+  const head = new Uint8Array(4);
+  head[0] = (last ? 0x80 : 0) | type;
+  head[1] = (payload.length >>> 16) & 0xff;
+  head[2] = (payload.length >>> 8) & 0xff;
+  head[3] = payload.length & 0xff;
+  return concatBytes([head, payload]);
+}
+
+function flacStreamInfo(durationMs) {
+  // 34-byte STREAMINFO with only the sample rate (44100) and total samples
+  // filled; everything else stays zero.
+  const stream = new Uint8Array(34);
+  const view = new DataView(stream.buffer);
+  stream[10] = 0x0a;
+  stream[11] = 0xc4;
+  stream[12] = 0x40;
+  view.setUint32(14, Math.round((44100 * durationMs) / 1000));
+  return stream;
+}
+
+function flacComments(entries) {
+  const vendor = utf8Bytes('test');
+  const parts = entries.map((entry) => utf8Bytes(entry));
+  const total = 8 + vendor.length + parts.reduce((sum, part) => sum + 4 + part.length, 0);
+  const out = new Uint8Array(total);
+  const view = new DataView(out.buffer);
+  view.setUint32(0, vendor.length, true);
+  out.set(vendor, 4);
+  view.setUint32(4 + vendor.length, parts.length, true);
+  let offset = 8 + vendor.length;
+  for (const part of parts) {
+    view.setUint32(offset, part.length, true);
+    out.set(part, offset + 4);
+    offset += 4 + part.length;
+  }
+  return out;
+}
+
+function flacPicture(mime, data) {
+  // Layout consumed by readFlacPicture: 4-byte picture type, MIME length +
+  // MIME, description length, 16 bytes of dimensions, data length, data.
+  const mimeBytes = utf8Bytes(mime);
+  const out = new Uint8Array(32 + mimeBytes.length + data.length);
+  const view = new DataView(out.buffer);
+  view.setUint32(4, mimeBytes.length);
+  out.set(mimeBytes, 8);
+  view.setUint32(8 + mimeBytes.length, 0);
+  view.setUint32(28 + mimeBytes.length, data.length);
+  out.set(data, 32 + mimeBytes.length);
+  return out;
+}
+
 test('id3TagSize 读取声明尺寸', () => {
   const payload = textPayload('你好', 1);
   const bytes = concatBytes([id3Header(payload.length), id3Frame('TIT2', payload)]);
@@ -470,4 +528,54 @@ test('FLAC STREAMINFO 时长 + Vorbis 注释 + 封面', () => {
   assert.deepEqual(Array.from(tags.coverData), [1, 2, 3, 4]);
   assert.ok(coverDataUrl(tags).startsWith('data:image/png;base64,'));
   assert.equal(coverDataUrl({ coverData: null, coverMime: '' }), '');
+});
+
+test('FLAC 封面块超出探测窗口：tagReadTarget 报出声明范围，重读后可解析', () => {
+  const art = new Uint8Array(300 * 1024);
+  for (let i = 0; i < art.length; i++) art[i] = (i * 31 + 7) & 0xff;
+  const bytes = concatBytes([
+    utf8Bytes('fLaC'),
+    flacBlock(0, flacStreamInfo(5000), false),
+    flacBlock(4, flacComments(['TITLE=歌名']), false),
+    flacBlock(6, flacPicture('image/png', art), true),
+  ]);
+  const probe = bytes.slice(0, 256 * 1024);
+  const probeTags = parseAudioTags(probe);
+  assert.equal(probeTags.title, '歌名');
+  assert.equal(probeTags.durationMs, 5000);
+  assert.equal(probeTags.coverData, null);
+  const target = tagReadTarget(probe);
+  assert.ok(target > probe.length);
+  assert.equal(target, bytes.length);
+  // 模拟按声明范围重读后的窗口：恰好容纳完整封面块。
+  const tags = parseAudioTags(bytes.slice(0, target));
+  assert.equal(tags.coverMime, 'image/png');
+  assert.equal(tags.coverData.length, art.length);
+  assert.equal(tags.coverData[0], art[0]);
+  assert.equal(tags.coverData[art.length - 1], art[art.length - 1]);
+});
+
+test('前置 ID3 的 FLAC：合并 ID3 文本与 FLAC 原生封面', () => {
+  const art = new Uint8Array([9, 8, 7, 6]);
+  const id3Payload = concatBytes([
+    id3Frame('TIT2', textPayload('ID3标题', 1)),
+    id3Frame('TPE1', textPayload('ID3歌手', 1)),
+  ]);
+  const bytes = concatBytes([
+    id3Header(id3Payload.length),
+    id3Payload,
+    utf8Bytes('fLaC'),
+    flacBlock(0, flacStreamInfo(5000), false),
+    flacBlock(4, flacComments(['ALBUM=FLAC专辑']), false),
+    flacBlock(6, flacPicture('image/png', art), true),
+  ]);
+  // 头部都在窗口内时无需重读。
+  assert.equal(tagReadTarget(bytes), 0);
+  const tags = parseAudioTags(bytes);
+  assert.equal(tags.title, 'ID3标题');
+  assert.equal(tags.artist, 'ID3歌手');
+  assert.equal(tags.album, 'FLAC专辑');
+  assert.equal(tags.durationMs, 5000);
+  assert.equal(tags.coverMime, 'image/png');
+  assert.deepEqual(Array.from(tags.coverData), [9, 8, 7, 6]);
 });

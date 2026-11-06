@@ -280,13 +280,19 @@ function readFlacPicture(
   return { mime, data: bytes.slice(offset, offset + dataLength) };
 }
 
-function parseFlac(bytes: Uint8Array): AudioTags | null {
-  if (bytes.length < 8) return null;
-  if (bytes[0] !== 102 || bytes[1] !== 76 || bytes[2] !== 97 || bytes[3] !== 67) return null;
+function parseFlac(bytes: Uint8Array, start = 0): AudioTags | null {
+  if (bytes.length < start + 8) return null;
+  if (
+    bytes[start] !== 102 ||
+    bytes[start + 1] !== 76 ||
+    bytes[start + 2] !== 97 ||
+    bytes[start + 3] !== 67
+  )
+    return null;
   const view = viewOf(bytes);
   const tags = emptyTags();
   let found = false;
-  let offset = 4;
+  let offset = start + 4;
   while (offset + 4 <= bytes.length) {
     const header = bytes[offset];
     const isLast = (header & 128) !== 0;
@@ -320,6 +326,61 @@ function parseFlac(bytes: Uint8Array): AudioTags | null {
   return found ? tags : null;
 }
 
+/** Offset of the "fLaC" stream magic at or after `from`, or -1. FLAC files
+ * written by MP3-oriented taggers carry a prepended ID3v2 tag, so the native
+ * metadata starts after the declared ID3 size. */
+function findFlacStart(bytes: Uint8Array, from: number): number {
+  const limit = Math.min(bytes.length - 4, from + 1024);
+  for (let i = Math.max(0, from); i <= limit; i += 1) {
+    if (bytes[i] === 102 && bytes[i + 1] === 76 && bytes[i + 2] === 97 && bytes[i + 3] === 67)
+      return i;
+  }
+  return -1;
+}
+
+/** Absolute byte offset a FLAC metadata chain claims beyond `start`, or -1
+ * when the chain is fully contained in the buffer. A block whose body runs
+ * past the buffer (typically a large picture) reports its declared end so
+ * the reader can re-fetch a window that holds it, the FLAC analogue of
+ * id3TagSize. */
+function flacMetadataExtent(bytes: Uint8Array, start: number): number {
+  let offset = start + 4;
+  while (offset + 4 <= bytes.length) {
+    const isLast = (bytes[offset] & 128) !== 0;
+    const length = (bytes[offset + 1] << 16) | (bytes[offset + 2] << 8) | bytes[offset + 3];
+    const end = offset + 4 + length;
+    if (end > bytes.length) return end;
+    if (isLast) return -1;
+    offset = end;
+  }
+  // Ran out mid-header: more metadata follows the window.
+  return bytes.length + 1;
+}
+
+/** Byte count a bounded tag read must cover: the declared ID3 size when the
+ * tag extends past the window, and the FLAC metadata extent when a block
+ * (typically the picture) claims bytes beyond it. 0 when the buffer already
+ * holds everything the headers declare. */
+/** Absolute end of the declared ID3v2 tag (header included), or 0 when the
+ * buffer does not open with an ID3v2 tag. */
+function id3EndOffset(bytes: Uint8Array): number {
+  const size = id3TagSize(bytes);
+  if (size < 0) return 0;
+  // Footer flag adds 10 bytes past the declared body.
+  return 10 + size + ((bytes[5] & 16) !== 0 ? 10 : 0);
+}
+
+export function tagReadTarget(bytes: Uint8Array): number {
+  let target = 0;
+  const id3End = id3EndOffset(bytes);
+  if (id3End > bytes.length) target = id3End;
+  const flacStart = findFlacStart(bytes, id3End);
+  if (flacStart < 0) return target;
+  const extent = flacMetadataExtent(bytes, flacStart);
+  if (extent > target) target = extent;
+  return target;
+}
+
 /** Declared ID3v2.3/2.4 tag size (header excluded), or -1 when the buffer is
  * not an ID3v2 tag. Used to re-read files whose tag extends past the
  * bounded probe window. */
@@ -335,6 +396,22 @@ export function id3TagSize(bytes: Uint8Array): number {
 
 export function parseAudioTags(bytes: Uint8Array): AudioTags | null {
   const id3 = parseId3v2(bytes);
-  if (id3) return id3;
-  return parseFlac(bytes);
+  if (id3 && id3.coverData) return id3;
+  // A FLAC stream can carry a prepended ID3v2 tag (common with MP3-oriented
+  // taggers): the ID3 parse hits first but usually has no picture, so keep
+  // reading the native metadata that follows and merge what ID3 lacks.
+  const flacStart = findFlacStart(bytes, id3 ? id3EndOffset(bytes) : 0);
+  const flac = flacStart >= 0 ? parseFlac(bytes, flacStart) : null;
+  if (!id3) return flac;
+  if (!flac) return id3;
+  if (!id3.coverData) {
+    id3.coverMime = flac.coverMime;
+    id3.coverData = flac.coverData;
+  }
+  if (!id3.title) id3.title = flac.title;
+  if (!id3.artist) id3.artist = flac.artist;
+  if (!id3.album) id3.album = flac.album;
+  if (!id3.durationMs) id3.durationMs = flac.durationMs;
+  if (!id3.lyric) id3.lyric = flac.lyric;
+  return id3;
 }
