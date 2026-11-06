@@ -20,6 +20,7 @@ import { raceTimeout } from './async.ts';
 import { coerceJsonArray } from './codec.ts';
 import { findFolder, normalizeSettings, SETTINGS_KEY, type LocalSettings } from './config.ts';
 import {
+  cleanupLegacyCovers,
   clearCoverStore,
   coverEntryFor,
   coverEntryHash,
@@ -36,6 +37,7 @@ import {
   readCoverStore,
   readSongCover,
   reconcileCoverStore,
+  sweepLegacyDiagnosticKeys,
   writeCoverImage,
   writeCoverStore,
   COVER_STORE_LIMIT,
@@ -92,6 +94,10 @@ const QUEUE_KEY = 'library';
 const QUEUE_TITLE = '本地音乐';
 /** Boot-time settings recovery: 2s then 6s intervals (~26s total window). */
 const SETTINGS_RECOVERY_ATTEMPTS = 5;
+/** One-shot storage hygiene sweep (see the activate call site). Bump the
+ * version when the sweep gains new legacy keys to clean. */
+const STORAGE_SWEEP_KEY = 'storageSweep';
+const STORAGE_SWEEP_VERSION = 1;
 
 interface SongRowJson extends Record<string, JsonValue> {
   id: string;
@@ -278,6 +284,13 @@ function fileRefFor(folderId: string, path: string): FileReference | null {
 
 // ── Library state ──────────────────────────────────────────────────────────
 
+/** Cached (filter, sort) view so pagination does not re-sort the library on
+ * every page request; invalidated whenever the song index is rebuilt. */
+let viewCacheKey = '';
+let viewCacheSongs: SongInit[] = [];
+let albumCacheKey = '';
+let albumCacheList: AlbumSummary[] = [];
+
 function indexLibrary(songs: SongInit[]): void {
   librarySongs = songs;
   const byId = new Map<string, SongInit>();
@@ -288,13 +301,6 @@ function indexLibrary(songs: SongInit[]): void {
   albumCacheKey = '';
   albumCacheList = [];
 }
-
-/** Cached (filter, sort) view so pagination does not re-sort the library on
- * every page request; invalidated whenever the song index is rebuilt. */
-let viewCacheKey = '';
-let viewCacheSongs: SongInit[] = [];
-let albumCacheKey = '';
-let albumCacheList: AlbumSummary[] = [];
 
 function publishState(): void {
   const ctx = context;
@@ -871,7 +877,11 @@ async function stopScan(): Promise<JsonValue> {
  * revision notification. */
 async function clearCachedArtwork(): Promise<JsonValue> {
   const ctx = requireContext();
-  const covers = await queueCoverStoreTask(() => clearCoverStore(ctx));
+  // Legacy per-song covers keyed by song ids that lost their index during an
+  // interrupted clear would otherwise survive; the ids of the loaded library
+  // are the ones this install can know about (see cleanupLegacyCovers).
+  const ids = librarySongs.map((song) => song.id);
+  const covers = await queueCoverStoreTask(() => clearCoverStore(ctx, ids));
   const lyrics = await clearLyricStore(ctx);
   clearLyricCache();
   notifyLibraryChanged();
@@ -1442,13 +1452,23 @@ export async function activate(ctx: EchoPluginContext): Promise<void> {
     // timer and per-command re-checks retry later.
   }
   settings = normalizeSettings(rawSettings);
-  // Remove the leftover diagnostic snapshots from the debugging sessions.
-  try {
-    await awaitOperation(ctx.io.removeValue('__diag'));
-    await awaitOperation(ctx.io.removeValue('__diag2'));
-  } catch (cleanupError) {
-    // Missing keys are fine.
-  }
+  // One-shot storage hygiene: the removed browse diagnostics (fdc4257) left a
+  // 12-slot KV ring of snapshots, and pre-dedupe covers can outlive their
+  // index when a clear or migration was interrupted. Bounded to keys with
+  // known names; a generic orphan sweep would need a KV key listing API.
+  void (async () => {
+    try {
+      const swept = (await awaitOperation(ctx.io.readValue(STORAGE_SWEEP_KEY))) as JsonValue;
+      if (swept === STORAGE_SWEEP_VERSION) return;
+      await sweepLegacyDiagnosticKeys(ctx);
+      const cached = await readLibraryCache(ctx, folderIdsOf(settings));
+      const ids = cached ? cached.songs.map((song) => song.id) : [];
+      await cleanupLegacyCovers(ctx, ids);
+      await awaitOperation(ctx.io.writeValue(STORAGE_SWEEP_KEY, STORAGE_SWEEP_VERSION));
+    } catch (hygieneError) {
+      // Hygiene must never disturb activation; retried on the next activate.
+    }
+  })();
   // Resolve grant revisions up front: the settings page, resolvers and scans
   // all rely on grantRefs, and a not-yet-loaded map would flash folders as
   // unavailable. Re-claim folders whose grant was re-issued under a new

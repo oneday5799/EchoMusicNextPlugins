@@ -1096,6 +1096,42 @@ test('暖启动封面补全：缓存就绪后无需重扫', async () => {
   }
 });
 
+test('一次性清扫：遗留诊断环与失去索引的旧封面', async () => {
+  const store = new Map();
+  // 模拟旧安装：诊断环快照与库外 ID 的孤儿封面（清扫前就已存在）。
+  store.set('__diag:7', { seq: 8, note: 'stale' });
+  store.set('cover:gone-song', 'data:image/jpeg;base64,b3JwaGFu');
+
+  const harness = await activateWith({ 'a.mp3': { size: 100 } }, {}, store);
+  const { commands } = harness;
+  try {
+    // 激活期一次性清扫：诊断环被清除并写入版本标记。
+    await waitFor(() => store.has('storageSweep'), 5000);
+    assert.equal(store.get('storageSweep'), 1);
+    assert.equal(store.has('__diag:7'), false, '诊断环快照应被清除');
+    assert.equal(
+      store.has('cover:gone-song'),
+      true,
+      '库外 ID 无枚举 API 不可发现，保留（避免误删）',
+    );
+
+    // 扫描建立曲库后，清除命令把库内 ID 的旧封面一并带走。
+    await commands.get('folders.add')({});
+    await scanAndWait(harness);
+    const page = await commands.get('library.page')({ offset: 0, limit: 10 });
+    const songId = page.songs[0].id;
+    store.set(`cover:${songId}`, 'data:image/jpeg;base64,bGVnYWN5');
+    const cleared = await commands.get('library.cache.clear')({});
+    assert.equal(store.has(`cover:${songId}`), false, '清除应覆盖失去索引的旧封面');
+    assert.equal(store.has('cover:gone-song'), true, '清除同样只扫已知 ID');
+    assert.ok(cleared.ok);
+    // 清扫不得破坏曲库设置。
+    assert.equal(store.get('settings').folders.length, 1);
+  } finally {
+    await harness.deactivate();
+  }
+});
+
 test('歌词持久化与清除命令', async () => {
   const remote = 'https://cdn.example.com/a.jpg';
   const store = new Map();

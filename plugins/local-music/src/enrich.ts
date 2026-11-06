@@ -51,6 +51,50 @@ export const COVER_MAP_KEY = 'coverMap';
 export const COVER_HASHES_KEY = 'coverHashes';
 const LEGACY_COVER_INDEX_KEY = 'coverIndex';
 const LEGACY_COVER_PREFIX = 'cover:';
+/** The removed browse diagnostics (fdc4257) persisted every request/reply
+ * into a 12-slot KV ring plus two single keys; their snapshots (up to ~1.6
+ * MB of stale data) survive in existing installs. The io service has no key
+ * listing, but the ring wrote only these known names, so they can be swept
+ * exactly. */
+const LEGACY_DIAG_SLOTS = 12;
+const LEGACY_DIAG_KEYS = [
+  '__diag',
+  '__diag2',
+  ...Array.from({ length: LEGACY_DIAG_SLOTS }, (_, slot) => `__diag:${slot}`),
+];
+
+/** Removes every legacy diagnostic snapshot key. Absent keys are the normal
+ * case after the first sweep. */
+export async function sweepLegacyDiagnosticKeys(context: EchoPluginContext): Promise<void> {
+  for (const key of LEGACY_DIAG_KEYS) {
+    try {
+      await awaitOperation(context.io.removeValue(key));
+    } catch (error) {
+      // Best-effort hygiene.
+    }
+  }
+}
+
+/** Removes `cover:<songId>` data URLs, counting only keys that actually
+ * existed (removeValue succeeds for absent keys too); shared by the
+ * legacy-index sweep and the orphan sweep for known song ids. */
+async function removeLegacyCoverKeys(
+  context: EchoPluginContext,
+  songIds: readonly string[],
+): Promise<number> {
+  let removed = 0;
+  for (const songId of songIds) {
+    try {
+      const existing = await awaitOperation(context.io.readValue(legacyCoverKey(songId)));
+      if (existing === undefined) continue;
+      await awaitOperation(context.io.removeValue(legacyCoverKey(songId)));
+      removed += 1;
+    } catch (error) {
+      // Best-effort.
+    }
+  }
+  return removed;
+}
 
 export interface CoverStoreData {
   map: { [songId: string]: string };
@@ -246,8 +290,14 @@ export async function reconcileCoverStore(
 }
 
 /** Removes the pre-dedupe per-song data URLs after their content moved into
- * the deduplicated store (or was cleared). */
-export async function cleanupLegacyCovers(context: EchoPluginContext): Promise<void> {
+ * the deduplicated store (or was cleared). `extraSongIds` sweeps additional
+ * known song ids (e.g. the current library) whose legacy entry may survive a
+ * lost or interrupted index — a per-song key whose song vanished from the
+ * library entirely cannot be discovered without a KV key listing API. */
+export async function cleanupLegacyCovers(
+  context: EchoPluginContext,
+  extraSongIds: readonly string[] = [],
+): Promise<void> {
   try {
     const indexValue = (await awaitOperation(
       context.io.readValue(LEGACY_COVER_INDEX_KEY),
@@ -255,23 +305,22 @@ export async function cleanupLegacyCovers(context: EchoPluginContext): Promise<v
     const ids = coerceJsonArray(indexValue).filter(
       (item): item is string => typeof item === 'string' && item.length > 0,
     );
-    for (const songId of ids) {
-      try {
-        await awaitOperation(context.io.removeValue(legacyCoverKey(songId)));
-      } catch (error) {
-        // Best-effort.
-      }
-    }
+    await removeLegacyCoverKeys(context, ids);
     await awaitOperation(context.io.removeValue(LEGACY_COVER_INDEX_KEY));
   } catch (error) {
     // No legacy index: nothing to migrate.
   }
+  if (extraSongIds.length > 0) {
+    await removeLegacyCoverKeys(context, extraSongIds);
+  }
 }
 
 /** Removes every persisted cover entry, image and legacy leftover. Returns
- * the number of song entries and images dropped. */
+ * the number of song entries and images dropped. `extraSongIds` extends the
+ * legacy sweep beyond the stored index (see cleanupLegacyCovers). */
 export async function clearCoverStore(
   context: EchoPluginContext,
+  extraSongIds: readonly string[] = [],
 ): Promise<{ entries: number; images: number }> {
   let entries = 0;
   let images = 0;
@@ -296,17 +345,13 @@ export async function clearCoverStore(
     const ids = coerceJsonArray(indexValue).filter(
       (item): item is string => typeof item === 'string' && item.length > 0,
     );
-    entries += ids.length;
-    for (const songId of ids) {
-      try {
-        await awaitOperation(context.io.removeValue(legacyCoverKey(songId)));
-      } catch (error) {
-        // Best-effort.
-      }
-    }
+    entries += await removeLegacyCoverKeys(context, ids);
     await awaitOperation(context.io.removeValue(LEGACY_COVER_INDEX_KEY));
   } catch (error) {
     // No legacy index.
+  }
+  if (extraSongIds.length > 0) {
+    entries += await removeLegacyCoverKeys(context, extraSongIds);
   }
   try {
     await awaitOperation(context.io.removeValue(COVER_MAP_KEY));
