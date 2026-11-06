@@ -164,25 +164,6 @@ export function pad2(value: number): string {
   return value < 10 ? `0${value}` : String(value);
 }
 
-/** Human-readable byte size, mirroring the pages' formatting. */
-export function formatBytes(size: number): string {
-  if (!isFinite(size) || size < 0) return '';
-  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-  let value = size;
-  let unit = 0;
-  while (value >= 1024 && unit < units.length - 1) {
-    value /= 1024;
-    unit += 1;
-  }
-  const text =
-    unit === 0
-      ? String(Math.round(value))
-      : value >= 100
-        ? String(Math.round(value))
-        : value.toFixed(1);
-  return `${text} ${units[unit]}`;
-}
-
 /** Numeric-aware, accent-insensitive text comparison for song listings. */
 export function compareText(a: string, b: string): number {
   return String(a).localeCompare(String(b), undefined, { numeric: true, sensitivity: 'base' });

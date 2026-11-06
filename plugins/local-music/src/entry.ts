@@ -50,12 +50,13 @@ import {
   extensionOf,
   filterSongs,
   groupAlbums,
-  lyricKeyOf,
   normalizeSortDescending,
   normalizeSortKey,
   parseSourceId,
   qualityForExtension,
   sortSongs,
+  trackDataString,
+  type AlbumSummary,
   type SongInit,
   type SongSortKey,
 } from './library.ts';
@@ -68,9 +69,11 @@ import {
 } from './lyric.ts';
 import {
   collectLibrary,
+  folderSignature,
   LibraryScanAborted,
   libraryMetaKey,
   metaMatches,
+  pairLyricPaths,
   parseCacheMeta,
   readLibraryCache,
   writeLibraryCache,
@@ -282,12 +285,16 @@ function indexLibrary(songs: SongInit[]): void {
   libraryById = byId;
   viewCacheKey = '';
   viewCacheSongs = [];
+  albumCacheKey = '';
+  albumCacheList = [];
 }
 
 /** Cached (filter, sort) view so pagination does not re-sort the library on
  * every page request; invalidated whenever the song index is rebuilt. */
 let viewCacheKey = '';
 let viewCacheSongs: SongInit[] = [];
+let albumCacheKey = '';
+let albumCacheList: AlbumSummary[] = [];
 
 function publishState(): void {
   const ctx = context;
@@ -437,14 +444,15 @@ function requestScanAbort(job: ScanJob): void {
 }
 
 /** Adopts scan results into the library: drops songs of folders removed
- * mid-scan, pairs sidecar lyrics and stores the folder-cover map. */
+ * mid-scan, pairs sidecar lyrics and stores the folder-cover map. Pairing
+ * re-runs here because an abort's partial collection skips collectLibrary's
+ * own ending. */
 function applyCollected(collected: ScanCollected): void {
   const valid = new Set(folderIdsOf(settings));
   const songs = collected.songs.filter((song) => valid.has(song.folderId));
-  for (const song of songs) {
-    const lyricPath = collected.lyricPaths.get(lyricKeyOf(song.path));
-    if (lyricPath) song.lyricPath = lyricPath;
-  }
+  // Pair again for the abort path: a thrown walk skips collectLibrary's
+  // ending, and pairing is idempotent for the success path.
+  pairLyricPaths({ ...collected, songs });
   indexLibrary(songs);
   dirCovers = collected.dirCovers;
 }
@@ -889,7 +897,7 @@ async function persistSettings(next: LocalSettings): Promise<void> {
 }
 
 function folderSignatureOf(value: LocalSettings): string {
-  return folderIdsOf(value).join('\n');
+  return folderSignature(folderIdsOf(value));
 }
 
 function settingsToValue(value: LocalSettings): JsonValue {
@@ -1054,20 +1062,29 @@ async function libraryLocate(args: Record<string, JsonValue>): Promise<JsonValue
   return { ready: true, index, total: view.length };
 }
 
+/** Cached album grouping over the same filtered+sorted view the song paging
+ * uses (declarations live next to the view cache). Grouping the whole
+ * library per album-page request re-sorted and re-grouped everything each
+ * time; like collectionView, the result is keyed by the normalized filter
+ * and invalidated in indexLibrary. */
+function albumView(args: Record<string, JsonValue>): AlbumSummary[] {
+  const filter = viewFilter(args);
+  const key = JSON.stringify(filter);
+  if (key !== albumCacheKey) {
+    const keyword = filter.keyword.trim().toLowerCase();
+    albumCacheList = groupAlbums(collectionView(args)).filter(
+      (album) => !keyword || album.name.toLowerCase().indexOf(keyword) >= 0,
+    );
+    albumCacheKey = key;
+  }
+  return albumCacheList;
+}
+
 async function libraryAlbums(args: Record<string, JsonValue>): Promise<JsonValue> {
   if (!libraryReady) return { ready: false, total: 0, offset: 0, limit: 0, albums: [] };
   const ctx = requireContext();
   const { offset, limit } = parsePageArgs(args, ALBUM_PAGE_LIMIT_MAX);
-  const keyword = argString(args, 'keyword');
-  const folderId = argString(args, 'folderId');
-  const visible = sortSongs(
-    filterSongs(librarySongs, { keyword, folderId, album: '' }),
-    normalizeSortKey(args ? args.sort : undefined),
-    normalizeSortDescending(args ? args.sortDir : undefined),
-  );
-  const albums = groupAlbums(visible).filter(
-    (album) => !keyword || album.name.toLowerCase().indexOf(keyword.trim().toLowerCase()) >= 0,
-  );
+  const albums = albumView(args);
   const page = albums.slice(offset, offset + limit);
   const covers = await Promise.all(
     page.map(async (album) => {
@@ -1334,9 +1351,9 @@ async function resolveAudioSource(
   if (!parsed) return null;
   const ctx = requireContext();
   const data = resolverContext.track.data;
-  const path = data && typeof data.p === 'string' ? data.p : '';
+  const path = trackDataString(data, 'p');
   if (!path) return null;
-  const folderId = data && typeof data.f === 'string' && data.f ? data.f : parsed.folderId;
+  const folderId = trackDataString(data, 'f') || parsed.folderId;
 
   const attempt = (root: FileReference): Promise<AudioSourceValue | null> => {
     const fileRef: FileReference = { grantId: root.grantId, revision: root.revision, path };

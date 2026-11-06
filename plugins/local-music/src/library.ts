@@ -3,7 +3,7 @@
 // source id encodes both ids for the host's playback resolver.
 
 import type { JsonValue, QueueTrack } from 'echo:plugin-sdk';
-import { coerceJsonArray, compareText } from './codec.ts';
+import { coerceJsonArray, compareText, pad2 } from './codec.ts';
 
 export const AUDIO_EXTENSIONS = [
   'mp3',
@@ -291,6 +291,14 @@ export function buildTrackData(song: SongInit): Record<string, JsonValue> {
   return data;
 }
 
+/** Reads one single-letter key back out of buildTrackData's payload. Queue
+ * tracks round-trip the data verbatim, so tolerate shapes the producer
+ * never wrote (absent, non-string). */
+export function trackDataString(data: Record<string, JsonValue> | undefined, key: string): string {
+  const value = data ? data[key] : undefined;
+  return typeof value === 'string' ? value : '';
+}
+
 export interface QueueTrackExtras {
   title?: string;
   artist?: string;
@@ -389,8 +397,4 @@ export function formatDuration(ms: number): string {
   const minutes = Math.floor(total / 60);
   const seconds = total % 60;
   return `${minutes}:${pad2(seconds)}`;
-}
-
-function pad2(value: number): string {
-  return value < 10 ? `0${value}` : String(value);
 }

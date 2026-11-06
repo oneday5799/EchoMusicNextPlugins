@@ -15,7 +15,7 @@ import type {
 import { raceTimeout } from './async.ts';
 import { coerceJsonArray } from './codec.ts';
 import { buildLrcFromKugou, pickLyricCandidate } from './lrc.ts';
-import { baseName, dirNameOf, parseSourceId, stripExtension } from './library.ts';
+import { baseName, dirNameOf, parseSourceId, stripExtension, trackDataString } from './library.ts';
 import type { AudioTags } from './tags.ts';
 
 const RESOLVER_DEADLINE_MS = 2200;
@@ -213,9 +213,9 @@ function targetOf(context: LyricResolverContext): LyricTarget | null {
   const parsed = parseSourceId(context.track.sourceId ?? '');
   if (!parsed) return null;
   const data = context.track.data;
-  const path = data && typeof data.p === 'string' ? data.p : '';
+  const path = trackDataString(data, 'p');
   if (!path) return null;
-  const explicit = data && typeof data.ly === 'string' ? data.ly : '';
+  const explicit = trackDataString(data, 'ly');
   const base = stripExtension(baseName(path)).toLowerCase();
   const sidecar = explicit || `${dirNameOf(path) ? `${dirNameOf(path)}/` : ''}${base}.lrc`;
   return { folderId: parsed.folderId, songId: parsed.songId, path, sidecarPath: sidecar };

@@ -370,7 +370,7 @@ test('collectLibrary：中止取消在途列表并保留部分结果', async () 
 });
 
 test('曲库缓存分块读写与失效', async () => {
-  const { writeLibraryCache, readLibraryCache, clearLibraryCache } =
+  const { writeLibraryCache, readLibraryCache } =
     await import('../plugins/local-music/src/scan.ts');
   const { songFromEntry } = await import('../plugins/local-music/src/library.ts');
   const store = new Map();
@@ -387,8 +387,8 @@ test('曲库缓存分块读写与失效', async () => {
   assert.deepEqual(cached.songs[449], songs[449]);
   // A different folder set invalidates the cache.
   assert.equal(await readLibraryCache(ctx, ['g2']), null);
-  await clearLibraryCache(ctx);
-  assert.equal(await readLibraryCache(ctx, ['g1']), null);
+  // ...and so does an empty set.
+  assert.equal(await readLibraryCache(ctx, []), null);
 });
 
 function entryTree() {

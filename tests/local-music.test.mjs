@@ -3,7 +3,6 @@ import test from 'node:test';
 import {
   bytesToBase64,
   compareText,
-  formatBytes,
   pad2,
   utf16Decode,
   utf8Decode,
@@ -83,12 +82,9 @@ test('utf8Decode 与 utf16Decode 覆盖多字节与双端序', () => {
   assert.equal(utf16Decode(little, 0, little.length, false), text);
 });
 
-test('pad2、formatBytes 与 compareText', () => {
+test('pad2 与 compareText', () => {
   assert.equal(pad2(3), '03');
   assert.equal(pad2(45), '45');
-  assert.equal(formatBytes(512), '512 B');
-  assert.equal(formatBytes(2048), '2.0 KB');
-  assert.equal(formatBytes(-1), '');
   const list = ['Track 10', 'Track 2', 'Track 1'];
   list.sort(compareText);
   assert.deepEqual(list, ['Track 1', 'Track 2', 'Track 10']);

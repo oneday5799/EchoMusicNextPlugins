@@ -171,6 +171,12 @@ async function walkFolder(
       }
       dirs += 1;
       const entries = page.entries ?? [];
+      if (page.truncated) {
+        // A single directory holding more entries than one listing page:
+        // everything past the page is lost, so surface the incompleteness
+        // instead of reporting a whole library.
+        state.collected.truncated = true;
+      }
       classifyEntries(state, folder.folderId, entries);
       for (const entry of entries) {
         if (!entry || !entry.directory) continue;
@@ -228,12 +234,18 @@ export async function collectLibrary(
     }
     if (state.collected.truncated) break;
   }
-  // Pair songs with their sidecar lyrics now that every folder was seen.
-  for (const song of state.collected.songs) {
-    const lyricPath = state.collected.lyricPaths.get(lyricKeyOf(song.path));
+  pairLyricPaths(state.collected);
+  return state.collected;
+}
+
+/** Pairs songs with their sidecar lyrics once every folder was seen. Runs at
+ * the end of collectLibrary and again on an abort's partial collection (the
+ * entry's applyCollected), whose thrown walk bypasses that ending. */
+export function pairLyricPaths(collected: ScanCollected): void {
+  for (const song of collected.songs) {
+    const lyricPath = collected.lyricPaths.get(lyricKeyOf(song.path));
     if (lyricPath) song.lyricPath = lyricPath;
   }
-  return state.collected;
 }
 
 // ── KV cache ──────────────────────────────────────────────────────────────
@@ -287,7 +299,9 @@ export function metaMatches(meta: LibraryCacheMeta | null, folderIds: string[]):
   for (const item of folders) {
     if (typeof item === 'string') names.push(item);
   }
-  return folderSignature(names) === folderSignature(folderIds);
+  // Set equality: re-adding a removed folder appends it, and order alone
+  // must not invalidate a cache over an identical folder set.
+  return folderSignature(names.slice().sort()) === folderSignature(folderIds.slice().sort());
 }
 
 export async function writeLibraryCache(
@@ -347,22 +361,4 @@ export async function readLibraryCache(
   }
   if (songs.length !== meta.count) return null;
   return { songs, truncated: meta.truncated };
-}
-
-export async function clearLibraryCache(context: EchoPluginContext): Promise<void> {
-  const meta = parseCacheMeta(await awaitOperation(context.io.readValue(libraryMetaKey())));
-  if (meta) {
-    for (let i = 0; i < meta.chunks; i += 1) {
-      try {
-        await awaitOperation(context.io.removeValue(libraryChunkKey(i)));
-      } catch (error) {
-        // Best-effort cleanup.
-      }
-    }
-  }
-  try {
-    await awaitOperation(context.io.removeValue(libraryMetaKey()));
-  } catch (error) {
-    // Ignore missing meta.
-  }
 }
