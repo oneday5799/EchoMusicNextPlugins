@@ -78,15 +78,9 @@ Item {
     readonly property string songCountLabel: `${root.libraryCount} 首歌曲`
     readonly property string albumCountLabel: root.libraryAlbums > 0 ? `${root.libraryAlbums} 张专辑` : ""
 
-    readonly property string headerCoverUrl: {
-        if (root.selectedAlbum.length > 0)
-            return root.selectedAlbumCover();
-        for (let i = 0; i < root.albumRows.length; i++) {
-            if (root.albumRows[i].coverUrl.length > 0)
-                return root.albumRows[i].coverUrl;
-        }
-        return root.libraryCoverUrl;
-    }
+    readonly property string headerCoverUrl: root.selectedAlbum.length > 0
+        ? root.selectedAlbumCover()
+        : root.libraryCoverUrl
     /** Themed fallback art so the header always shows a playlist cover. */
     property string libraryCoverUrl: ""
 
@@ -206,12 +200,14 @@ Item {
         pageEpoch += 1;
         albumEpoch += 1;
         pageRows = [];
-        songTotal = 0;
         albumRows = [];
-        albumTotal = 0;
         pageLoading = false;
         loadingMore = false;
         albumsLoading = false;
+        // Keep songTotal/albumTotal across view switches: only the active
+        // view reloads, and zeroing here would strand the other tab's count
+        // at 0 until it is visited again. Each view's reply refreshes its
+        // own total.
         if (!libraryReady)
             return;
         if (albumGridActive)
