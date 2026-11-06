@@ -256,6 +256,24 @@ Item {
         onTriggered: root.requestCoverBatch()
     }
 
+    /** Reassigning a plain JS-array model is a full model reset: the view
+     * regenerates its delegates and snaps back to the top. Cover batches
+     * and page appends only swap row data, never the layout (row heights
+     * are uniform), so put the view back in the same synchronous pass —
+     * forceLayout flushes the reset relayout before the restore, and no
+     * frame paints the snapped position. Same preservation that
+     * EchoViewPoolGuard applies on model reattachment, applied inline
+     * because its delayed save runs after the reset has already lost the
+     * position. */
+    function reassignRows(view, update) {
+        const y = view.contentY;
+        const current = view.currentIndex;
+        update();
+        view.forceLayout();
+        view.currentIndex = current;
+        view.contentY = y;
+    }
+
     function applyCovers(result, requestedIds) {
         const covers = result && result.covers ? result.covers : {};
         const truncated = !!(result && result.truncated);
@@ -283,7 +301,9 @@ Item {
             return clone;
         });
         if (changed)
-            pageRows = next;
+            reassignRows(songList, function () {
+                pageRows = next;
+            });
         if (Object.keys(coverRequests).length > 0 && !coverBatchTimer.running)
             coverBatchTimer.restart();
     }
@@ -380,7 +400,10 @@ Item {
                 return;
             }
             songTotal = result.total || 0;
-            pageRows = pageRows.concat((result.songs || []).map(rowModel));
+            // An append must not yank the list back to the top mid-scroll.
+            reassignRows(songList, function () {
+                pageRows = pageRows.concat((result.songs || []).map(rowModel));
+            });
         });
     }
 
@@ -452,7 +475,10 @@ Item {
             if (!result || !result.ready)
                 return;
             albumTotal = result.total || 0;
-            albumRows = albumRows.concat(albumRowsFrom(result));
+            // Appends keep the grid's scroll position, like the song list.
+            reassignRows(albumGrid, function () {
+                albumRows = albumRows.concat(albumRowsFrom(result));
+            });
         });
     }
 
