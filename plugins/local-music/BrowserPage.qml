@@ -95,9 +95,10 @@ Item {
     readonly property string songCountLabel: `${root.libraryCount} 首歌曲`
     readonly property string albumCountLabel: root.libraryAlbums > 0 ? `${root.libraryAlbums} 张专辑` : ""
 
-    readonly property string headerCoverUrl: root.selectedAlbum.length > 0
-        ? root.selectedAlbumCover()
-        : root.libraryCoverUrl
+    // The header keeps the themed library art everywhere — album drill-ins
+    // included. Swapping in the album's rep cover was not wanted, and rows
+    // without a rep cover would flip the header to its placeholder glyph.
+    readonly property string headerCoverUrl: root.libraryCoverUrl
     /** Themed fallback art so the header always shows a playlist cover. */
     property string libraryCoverUrl: ""
 
@@ -559,14 +560,6 @@ Item {
         // popup's parent, and open there like the host menus do.
         const local = root.mapFromItem(null, sceneX, sceneY);
         songMenu.popup(local.x, local.y);
-    }
-
-    function selectedAlbumCover() {
-        for (let i = 0; i < albumRows.length; i++) {
-            if (albumRows[i].resourceId === selectedAlbum)
-                return albumRows[i].coverUrl;
-        }
-        return "";
     }
 
     function locateCurrent() {
