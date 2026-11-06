@@ -51,8 +51,13 @@ export function makeSourceId(folderId: string, songId: string): string {
 }
 
 export function parseSourceId(sourceId: JsonValue): { folderId: string; songId: string } | null {
-  if (typeof sourceId !== 'string' || sourceId.indexOf(SOURCE_ID_PREFIX) !== 0) return null;
-  const rest = sourceId.slice(SOURCE_ID_PREFIX.length);
+  if (typeof sourceId !== 'string') return null;
+  // The host stores queue tracks' plugin_source with a "<plugin-id>/" prefix
+  // and hands that rewritten id back to resolvers; strip the prefix so the
+  // sourceId matches the persisted form.
+  const value = sourceId.replace(/^(?:[^/:]+\/)?(?=local:)/, '');
+  if (value.indexOf(SOURCE_ID_PREFIX) !== 0) return null;
+  const rest = value.slice(SOURCE_ID_PREFIX.length);
   const cut = rest.indexOf(':');
   if (cut <= 0) return null;
   const folderId = rest.slice(0, cut);

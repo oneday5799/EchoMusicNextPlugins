@@ -26,6 +26,7 @@ import {
   enrichMetadata,
   readCover,
   writeCover,
+  COVER_STORE_LIMIT,
   type CoverJob,
   type TagReader,
 } from './enrich.ts';
@@ -841,6 +842,17 @@ async function libraryCovers(args: Record<string, JsonValue>): Promise<JsonValue
 
 // ── Playback ───────────────────────────────────────────────────────────────
 
+/** The host queue validator caps a track's cover string at 16384 chars
+ * (EchoPluginPlaylist::parse) and stays silent beyond that, so oversized
+ * embedded art must be withheld from queue payloads instead of submitting
+ * it and failing the whole call. */
+export const QUEUE_COVER_LIMIT = 16000;
+
+export async function queueCoverForTrack(song: SongInit, cover: string): Promise<QueueTrack> {
+  if (cover && cover.length <= QUEUE_COVER_LIMIT) return buildQueueTrack(song, { cover });
+  return buildQueueTrack(song);
+}
+
 async function coverForTrack(song: SongInit): Promise<string> {
   const ctx = requireContext();
   try {
@@ -855,7 +867,10 @@ async function coverForTrack(song: SongInit): Promise<string> {
     tagReader.readTags(song.folderId, song.path),
     COVER_BUDGET_MS,
   );
-  const url = tags ? coverDataUrl(tags) : '';
+  // Keep parity with the enrichment cache: artwork beyond the store limit is
+  // not persisted, otherwise oversized images inflate the KV repeatedly.
+  const url =
+    tags && tags.coverData && tags.coverData.length <= COVER_STORE_LIMIT ? coverDataUrl(tags) : '';
   if (url) {
     try {
       await writeCover(ctx, song.id, url);
@@ -926,7 +941,9 @@ async function playCommand(args: Record<string, JsonValue>): Promise<JsonValue> 
     const firstIndex = Math.min(startIndex, songs.length - 1);
     try {
       const cover = await coverForTrack(songs[firstIndex]);
-      if (cover) tracks[firstIndex] = buildQueueTrack(songs[firstIndex], { cover });
+      // Withhold covers beyond the host queue cap: submitting them rejects
+      // the whole replace call and playback never starts.
+      tracks[firstIndex] = await queueCoverForTrack(songs[firstIndex], cover);
     } catch (error) {
       // A slow or missing cover must not delay playback.
     }
@@ -941,7 +958,11 @@ async function playCommand(args: Record<string, JsonValue>): Promise<JsonValue> 
 // ── Resolvers ──────────────────────────────────────────────────────────────
 
 function matchLocalTrack(track: QueueTrack): boolean {
-  return typeof track.sourceId === 'string' && track.sourceId.indexOf(SOURCE_ID_PREFIX) === 0;
+  if (typeof track.sourceId !== 'string') return false;
+  // Accept both the persisted form (`local:<folder>:<song>`) and the
+  // host-rewritten form with a plugin namespace prefix prepended by the
+  // queue ingestion (`EchoPluginPlaylist::parse`).
+  return /^([^/:]+\/)?local:/.test(track.sourceId);
 }
 
 async function resolveAudioSource(

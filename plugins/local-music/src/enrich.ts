@@ -19,7 +19,7 @@ const METADATA_TIMEOUT_MS = 10000;
 const COVER_BUDGET_MS = 1600;
 const KUGOU_TIMEOUT_MS = 2500;
 /** Embedded art larger than this is skipped to keep the KV store light. */
-const COVER_STORE_LIMIT = 384 * 1024;
+export const COVER_STORE_LIMIT = 384 * 1024;
 const ENRICH_POOL = 6;
 const COVER_POOL = 4;
 const TAG_CACHE_LIMIT = 300;

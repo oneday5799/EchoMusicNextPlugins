@@ -235,6 +235,32 @@ test('songFromEntry 与 buildQueueTrack 组装', () => {
   });
 });
 
+test('parseSourceId 兼容宿主重写后的插件命名空间前缀', async () => {
+  const { parseSourceId } = await import('../plugins/local-music/src/library.ts');
+  assert.deepEqual(parseSourceId('local:g1:s-1'), { folderId: 'g1', songId: 's-1' });
+  // EchoPluginPlaylist::parse prepends "<plugin-id>/" to queue sourceIds.
+  assert.deepEqual(parseSourceId('local-music/local:g1:s-1'), {
+    folderId: 'g1',
+    songId: 's-1',
+  });
+  assert.deepEqual(parseSourceId('other/local:g1:s-1'), { folderId: 'g1', songId: 's-1' });
+  assert.equal(parseSourceId('webdav:x'), null);
+  assert.equal(parseSourceId(null), null);
+});
+
+test('queueCoverForTrack 按宿主队列上限裁剪封面', async () => {
+  const { QUEUE_COVER_LIMIT, queueCoverForTrack } =
+    await import('../plugins/local-music/src/entry.ts');
+  const song = songFromEntry({ folderId: 'g1', path: '/x.mp3', name: 'x.mp3', size: 10 });
+  const small = 'x'.repeat(QUEUE_COVER_LIMIT - 1);
+  const kept = await queueCoverForTrack(song, small);
+  assert.equal(kept.cover, small);
+  const oversized = 'x'.repeat(QUEUE_COVER_LIMIT + 1);
+  const withheld = await queueCoverForTrack(song, oversized);
+  assert.equal(withheld.cover, undefined);
+  assert.ok(withheld.id);
+});
+
 test('compactSong 与 expandCompactSong 往返', () => {
   const song = songFromEntry({ folderId: 'g1', path: '/x.mp3', name: 'x.mp3', size: 10 });
   song.album = '专辑';
