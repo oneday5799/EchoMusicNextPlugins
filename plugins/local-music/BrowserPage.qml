@@ -86,9 +86,17 @@ Item {
     property string errorMessage: ""
     readonly property int contentInset: 24
 
+    // Host queue ingestion rewrites track ids to "plugin:<plugin-id>:<id>"
+    // (EchoPluginPlaylist::parse) and the player snapshot hands that back;
+    // library rows carry the bare song id, so strip the namespace before
+    // comparing anywhere (row highlight, locate).
+    function localSongId(trackId) {
+        return trackId.replace(/^plugin:[^:]+:/, "");
+    }
+
     readonly property string currentTrackId: {
         const snapshot = plugin.player.snapshot;
-        return snapshot && snapshot.hasTrack ? snapshot.track.id : "";
+        return snapshot && snapshot.hasTrack ? localSongId(snapshot.track.id) : "";
     }
     readonly property string headerTitle: selectedAlbum.length > 0 ? selectedAlbum : "本地音乐"
     // Library-wide counts from library.info; the tabs show filtered totals.
