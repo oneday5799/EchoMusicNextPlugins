@@ -97,14 +97,9 @@ Item {
         const operation = plugin.executeCommand(name, args || {});
         if (!operation)
             return;
-        // TEMP DIAGNOSTIC — remove once the blank views are rooted.
-        const seq = ++runSeq;
-        plugin.toast.info(`#${seq} ${name} 派发`);
         const handler = function () {
             operation.completed.disconnect(handler);
-            // TEMP DIAGNOSTIC — remove once the blank views are rooted.
             if (operation.state === 2) {
-                plugin.toast.info(`#${seq} ${name} ok`);
                 if (callback)
                     callback(operation.result);
             } else if (operation.state === 3) {
@@ -115,8 +110,6 @@ Item {
                 // epoch guards never strand a skeleton view.
                 if (callback)
                     callback(null);
-            } else {
-                plugin.toast.warning(`#${seq} ${name} state=${operation.state}（被取消/未知）`);
             }
         };
         operation.completed.connect(handler);
@@ -194,30 +187,16 @@ Item {
             libraryCount = typeof result.count === "number" ? result.count : 0;
             libraryAlbums = typeof result.albums === "number" ? result.albums : 0;
             folderCount = typeof result.folders === "number" ? result.folders : 0;
-            resetView("library.info");
+            resetView();
         });
     }
 
     // Monotonic request epochs: only the newest view request may land, so a
     // late reply from a superseded sort/filter cannot append foreign rows.
-    // TEMP DIAGNOSTIC — remove once the blank views are rooted.
-    property int runSeq: 0
     property int pageEpoch: 0
     property int albumEpoch: 0
 
-    function resetView(reason) {
-        // TEMP DIAGNOSTIC — remove once the phantom reset is rooted.
-        plugin.toast.info(`[reset diag] ${reason || "?"} pageEpoch=${pageEpoch + 1} tab=${viewTab} album=${selectedAlbum.length > 0 ? selectedAlbum : "-"}`);
-        run("library.diag", {
-            kind: "reset",
-            payload: JSON.stringify({
-                reason: reason || "?",
-                tab: viewTab,
-                album: selectedAlbum,
-                ready: libraryReady,
-                rows: pageRows.length
-            })
-        }, null);
+    function resetView() {
         pageEpoch += 1;
         albumEpoch += 1;
         pageRows = [];
@@ -231,7 +210,12 @@ Item {
         // own total.
         if (!libraryReady)
             return;
-        if (albumGridActive)
+        // Branch on the raw properties, not the albumGridActive binding:
+        // reading a derived binding inside the notify cycle of its own
+        // dependency (onSelectedAlbumChanged) can serve the stale cached
+        // value, sending drill-ins to the album grid loader and leaving
+        // the song list empty.
+        if (viewTab === 1 && selectedAlbum.length === 0)
             albumsLoad();
         else
             pageLoad();
@@ -290,10 +274,6 @@ Item {
             return;
         const epoch = ++pageEpoch;
         pageLoading = true;
-        // TEMP DIAGNOSTIC — remove once the blank drill-in is rooted.
-        pageDiagPending = true;
-        pageDiagTimer.restart();
-        plugin.toast.info(`[page diag] start epoch=${epoch} album=${selectedAlbum.length > 0 ? selectedAlbum : "-"}`);
         run("library.page", {
             offset: pageRows.length,
             limit: 100,
@@ -303,47 +283,19 @@ Item {
             sort: sortKey,
             sortDir: sortDirection
         }, function (result) {
-            // TEMP DIAGNOSTIC — remove once the blank drill-in is rooted.
-            pageDiagPending = false;
-            pageDiagTimer.stop();
-            try {
-                if (epoch !== pageEpoch) {
-                    plugin.toast.warning(`[page diag] 回复被丢弃 epoch=${epoch} 当前=${pageEpoch}`);
-                    return;
-                }
-                pageLoading = false;
-                // TEMP DIAGNOSTIC — remove once the blank drill-in is rooted.
-                run("library.diag", {
-                    kind: "page-reply",
-                    payload: JSON.stringify({
-                        epoch,
-                        epochNow: pageEpoch,
-                        albumArg: selectedAlbum,
-                        hasResult: !!result,
-                        ready: !!result && result.ready === true,
-                        total: result ? result.total : -1,
-                        songsKind: result ? Object.prototype.toString.call(result.songs) : "none",
-                        songsLen: result && result.songs ? result.songs.length : -1,
-                        first: result && result.songs && result.songs.length > 0 ? JSON.stringify(result.songs[0]) : ""
-                    })
-                }, null);
-                if (!result) {
-                    plugin.toast.warning("[page diag] 回复为 null（操作失败）");
-                    return;
-                }
-                if (!result.ready) {
-                    libraryReady = false;
-                    plugin.toast.warning("[page diag] ready=false，曲库未就绪");
-                    return;
-                }
-                songTotal = result.total || 0;
-                const rows = (result.songs || []).map(rowModel);
-                pageRows = pageRows.concat(rows);
-                fetchCovers(rows);
-                plugin.toast.info(`[page diag] rows=${rows.length} total=${songTotal} album=${selectedAlbum.length > 0 ? selectedAlbum : "-"}`);
-            } catch (error) {
-                plugin.toast.warning(`[page diag] 回调异常: ${error.message || error}`);
+            if (epoch !== pageEpoch)
+                return;
+            pageLoading = false;
+            if (!result)
+                return;
+            if (!result.ready) {
+                libraryReady = false;
+                return;
             }
+            songTotal = result.total || 0;
+            const rows = (result.songs || []).map(rowModel);
+            pageRows = pageRows.concat(rows);
+            fetchCovers(rows);
         });
     }
 
@@ -361,45 +313,19 @@ Item {
             sort: sortKey,
             sortDir: sortDirection
         }, function (result) {
-            // TEMP DIAGNOSTIC — remove once the blank views are rooted.
-            try {
-                if (epoch !== pageEpoch) {
-                    plugin.toast.warning(`[page diag] 回复被丢弃 epoch=${epoch} 当前=${pageEpoch}`);
-                    return;
-                }
-                loadingMore = false;
-                if (!result || !result.ready) {
-                    plugin.toast.warning(`[page diag] result=${result ? "ready=false" : "null"}`);
-                    if (result && !result.ready)
-                        libraryReady = false;
-                    return;
-                }
-                songTotal = result.total || 0;
-                const rows = (result.songs || []).map(rowModel);
-                pageRows = pageRows.concat(rows);
-                fetchCovers(rows);
-                plugin.toast.info(`[page diag] rows=${rows.length} total=${songTotal} album=${selectedAlbum.length > 0 ? selectedAlbum : "-"}`);
-            } catch (error) {
-                plugin.toast.warning(`[page diag] 回调异常: ${error.message || error}`);
+            if (epoch !== pageEpoch)
+                return;
+            loadingMore = false;
+            if (!result || !result.ready) {
+                if (result && !result.ready)
+                    libraryReady = false;
+                return;
             }
+            songTotal = result.total || 0;
+            const rows = (result.songs || []).map(rowModel);
+            pageRows = pageRows.concat(rows);
+            fetchCovers(rows);
         });
-    }
-
-    // TEMP DIAGNOSTIC — remove once the blank album grid is rooted.
-    property bool albumsDiagPending: false
-    Timer {
-        id: albumsDiagTimer
-        interval: 5000
-        onTriggered: if (root.albumsDiagPending)
-            root.plugin.toast.warning("[albums diag] 5秒未结算（操作挂起，回复从未到达）")
-    }
-    // TEMP DIAGNOSTIC — remove once the blank drill-in is rooted.
-    property bool pageDiagPending: false
-    Timer {
-        id: pageDiagTimer
-        interval: 5000
-        onTriggered: if (root.pageDiagPending)
-            root.plugin.toast.warning("[page diag] 5秒未结算（操作挂起，回复从未到达）")
     }
 
     function albumsLoad() {
@@ -407,10 +333,6 @@ Item {
             return;
         const epoch = ++albumEpoch;
         albumsLoading = true;
-        // TEMP DIAGNOSTIC — remove once the blank album grid is rooted.
-        albumsDiagPending = true;
-        albumsDiagTimer.restart();
-        plugin.toast.info(`[albums diag] start offset=${albumRows.length} epoch=${epoch}`);
         run("library.albums", {
             offset: albumRows.length,
             limit: 60,
@@ -419,54 +341,27 @@ Item {
             sort: sortKey,
             sortDir: sortDirection
         }, function (result) {
-            // TEMP DIAGNOSTIC — remove once the blank album grid is rooted.
-            albumsDiagPending = false;
-            albumsDiagTimer.stop();
-            try {
-                if (epoch !== albumEpoch) {
-                    plugin.toast.warning(`[albums diag] 回复被丢弃 epoch=${epoch} 当前=${albumEpoch}`);
-                    return;
-                }
-                albumsLoading = false;
-                // TEMP DIAGNOSTIC — remove once the blank drill-in is rooted.
-                run("library.diag", {
-                    kind: "albums-reply",
-                    payload: JSON.stringify({
-                        epoch,
-                        epochNow: albumEpoch,
-                        hasResult: !!result,
-                        ready: !!result && result.ready === true,
-                        total: result ? result.total : -1,
-                        albumsKind: result ? Object.prototype.toString.call(result.albums) : "none",
-                        albumsLen: result && result.albums ? result.albums.length : -1,
-                        first: result && result.albums && result.albums.length > 0 ? JSON.stringify(result.albums[0]) : ""
-                    })
-                }, null);
-                if (!result) {
-                    plugin.toast.warning("[albums diag] 回复为 null（操作失败）");
-                    return;
-                }
-                if (!result.ready) {
-                    libraryReady = false;
-                    plugin.toast.warning("[albums diag] ready=false，曲库未就绪");
-                    return;
-                }
-                albumTotal = result.total || 0;
-                const rows = (result.albums || []).map(function (album) {
-                    return {
-                        title: album.name,
-                        artistText: "",
-                        extraText: `${album.count} 首`,
-                        coverUrl: album.cover || "",
-                        durationText: "",
-                        resourceId: album.name
-                    };
-                });
-                albumRows = albumRows.concat(rows);
-                plugin.toast.info(`[albums diag] rows=${rows.length} total=${albumTotal} ready=${result.ready}`);
-            } catch (error) {
-                plugin.toast.warning(`[albums diag] 回调异常: ${error.message || error}`);
+            if (epoch !== albumEpoch)
+                return;
+            albumsLoading = false;
+            if (!result)
+                return;
+            if (!result.ready) {
+                libraryReady = false;
+                return;
             }
+            albumTotal = result.total || 0;
+            const rows = (result.albums || []).map(function (album) {
+                return {
+                    title: album.name,
+                    artistText: "",
+                    extraText: `${album.count} 首`,
+                    coverUrl: album.cover || "",
+                    durationText: "",
+                    resourceId: album.name
+                };
+            });
+            albumRows = albumRows.concat(rows);
         });
     }
 
@@ -555,17 +450,17 @@ Item {
             sortField = field;
             sortDirection = 1;
         }
-        resetView("changeSort");
+        resetView();
     }
 
     onPageActiveChanged: if (pageActive && folders.length === 0)
         refreshSettings(true)
 
     onSelectedAlbumChanged: if (libraryReady && albumTab)
-        resetView("selectedAlbum=" + selectedAlbum)
+        resetView()
 
     onFolderFilterChanged: if (libraryReady)
-        resetView("folderFilter")
+        resetView()
 
     Component.onCompleted: {
         if (plugin.cover) {
@@ -933,7 +828,7 @@ Item {
                             if (index === 1)
                                 root.selectedAlbum = "";
                             root.viewTab = index;
-                            root.resetView("tab-" + index);
+                            root.resetView();
                         }
                     }
                     Item {
@@ -970,11 +865,11 @@ Item {
                         onAccepted: {
                             root.keyword = text;
                             searchDebounce.stop();
-                            root.resetView("search-accepted");
+                            root.resetView();
                         }
                         onCleared: {
                             root.keyword = "";
-                            root.resetView("search-cleared");
+                            root.resetView();
                         }
                     }
                     SongLocateButton {
@@ -1023,6 +918,6 @@ Item {
     Timer {
         id: searchDebounce
         interval: 300
-        onTriggered: root.resetView("search-debounce")
+        onTriggered: root.resetView()
     }
 }
