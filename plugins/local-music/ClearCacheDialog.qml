@@ -62,6 +62,7 @@ Item {
     function clearNow() {
         const operation = plugin.executeCommand('library.cache.clear', {});
         if (!operation) {
+            plugin.toast.warning("无法执行清除操作");
             dialog.close();
             return;
         }

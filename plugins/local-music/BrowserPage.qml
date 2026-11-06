@@ -79,8 +79,6 @@ Item {
 
     property var scanState: ({})
     readonly property bool scanRunning: !!root.scanState && root.scanState.running === true
-    readonly property bool scanDone: !!root.scanState && root.scanState.done === true
-    readonly property bool scanAborted: !!root.scanState && root.scanState.aborted === true
     readonly property string scanError: root.scanState && typeof root.scanState.error === "string" ? root.scanState.error : ""
 
     property string errorMessage: ""
@@ -121,8 +119,13 @@ Item {
 
     function run(name, args, callback) {
         const operation = plugin.executeCommand(name, args || {});
-        if (!operation)
+        if (!operation) {
+            // A null operation (usually deactivation) must still settle the
+            // request: every caller sets a loading flag before this call.
+            if (callback)
+                callback(null);
             return;
+        }
         const handler = function () {
             operation.completed.disconnect(handler);
             if (operation.state === 2) {
@@ -286,6 +289,11 @@ Item {
     function clearSongRows() {
         pageRows = [];
         songIndexById = ({});
+        // The miss cache must not outlive the rows it describes: a library
+        // rebuild (rescan, settings change) can produce covers for songs
+        // whose earlier lookup failed transiently.
+        coverRequests = ({});
+        coverMisses = ({});
     }
 
     function appendAlbumRows(rows) {
@@ -301,8 +309,8 @@ Item {
     /** Cover delivery for song rows. Delegates request their own cover as
      * they enter the view and the requests batch into small library.covers
      * calls: a whole-page batch of full-size data URLs reaches tens of MB
-     * across the FFI and stalls the host, so a reply is bounded by the
-     * visible window, never by the page size. */
+     * across the FFI and stalls the host, so a reply carries a fixed batch
+     * of coverBatchSize ids, independent of the page size. */
     property var coverRequests: ({})
     property var coverMisses: ({})
     property bool coversInFlight: false
@@ -420,7 +428,9 @@ Item {
     }
 
     function loadMore() {
-        if (!hasMore || loadingMore || pageLoading)
+        // locateLoading is excluded for the same reason as pageLoading: the
+        // locate fill chain appends at pageRows.length too.
+        if (!hasMore || loadingMore || pageLoading || locateLoading)
             return;
         const epoch = pageEpoch;
         loadingMore = true;
@@ -572,11 +582,13 @@ Item {
 
     /** Locate the playing row. The fast path scans the loaded rows; songs
      * past the loaded pages ask the backend for their index in the current
-     * sort/filter view and append pages until the row exists. */
+     * sort/filter view and append pages until the row exists. The fetch is
+     * mutually exclusive with the scroll-driven loaders — both would append
+     * rows at the same offset and duplicate them. */
     property bool locateLoading: false
 
     function locateCurrent() {
-        if (!libraryReady || locateLoading || loadingMore)
+        if (!libraryReady || locateLoading || loadingMore || pageLoading)
             return;
         const trackId = root.currentTrackId;
         if (trackId.length === 0)
@@ -588,32 +600,48 @@ Item {
             }
         }
         const epoch = pageEpoch;
-        locateLoading = true;
-        run("library.locate", {
-            id: trackId,
+        // Freeze the view args for the whole chain: a keyword edit mid-fill
+        // must not splice rows of the new view onto the old one (the
+        // debounced resetView will restart everything anyway).
+        const locateArgs = {
             keyword: keyword.trim(),
             folderId: folderFilter,
             album: selectedAlbum,
             sort: sortKey,
             sortDir: sortDirection
+        };
+        locateLoading = true;
+        run("library.locate", {
+            id: trackId,
+            keyword: locateArgs.keyword,
+            folderId: locateArgs.folderId,
+            album: locateArgs.album,
+            sort: locateArgs.sort,
+            sortDir: locateArgs.sortDir
         }, function (result) {
             if (epoch !== pageEpoch) {
                 locateLoading = false;
                 return;
             }
-            const index = result && typeof result.index === "number" ? result.index : -1;
+            // A null result means the command itself failed (run() already
+            // toasted); only a real reply with index < 0 is "not in view".
+            if (!result) {
+                locateLoading = false;
+                return;
+            }
+            const index = typeof result.index === "number" ? result.index : -1;
             if (index < 0) {
                 locateLoading = false;
                 plugin.toast.info("当前播放的歌曲不在列表中");
                 return;
             }
-            locateFillTo(index, epoch);
+            locateFillTo(index, epoch, locateArgs);
         });
     }
 
     /** Append pages (bounded fetches, same view args as loadMore) until the
      * located row is loaded, then center it. */
-    function locateFillTo(index, epoch) {
+    function locateFillTo(index, epoch, locateArgs) {
         if (pageRows.length > index || pageRows.length >= songTotal) {
             EchoListPositioning.positionIfNeeded(songList, Math.min(index, pageRows.length - 1), ListView.Center, viewport);
             locateLoading = false;
@@ -622,11 +650,11 @@ Item {
         run("library.page", {
             offset: pageRows.length,
             limit: Math.min(500, index - pageRows.length + 100),
-            keyword: keyword.trim(),
-            folderId: folderFilter,
-            album: selectedAlbum,
-            sort: sortKey,
-            sortDir: sortDirection
+            keyword: locateArgs.keyword,
+            folderId: locateArgs.folderId,
+            album: locateArgs.album,
+            sort: locateArgs.sort,
+            sortDir: locateArgs.sortDir
         }, function (result) {
             if (epoch !== pageEpoch) {
                 locateLoading = false;
@@ -638,7 +666,7 @@ Item {
             }
             songTotal = result.total || 0;
             appendSongRows((result.songs || []).map(rowModel));
-            locateFillTo(index, epoch);
+            locateFillTo(index, epoch, locateArgs);
         });
     }
 
@@ -1045,9 +1073,14 @@ Item {
                             // are top-level navigation, so returning to 歌曲
                             // must restore the plain list and its title, not
                             // stay filtered on the album.
+                            const exitingDrillIn = root.selectedAlbum.length > 0;
                             root.viewTab = index;
                             root.selectedAlbum = "";
-                            root.resetView();
+                            // Clearing selectedAlbum on the 专辑 tab already
+                            // re-ran resetView through onSelectedAlbumChanged;
+                            // only the other picks need the explicit call.
+                            if (!exitingDrillIn)
+                                root.resetView();
                         }
                     }
                     Item {
@@ -1088,6 +1121,9 @@ Item {
                         }
                         onCleared: {
                             root.keyword = "";
+                            // A pending debounce would fire right after and
+                            // only waste an epoch-discarded fetch.
+                            searchDebounce.stop();
                             root.resetView();
                         }
                     }

@@ -6,6 +6,7 @@
     "SettingsDialog.qml",
     "SettingsSection.qml",
     "SettingRow.qml",
+    "ClearCacheDialog.qml",
     "icon.svg",
     "LICENSE"
   ]

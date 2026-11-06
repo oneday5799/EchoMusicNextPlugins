@@ -36,8 +36,13 @@ ColumnLayout {
 
     function run(name, args, callback) {
         const operation = plugin.executeCommand(name, args || {});
-        if (!operation)
+        if (!operation) {
+            // A null operation (usually deactivation) must still settle the
+            // request, same contract as BrowserPage's run().
+            if (callback)
+                callback(null);
             return;
+        }
         busy += 1;
         const handler = function () {
             operation.completed.disconnect(handler);
@@ -141,13 +146,24 @@ ColumnLayout {
 
     function patchFlag(key, value) {
         errorMessage = "";
+        const previous = key === "readEmbedded" ? readEmbeddedFlag
+                                               : key === "onlineFetch" ? onlineFetchFlag : false;
         if (key === "readEmbedded")
             readEmbeddedFlag = value === true;
         else if (key === "onlineFetch")
             onlineFetchFlag = value === true;
         const args = {};
         args[key] = value;
-        run("library.settings.patch", args, null);
+        run("library.settings.patch", args, function (result) {
+            // The switch flipped optimistically; restore the stored value
+            // when the patch failed so it never lies about the state.
+            if (!result) {
+                if (key === "readEmbedded")
+                    readEmbeddedFlag = previous;
+                else if (key === "onlineFetch")
+                    onlineFetchFlag = previous;
+            }
+        });
     }
 
     /** Host-style destructive action: the danger button opens a confirmation

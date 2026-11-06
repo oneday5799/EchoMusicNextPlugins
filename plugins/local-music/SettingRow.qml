@@ -5,15 +5,13 @@ import QtQuick.Layouts
 import EchoMusic.Theme
 
 // Settings row copied from the host SettingsRow: copy column on the left
-// (heading / description / optional status), controls passed as children on
-// the right. Lives inside a section card; separate rows with a hairline
-// EchoDivider between them.
+// (heading / description), controls passed as children on the right. Lives
+// inside a section card; separate rows with a hairline EchoDivider between
+// them.
 RowLayout {
     id: row
     property string heading: ""
     property string description: ""
-    property string statusText: ""
-    property color statusColor: Theme.floatingSecondaryText
     property real controlGap: 12
     default property alias controls: actions.data
     Layout.fillWidth: true
@@ -41,15 +39,6 @@ RowLayout {
             textFormat: Text.PlainText
             color: Theme.floatingSecondaryText
             font: Theme.font(12, Theme.regularWeight)
-            wrapMode: Text.Wrap
-        }
-        Label {
-            Layout.fillWidth: true
-            visible: text.length > 0
-            text: row.statusText
-            textFormat: Text.PlainText
-            color: row.statusColor
-            font: Theme.font(11, Theme.regularWeight)
             wrapMode: Text.Wrap
         }
     }
