@@ -25,6 +25,9 @@ ColumnLayout {
     /** Folder id currently being renamed inline. */
     property string editingId: ""
     property string editingName: ""
+    /** Last settings revision seen; a change means folders were updated
+     * from outside this page (e.g. storage recovered after activation). */
+    property int lastSettingsRevision: -1
 
     spacing: 14
 
@@ -46,9 +49,37 @@ ColumnLayout {
         operation.completed.connect(handler);
     }
 
+    /** Host-delivered JSON arrays can cross the FFI without the JS Array
+     * prototype (Array.isArray false, .map missing), so recover result
+     * arrays explicitly instead of trusting the type check. */
+    function asArray(value) {
+        if (Array.isArray(value))
+            return value;
+        if (!value || typeof value !== "object")
+            return [];
+        if (typeof value.length === "number") {
+            const rows = [];
+            for (let i = 0; i < value.length; i++)
+                rows.push(value[i]);
+            return rows;
+        }
+        const keys = Object.keys(value)
+            .filter(function (key) {
+                return /^(0|[1-9]\d*)$/.test(key);
+            })
+            .map(Number)
+            .sort(function (a, b) {
+                return a - b;
+            });
+        const rows = [];
+        for (let i = 0; i < keys.length; i++)
+            rows.push(value[keys[i]]);
+        return rows;
+    }
+
     function loadFolders() {
-        run("settings.get", {}, function (result) {
-            folders = result && Array.isArray(result.folders) ? result.folders : [];
+        run("library.settings.get", {}, function (result) {
+            folders = result ? asArray(result.folders) : [];
             readEmbeddedFlag = !result || result.readEmbedded !== false;
             onlineFetchFlag = !!result && result.onlineFetch === true;
         });
@@ -113,10 +144,28 @@ ColumnLayout {
             onlineFetchFlag = value === true;
         const args = {};
         args[key] = value;
-        run("settings.patch", args, null);
+        run("library.settings.patch", args, null);
     }
 
-    Component.onCompleted: loadFolders()
+    Component.onCompleted: {
+        const state = plugin.ui.state;
+        if (state && typeof state.settingsRevision === "number")
+            lastSettingsRevision = state.settingsRevision;
+        loadFolders();
+    }
+
+    Connections {
+        target: settingsRoot.plugin.ui
+        function onStateChanged() {
+            const state = settingsRoot.plugin.ui.state;
+            const revision = state && typeof state.settingsRevision === "number"
+                ? state.settingsRevision : -1;
+            if (revision >= 0 && revision !== settingsRoot.lastSettingsRevision) {
+                settingsRoot.lastSettingsRevision = revision;
+                settingsRoot.loadFolders();
+            }
+        }
+    }
 
     Rectangle {
         Layout.fillWidth: true

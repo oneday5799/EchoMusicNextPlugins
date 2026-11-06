@@ -35,6 +35,7 @@ import {
   songFromEntry,
 } from '../plugins/local-music/src/library.ts';
 import { coverDataUrl, id3TagSize, parseAudioTags } from '../plugins/local-music/src/tags.ts';
+import { coerceJsonArray } from '../plugins/local-music/src/codec.ts';
 
 function utf8Bytes(text) {
   const bytes = new Uint8Array(text.length * 4);
@@ -112,6 +113,49 @@ test('normalizeSettings 去重并回退默认值', () => {
   assert.equal(findFolder(settings, 'a').name, '音乐');
   assert.equal(findFolder(settings, 'zz'), null);
   assert.equal(findFolder(settings, ''), null);
+});
+
+// The host io service can deliver JSON arrays as array-like objects that lost
+// the JS Array prototype; persisted folders must survive that bridge.
+test('normalizeSettings 接受失去 Array 原型的 folders', () => {
+  const foldersLike = { length: 1, 0: { id: 'c', name: '曲库', path: 'E:/music' } };
+  assert.equal(Array.isArray(foldersLike), false);
+  const settings = normalizeSettings({ folders: foldersLike });
+  assert.deepEqual(settings.folders, [{ id: 'c', name: '曲库', path: 'E:/music' }]);
+  const keyedFolders = normalizeSettings({ folders: { 0: { id: 'd' }, 1: { id: 'e' } } });
+  assert.deepEqual(
+    keyedFolders.folders.map((folder) => folder.id),
+    ['d', 'e'],
+  );
+  assert.deepEqual(normalizeSettings({ folders: {} }).folders, []);
+  assert.deepEqual(normalizeSettings({ folders: null }).folders, []);
+});
+
+test('coerceJsonArray 还原策略', () => {
+  assert.deepEqual(coerceJsonArray([1, 2]), [1, 2]);
+  assert.deepEqual(coerceJsonArray({ length: 2, 0: 'x', 1: 'y' }), ['x', 'y']);
+  assert.deepEqual(coerceJsonArray({ 0: 'a', 1: 'b' }), ['a', 'b']);
+  assert.deepEqual(coerceJsonArray({}), []);
+  assert.deepEqual(coerceJsonArray(undefined), []);
+  assert.deepEqual(coerceJsonArray('text'), []);
+  const sparse = { length: 3, 0: 'a', 2: 'c' };
+  assert.deepEqual(coerceJsonArray(sparse), ['a', undefined, 'c']);
+});
+
+// The library cache stores each song as a 10-field array; a cache row read
+// back through the host bridge may also arrive without the Array prototype.
+test('expandCompactSong 接受伪数组的曲目', () => {
+  const song = songFromEntry({ folderId: 'g1', path: '/x.mp3', name: 'x.mp3', size: 10 });
+  song.album = '专辑';
+  song.durationMs = 6500;
+  song.lyricPath = '/x.lrc';
+  const fields = compactSong(song);
+  const arrayLike = { length: fields.length };
+  fields.forEach(function (field, index) {
+    arrayLike[index] = field;
+  });
+  assert.equal(Array.isArray(arrayLike), false);
+  assert.deepEqual(expandCompactSong(arrayLike), song);
 });
 
 test('parseTitleArtist 与 qualityForExtension', () => {

@@ -5,6 +5,7 @@
 
 import { awaitOperation } from 'echo:plugin-sdk';
 import type { EchoPluginContext, FileReference, FileStat, JsonValue } from 'echo:plugin-sdk';
+import { coerceJsonArray } from './codec.ts';
 import {
   compactSong,
   COVER_BASE_NAMES,
@@ -263,22 +264,20 @@ export function parseCacheMeta(value: JsonValue | undefined): LibraryCacheMeta |
   if (
     typeof record.version !== 'number' ||
     typeof record.count !== 'number' ||
-    typeof record.chunks !== 'number' ||
-    !Array.isArray(record.folders)
+    typeof record.chunks !== 'number'
   ) {
     return null;
   }
-  const folders: string[] = [];
-  for (const item of record.folders) {
-    if (typeof item === 'string' && item) folders.push(item);
-  }
-  return {
+  const meta = {
     version: record.version,
     count: Math.max(0, Math.floor(record.count)),
     chunks: Math.max(0, Math.floor(record.chunks)),
     truncated: record.truncated === true,
-    folders,
+    folders: coerceJsonArray(record.folders).filter(
+      (item): item is string => typeof item === 'string' && item.length > 0,
+    ),
   };
+  return meta;
 }
 
 export function metaMatches(meta: LibraryCacheMeta | null, folderIds: string[]): boolean {
@@ -337,8 +336,10 @@ export async function readLibraryCache(
   if (!meta || !metaMatches(meta, folderIds)) return null;
   const songs: SongInit[] = [];
   for (let i = 0; i < meta.chunks; i += 1) {
-    const chunk = await awaitOperation(context.io.readValue(libraryChunkKey(i)));
-    if (!Array.isArray(chunk)) return null;
+    const chunk = coerceJsonArray(
+      (await awaitOperation(context.io.readValue(libraryChunkKey(i)))) as JsonValue | undefined,
+    );
+    if (chunk.length === 0) return null;
     for (const item of chunk) {
       const song = expandCompactSong(item);
       if (song) songs.push(song);

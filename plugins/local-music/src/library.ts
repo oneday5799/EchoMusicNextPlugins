@@ -3,7 +3,7 @@
 // source id encodes both ids for the host's playback resolver.
 
 import type { JsonValue, QueueTrack } from 'echo:plugin-sdk';
-import { compareText } from './codec.ts';
+import { coerceJsonArray, compareText } from './codec.ts';
 
 export const AUDIO_EXTENSIONS = [
   'mp3',
@@ -343,17 +343,18 @@ export function compactSong(song: SongInit): JsonValue[] {
 }
 
 export function expandCompactSong(value: JsonValue): SongInit | null {
-  if (!Array.isArray(value) || value.length < COMPACT_LENGTH) return null;
-  const id = value[0];
-  const sourceId = value[1];
-  const path = value[2];
-  const folderId = value[3];
-  const title = value[4];
-  const artist = value[5];
-  const album = value[6];
-  const durationMs = value[7];
-  const size = value[8];
-  const lyricPath = value[9];
+  const fields = coerceJsonArray(value);
+  if (fields.length < COMPACT_LENGTH) return null;
+  const id = fields[0];
+  const sourceId = fields[1];
+  const path = fields[2];
+  const folderId = fields[3];
+  const title = fields[4];
+  const artist = fields[5];
+  const album = fields[6];
+  const durationMs = fields[7];
+  const size = fields[8];
+  const lyricPath = fields[9];
   if (
     typeof id !== 'string' ||
     typeof sourceId !== 'string' ||

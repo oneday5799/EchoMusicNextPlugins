@@ -3,6 +3,7 @@
 // so pages can trust folder ids to be unique and flags to be booleans.
 
 import type { JsonValue } from 'echo:plugin-sdk';
+import { coerceJsonArray } from './codec.ts';
 
 export interface LocalFolderConfig {
   /** The file grant id; doubles as the song folder identity. */
@@ -53,14 +54,11 @@ export function normalizeSettings(value: JsonValue | undefined): LocalSettings {
   const record = value as { [key: string]: JsonValue };
   const folders: LocalFolderConfig[] = [];
   const seen: { [key: string]: boolean } = {};
-  const raw = record.folders;
-  if (Array.isArray(raw)) {
-    for (const item of raw) {
-      const folder = normalizeFolder(item);
-      if (folder && !seen[folder.id]) {
-        seen[folder.id] = true;
-        folders.push(folder);
-      }
+  for (const item of coerceJsonArray(record.folders)) {
+    const folder = normalizeFolder(item);
+    if (folder && !seen[folder.id]) {
+      seen[folder.id] = true;
+      folders.push(folder);
     }
   }
   return {

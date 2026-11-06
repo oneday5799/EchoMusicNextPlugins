@@ -145,11 +145,39 @@ Item {
         return false;
     }
 
+    /** Host-delivered JSON arrays can cross the FFI without the JS Array
+     * prototype (Array.isArray false, .map missing), so recover result
+     * arrays explicitly instead of trusting the type check. */
+    function asArray(value) {
+        if (Array.isArray(value))
+            return value;
+        if (!value || typeof value !== "object")
+            return [];
+        if (typeof value.length === "number") {
+            const rows = [];
+            for (let i = 0; i < value.length; i++)
+                rows.push(value[i]);
+            return rows;
+        }
+        const keys = Object.keys(value)
+            .filter(function (key) {
+                return /^(0|[1-9]\d*)$/.test(key);
+            })
+            .map(Number)
+            .sort(function (a, b) {
+                return a - b;
+            });
+        const rows = [];
+        for (let i = 0; i < keys.length; i++)
+            rows.push(value[keys[i]]);
+        return rows;
+    }
+
     function refreshSettings(reload) {
-        run("settings.get", {}, function (result) {
+        run("library.settings.get", {}, function (result) {
             if (!result)
                 return;
-            folders = Array.isArray(result.folders) ? result.folders : [];
+            folders = asArray(result.folders);
             if (folderFilter.length > 0 && !folderKnown(folderFilter))
                 folderFilter = "";
             if (reload)

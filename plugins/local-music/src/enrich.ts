@@ -7,7 +7,7 @@
 import { awaitOperation } from 'echo:plugin-sdk';
 import type { EchoPluginContext, FileReference, KugouDto_domain_SearchSong } from 'echo:plugin-sdk';
 import { cancelOperationAfter, raceTimeout } from './async.ts';
-import { asArrayBuffer, bytesToBase64 } from './codec.ts';
+import { asArrayBuffer, bytesToBase64, coerceJsonArray } from './codec.ts';
 import { extensionOf, type SongInit } from './library.ts';
 import { coverDataUrl, id3TagSize, parseAudioTags, type AudioTags } from './tags.ts';
 
@@ -50,12 +50,10 @@ export async function writeCover(
     const indexValue = await awaitOperation(context.io.readValue(COVER_INDEX_KEY));
     const index: string[] = [];
     const seen: { [key: string]: boolean } = {};
-    if (Array.isArray(indexValue)) {
-      for (const item of indexValue) {
-        if (typeof item === 'string' && item && !seen[item]) {
-          seen[item] = true;
-          index.push(item);
-        }
+    for (const item of coerceJsonArray(indexValue)) {
+      if (typeof item === 'string' && item && !seen[item]) {
+        seen[item] = true;
+        index.push(item);
       }
     }
     if (!seen[songId]) index.push(songId);
@@ -72,9 +70,8 @@ export async function cleanupCovers(
 ): Promise<void> {
   try {
     const indexValue = await awaitOperation(context.io.readValue(COVER_INDEX_KEY));
-    if (!Array.isArray(indexValue)) return;
     const kept: string[] = [];
-    for (const item of indexValue) {
+    for (const item of coerceJsonArray(indexValue)) {
       if (typeof item !== 'string' || !item) continue;
       if (validIds.has(item)) {
         kept.push(item);

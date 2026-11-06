@@ -17,6 +17,7 @@ import type {
   QueueTrack,
 } from 'echo:plugin-sdk';
 import { raceTimeout } from './async.ts';
+import { coerceJsonArray } from './codec.ts';
 import { findFolder, normalizeSettings, SETTINGS_KEY, type LocalSettings } from './config.ts';
 import {
   cleanupCovers,
@@ -331,8 +332,37 @@ async function ensureGrants(ctx: EchoPluginContext): Promise<void> {
   await reconcileFolders(ctx);
 }
 
+/**
+ * The first storage read of an activation can transiently come back empty —
+ * the same host window where the grant ledger reads empty (see ensureGrants).
+ * When it does, the folder list and the library cache both stay invisible
+ * until the user re-adds everything. Re-read storage whenever the folder
+ * list is empty, adopt the recovered settings, re-claim folders and warm
+ * start the cache.
+ */
+async function ensureStorage(ctx: EchoPluginContext): Promise<void> {
+  if (settings.folders.length > 0) return;
+  let fresh: LocalSettings;
+  try {
+    fresh = normalizeSettings((await awaitOperation(ctx.io.readValue(SETTINGS_KEY))) as JsonValue);
+  } catch (error) {
+    // Storage may not be ready yet; the next command retries.
+    return;
+  }
+  if (fresh.folders.length === 0) return;
+  settings = fresh;
+  settingsRevision += 1;
+  await refreshGrants(ctx);
+  await reconcileFolders(ctx);
+  await warmStart(ctx);
+  // The library may have been restored from cache: revisions tell live
+  // pages to re-query even though they rendered before the recovery.
+  notifyLibraryChanged();
+}
+
 async function settingsGet(): Promise<JsonValue> {
   const ctx = requireContext();
+  await ensureStorage(ctx);
   await ensureGrants(ctx);
   return {
     folders: settings.folders.map((folder) => ({
@@ -348,6 +378,7 @@ async function settingsGet(): Promise<JsonValue> {
 
 async function libraryInfo(): Promise<JsonValue> {
   const ctx = requireContext();
+  await ensureStorage(ctx);
   await ensureGrants(ctx);
   let stale = true;
   try {
@@ -988,7 +1019,9 @@ async function warmStart(ctx: EchoPluginContext): Promise<void> {
       indexLibrary(cached.songs);
       cacheTruncated = cached.truncated;
       libraryReady = true;
-      publishState();
+      // Restored songs change what pages should render, so bump the
+      // revision even during activation.
+      notifyLibraryChanged();
     }
   } catch (error) {
     // A broken cache simply means the page asks for a rescan.
@@ -997,7 +1030,24 @@ async function warmStart(ctx: EchoPluginContext): Promise<void> {
 
 export async function activate(ctx: EchoPluginContext): Promise<void> {
   context = ctx;
-  settings = normalizeSettings((await awaitOperation(ctx.io.readValue(SETTINGS_KEY))) as JsonValue);
+  // The io service can transiently serve an activation read as failed or
+  // empty; setting stays recoverable through ensureStorage below and in
+  // every command that answers from storage.
+  let rawSettings: JsonValue | undefined;
+  try {
+    rawSettings = (await awaitOperation(ctx.io.readValue(SETTINGS_KEY))) as JsonValue;
+  } catch (readError) {
+    // A failed activation read behaves like empty storage below; the
+    // timer and per-command re-checks retry later.
+  }
+  settings = normalizeSettings(rawSettings);
+  // Remove the leftover diagnostic snapshots from the debugging sessions.
+  try {
+    await awaitOperation(ctx.io.removeValue('__diag'));
+    await awaitOperation(ctx.io.removeValue('__diag2'));
+  } catch (cleanupError) {
+    // Missing keys are fine.
+  }
   // Resolve grant revisions up front: the settings page, resolvers and scans
   // all rely on grantRefs, and a not-yet-loaded map would flash folders as
   // unavailable. Re-claim folders whose grant was re-issued under a new
@@ -1042,8 +1092,11 @@ export async function activate(ctx: EchoPluginContext): Promise<void> {
   });
   if (sidebar) registrations.push(sidebar);
 
-  ctx.registerCommand('settings.get', () => settingsGet());
-  ctx.registerCommand('settings.patch', (commandArgs) => settingsPatch(commandArgs));
+  // settings.get/settings.patch claim provider-agnostic names that other
+  // plugins (webdav-music, spectrum-visualizer) also register; the host
+  // routes QML executeCommand by name, so keep them plugin-scoped.
+  ctx.registerCommand('library.settings.get', () => settingsGet());
+  ctx.registerCommand('library.settings.patch', (commandArgs) => settingsPatch(commandArgs));
   ctx.registerCommand('folders.add', () => addFolder());
   ctx.registerCommand('folders.remove', (commandArgs) => removeFolder(commandArgs));
   ctx.registerCommand('folders.rename', (commandArgs) => renameFolder(commandArgs));
@@ -1075,6 +1128,27 @@ export async function activate(ctx: EchoPluginContext): Promise<void> {
         }
       })();
     });
+  }
+  // And the same belt-and-braces for the settings row: if the activation
+  // read came back empty, retry shortly after boot so the sidebar and
+  // the library page show the recovered state without any interaction.
+  if (settings.folders.length === 0) {
+    const recover = (delayMs: number, attempt: number) => {
+      ctx.setTimer(`settings-recheck-${attempt}`, delayMs, false, () => {
+        void (async () => {
+          const active = context;
+          if (!active) return;
+          try {
+            if (settings.folders.length > 0) return;
+            await ensureStorage(active);
+            if (settings.folders.length === 0) recover(6000, attempt + 1);
+          } catch (error) {
+            // Commands needing storage re-check before answering anyway.
+          }
+        })();
+      });
+    };
+    recover(2000, 1);
   }
 }
 

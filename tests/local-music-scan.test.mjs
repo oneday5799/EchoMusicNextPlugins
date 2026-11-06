@@ -577,18 +577,18 @@ test('设置命令：重命名、开关与移除文件夹', async () => {
     await commands.get('folders.add')({});
     const renamed = await commands.get('folders.rename')({ id: 'g1', name: '我的音乐' });
     assert.equal(renamed.ok, true);
-    let snapshot = await commands.get('settings.get')({});
+    let snapshot = await commands.get('library.settings.get')({});
     assert.equal(snapshot.folders[0].name, '我的音乐');
     assert.equal(snapshot.folders[0].path, 'C:/Music');
 
-    await commands.get('settings.patch')({ onlineFetch: true, readEmbedded: false });
-    snapshot = await commands.get('settings.get')({});
+    await commands.get('library.settings.patch')({ onlineFetch: true, readEmbedded: false });
+    snapshot = await commands.get('library.settings.get')({});
     assert.equal(snapshot.onlineFetch, true);
     assert.equal(snapshot.readEmbedded, false);
 
     const removed = await commands.get('folders.remove')({ id: 'g1' });
     assert.equal(removed.ok, true);
-    snapshot = await commands.get('settings.get')({});
+    snapshot = await commands.get('library.settings.get')({});
     assert.equal(snapshot.folders.length, 0);
     assert.equal(store.get('settings').folders.length, 0);
   } finally {
@@ -629,7 +629,7 @@ test('授权重发：重装后按路径自动认领文件夹', async () => {
     const added = await first.commands.get('folders.add')({});
     assert.equal(added.ok, true);
     assert.equal(added.id, 'g1');
-    const snapshot = await first.commands.get('settings.get')({});
+    const snapshot = await first.commands.get('library.settings.get')({});
     assert.equal(snapshot.folders[0].path, 'C:/Music', '路径应随文件夹持久化');
   } finally {
     await first.deactivate();
@@ -640,7 +640,7 @@ test('授权重发：重装后按路径自动认领文件夹', async () => {
   // of showing a dead "unavailable" folder, and scanning must work again.
   const second = await activateWith(entryTree(), { grantId: 'g2', grantRevision: 'r2' }, store);
   try {
-    const snapshot = await second.commands.get('settings.get')({});
+    const snapshot = await second.commands.get('library.settings.get')({});
     assert.equal(snapshot.folders.length, 1, '不应出现重复或残留的死条目');
     assert.equal(snapshot.folders[0].id, 'g2', '应自动认领重发的授权');
     assert.equal(snapshot.folders[0].name, 'Music', '保留用户改过的名称');
@@ -666,7 +666,7 @@ test('授权重发：重装后按路径自动认领文件夹', async () => {
     const added = await second.commands.get('folders.add')({});
     assert.equal(added.ok, false);
     assert.equal(added.duplicate, true);
-    const after = await second.commands.get('settings.get')({});
+    const after = await second.commands.get('library.settings.get')({});
     assert.equal(after.folders.length, 1);
   } finally {
     await second.deactivate();
