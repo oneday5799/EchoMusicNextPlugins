@@ -58,22 +58,20 @@ Item {
     property int albumTotal: 0
     property bool albumsLoading: false
 
-    // The views take ListModels instead of the JS arrays: reassigning an
-    // array model is a wholesale QML model reset, which regenerates every
-    // delegate and snaps the view back to the top — with cover batches
-    // arriving mid-scroll that reset fired on every batch. ListModel
-    // delivers appends and per-row updates as insert/dataChanged
-    // notifications with the model identity untouched, so the scroll
-    // position survives and EchoViewPoolGuard never re-attaches. The JS
-    // arrays stay the source of truth for counts, offsets and lookups.
-    ListModel {
-        id: songModel
-    }
+    // Split model strategy. The album grid takes a ListModel: all its roles
+    // are scalars, so appends notify incrementally instead of resetting the
+    // view (a JS-array reassignment is a wholesale model reset that snaps
+    // the grid back to the top on every batch). The song list keeps the JS
+    // array: SongRow's artistLinks role must read back as a JS array —
+    // ListModel converts object arrays into nested models whose delegates
+    // lose modelData semantics, which blanked the artist line — and cover
+    // delivery instead mutates rows in place and pokes the live delegates
+    // through itemAtIndex, so no reset ever fires for covers.
     ListModel {
         id: albumModel
     }
     // songId -> index inside pageRows, kept in step by appendSongRows so
-    // cover batches can setProperty instead of rebuilding the model.
+    // cover batches can find their row without scanning.
     property var songIndexById: ({})
 
     // Right-click menu target keeps the host's context-target row fill.
@@ -259,20 +257,26 @@ Item {
         };
     }
 
-    /** Push rows into the song list: the JS array stays the source of truth
-     * (counts, offsets, lookups) while the ListModel carries the display.
-     * append() notifies the view incrementally instead of resetting it. */
+    /** Push rows into the song list: the JS array IS the display model, and
+     * the reassignment it takes on append is a model reset — so preserve the
+     * scroll position around it. forceLayout flushes the reset relayout
+     * before the restore; EchoViewPoolGuard is deliberately absent from the
+     * song list, because its delayed detach/reattach dance re-snaps the
+     * position after any synchronous restore. */
     function appendSongRows(rows) {
+        if (rows.length === 0)
+            return;
+        const y = songList.contentY;
         for (let i = 0; i < rows.length; i++)
             songIndexById[rows[i].resourceId] = pageRows.length + i;
         pageRows = pageRows.concat(rows);
-        songModel.append(rows);
+        songList.forceLayout();
+        songList.contentY = y;
     }
 
     function clearSongRows() {
         pageRows = [];
         songIndexById = ({});
-        songModel.clear();
     }
 
     function appendAlbumRows(rows) {
@@ -317,8 +321,10 @@ Item {
                 coverMisses[id] = true;
             }
         }
-        // setProperty emits dataChanged for just that row — visible
-        // delegates rebind their cover in place, no view reset involved.
+        // In-place row update plus a poke at the live delegate: the model
+        // array is never reassigned here, so no reset can fire mid-scroll.
+        // Rows revealed later pick the cover up through normal delegate
+        // creation, which reads the mutated row.
         const ids = Object.keys(covers);
         for (let i = 0; i < ids.length; i++) {
             const id = ids[i];
@@ -327,7 +333,9 @@ Item {
             if (!url || index === undefined || !pageRows[index] || pageRows[index].coverUrl === url)
                 continue;
             pageRows[index].coverUrl = url;
-            songModel.setProperty(index, "coverUrl", url);
+            const item = songList.itemAtIndex(index);
+            if (item && !item.pooled)
+                item.coverUrl = url;
         }
         if (Object.keys(coverRequests).length > 0 && !coverBatchTimer.running)
             coverBatchTimer.restart();
@@ -657,13 +665,15 @@ Item {
             visible: !root.albumGridActive && !root.pageLoading
             topMargin: detailHeader.expandedHeight + toolbar.height + 8
             bottomMargin: 48
-            model: songModel
+            // JS array model: SongRow's artistLinks needs JS-array semantics
+            // (ListModels hand nested object arrays back as nested models,
+            // breaking the artist row). Appends preserve the scroll position
+            // in appendSongRows; the pool guard must stay off, its delayed
+            // detach/reattach re-snaps the position after the restore.
+            model: root.pageRows
             reuseItems: true
             cacheBuffer: 240
             boundsBehavior: Flickable.StopAtBounds
-            EchoViewPoolGuard {
-                targetView: songList
-            }
             onAtYEndChanged: if (atYEnd)
                 root.loadMore()
             onMovementEnded: if (atYEnd)
