@@ -20,17 +20,28 @@ import { raceTimeout } from './async.ts';
 import { coerceJsonArray } from './codec.ts';
 import { findFolder, normalizeSettings, SETTINGS_KEY, type LocalSettings } from './config.ts';
 import {
-  cleanupCovers,
+  clearCoverStore,
+  coverEntryFor,
+  coverEntryHash,
+  coverEntrySize,
+  coverHashOfBytes,
+  coverHashOfText,
+  coverImageKey,
   createTagReader,
-  enrichCovers,
+  embeddedCoverUrl,
   enrichMetadata,
-  readCover,
-  writeCover,
+  folderCoverUrl,
+  kugouCover,
+  legacyCoverKey,
+  readCoverStore,
+  readSongCover,
+  reconcileCoverStore,
+  writeCoverImage,
+  writeCoverStore,
   COVER_STORE_LIMIT,
-  type CoverJob,
+  type CoverStoreData,
   type TagReader,
 } from './enrich.ts';
-import { coverDataUrl } from './tags.ts';
 import {
   albumKeyOf,
   baseName,
@@ -49,7 +60,13 @@ import {
   type SongInit,
   type SongSortKey,
 } from './library.ts';
-import { createLyricEngine, clearLyricCache, type LyricEngine } from './lyric.ts';
+import {
+  clearLyricCache,
+  clearLyricStore,
+  createLyricEngine,
+  reconcileLyricStore,
+  type LyricEngine,
+} from './lyric.ts';
 import {
   collectLibrary,
   LibraryScanAborted,
@@ -431,15 +448,140 @@ function applyCollected(collected: ScanCollected): void {
   dirCovers = collected.dirCovers;
 }
 
-function representativeCoverJobs(): CoverJob[] {
-  const jobs: CoverJob[] = [];
-  for (const album of groupAlbums(librarySongs)) {
-    const song = libraryById.get(album.representativeId);
-    if (!song) continue;
-    const folderCover = dirCovers.get(`${song.folderId}|${dirNameOf(song.path)}`) ?? '';
-    jobs.push({ song, folderCover });
+// ── Cover store pass ───────────────────────────────────────────────────────
+//
+// Covers persist per song, deduplicated by artwork content hash so an
+// album's songs share one stored image. The map entry also records the song
+// file size it was read from: a rescan keeps entries whose file is
+// unchanged, re-reads changed files and drops entries whose art is gone
+// (增删对账), then album representatives without art fall back to the folder
+// image or — when online completion is on — a Kugou lookup.
+
+const COVER_SCAN_POOL = 4;
+
+/** Cover-store read-modify-write cycles must not interleave: the scan's map
+ * flush would clobber a play-time completion written mid-pass. */
+let coverStoreChain: Promise<unknown> = Promise.resolve();
+
+function queueCoverStoreTask<T>(task: () => Promise<T>): Promise<T> {
+  const next = coverStoreChain.then(task, task);
+  coverStoreChain = next.then(
+    () => undefined,
+    () => undefined,
+  );
+  return next;
+}
+
+async function persistCoverEntry(
+  ctx: EchoPluginContext,
+  song: SongInit,
+  hash: string,
+  url: string,
+): Promise<void> {
+  const store = await readCoverStore(ctx);
+  store.map[song.id] = coverEntryFor(hash, song.size);
+  await writeCoverImage(ctx, store, hash, url);
+  await writeCoverStore(ctx, store);
+}
+
+/** Fire-and-forget persistence for play-time completions. */
+function queuePersistCover(
+  ctx: EchoPluginContext,
+  song: SongInit,
+  hash: string,
+  url: string,
+): void {
+  queueCoverStoreTask(() => persistCoverEntry(ctx, song, hash, url)).catch(() => undefined);
+}
+
+interface ScanCoverCallbacks {
+  shouldAbort: () => boolean;
+  onProgress?: (done: number, total: number) => void;
+}
+
+async function resolveScanCovers(
+  ctx: EchoPluginContext,
+  callbacks: ScanCoverCallbacks,
+): Promise<void> {
+  const store = await readCoverStore(ctx);
+  const reader = settings.readEmbedded ? tagReader : null;
+  try {
+    let total = librarySongs.length;
+    let done = 0;
+    const announce = () => {
+      if (callbacks.onProgress) callbacks.onProgress(done, total);
+    };
+    announce();
+    let index = 0;
+    const worker = async (): Promise<void> => {
+      while (index < total) {
+        if (callbacks.shouldAbort()) throw new Error('扫描已中止');
+        const song = librarySongs[index];
+        index += 1;
+        const existing = store.map[song.id];
+        if (existing && coverEntrySize(existing) === song.size) {
+          done += 1;
+          announce();
+          continue;
+        }
+        let hash = '';
+        let url = '';
+        if (reader) {
+          const tags = await raceTimeout(
+            ctx,
+            reader.readTags(song.folderId, song.path),
+            COVER_BUDGET_MS,
+          );
+          url = embeddedCoverUrl(tags);
+          if (url && tags && tags.coverData) hash = coverHashOfBytes(tags.coverData);
+        }
+        if (url && hash) {
+          store.map[song.id] = coverEntryFor(hash, song.size);
+          await writeCoverImage(ctx, store, hash, url);
+        } else if (existing) {
+          // The file changed and carries no embedded art anymore.
+          delete store.map[song.id];
+        }
+        done += 1;
+        announce();
+      }
+    };
+    const runners: Promise<void>[] = [];
+    for (let i = 0; i < Math.min(COVER_SCAN_POOL, total); i += 1) runners.push(worker());
+    await Promise.all(runners);
+    await writeCoverStore(ctx, store);
+
+    // Album representatives still without art: folder image, then Kugou.
+    const reps: SongInit[] = [];
+    for (const album of groupAlbums(librarySongs)) {
+      if (store.map[album.representativeId]) continue;
+      const rep = libraryById.get(album.representativeId);
+      if (rep) reps.push(rep);
+    }
+    total += reps.length;
+    for (const rep of reps) {
+      if (callbacks.shouldAbort()) throw new Error('扫描已中止');
+      const folderCoverPath = dirCovers.get(`${rep.folderId}|${dirNameOf(rep.path)}`) ?? '';
+      let url = await folderCoverUrl(ctx, refFor, rep.folderId, folderCoverPath);
+      if (!url && settings.onlineFetch) url = await kugouCover(ctx, rep.title, rep.artist);
+      if (url) {
+        const hash = coverHashOfText(url);
+        store.map[rep.id] = coverEntryFor(hash, rep.size);
+        await writeCoverImage(ctx, store, hash, url);
+      }
+      done += 1;
+      announce();
+    }
+    await writeCoverStore(ctx, store);
+  } finally {
+    // Keep partial results on abort; a broken write simply leaves the store
+    // as it was.
+    try {
+      await writeCoverStore(ctx, store);
+    } catch (error) {
+      // Best-effort.
+    }
   }
-  return jobs;
 }
 
 async function persistLibraryCache(ctx: EchoPluginContext, truncated: boolean): Promise<void> {
@@ -526,33 +668,23 @@ async function runScanJob(ctx: EchoPluginContext, job: ScanJob, epoch: number): 
           publishScan({ stage: 'enrich', running: true, label, found: total });
         },
       });
-      const coverJobs = representativeCoverJobs();
-      const coverTotal = coverJobs.length;
-      await enrichCovers(
-        ctx,
-        coverJobs,
-        refFor,
-        settings.readEmbedded ? tagReader : null,
-        {
+      await queueCoverStoreTask(() =>
+        resolveScanCovers(ctx, {
           shouldAbort: abortedNow,
-          onOperation: (operation) => {
-            job.inflight = operation;
-          },
-          onProgress: (done) => {
+          onProgress: (done, passTotal) => {
             if (abortedNow()) return;
-            const label = `整理封面 ${done}/${coverTotal}`;
+            const label = `整理封面 ${done}/${passTotal}`;
             try {
-              job.task?.update({ progress: { done, total: coverTotal, label } });
+              job.task?.update({ progress: { done, total: passTotal, label } });
             } catch (taskError) {
               // Ignore update races with dismissal.
             }
             publishScan({ stage: 'enrich', running: true, label, found: total });
           },
-          onCover: (songId, url) => writeCover(ctx, songId, url),
-        },
-        settings.onlineFetch,
+        }),
       );
-      await cleanupCovers(ctx, libraryById);
+      await reconcileCoverStore(ctx, libraryById);
+      await reconcileLyricStore(ctx, libraryById);
     }
     await persistLibraryCache(ctx, cacheTruncated);
     finishTask('completed', `扫描完成，共 ${librarySongs.length} 首`);
@@ -628,6 +760,18 @@ async function stopScan(): Promise<JsonValue> {
   if (!scanJob) return { ok: false };
   requestScanAbort(scanJob);
   return { ok: true };
+}
+
+/** Clears persisted cover artwork and online lyrics (song cache, settings
+ * and folder grants are untouched). Open pages refresh on their next
+ * revision notification. */
+async function clearCachedArtwork(): Promise<JsonValue> {
+  const ctx = requireContext();
+  const covers = await clearCoverStore(ctx);
+  const lyrics = await clearLyricStore(ctx);
+  clearLyricCache();
+  notifyLibraryChanged();
+  return { ok: true, covers: covers.entries + covers.images, lyrics };
 }
 
 // ── Settings & folders ─────────────────────────────────────────────────────
@@ -813,7 +957,11 @@ async function libraryAlbums(args: Record<string, JsonValue>): Promise<JsonValue
   const covers = await Promise.all(
     page.map(async (album) => {
       try {
-        return await readCoverBounded(ctx, album.representativeId);
+        return await raceTimeout(
+          ctx,
+          readSongCover(ctx, album.representativeId),
+          COVER_LOOKUP_BUDGET_MS,
+        );
       } catch (error) {
         return '';
       }
@@ -825,24 +973,71 @@ async function libraryAlbums(args: Record<string, JsonValue>): Promise<JsonValue
   return { ready: true, total: albums.length, offset, limit, albums: rows };
 }
 
-/** Cover lookup for the page headers and rows, bounded so a wedged io
- * operation degrades to a missing cover instead of blocking the caller. */
-async function readCoverBounded(ctx: EchoPluginContext, songId: string): Promise<string> {
-  const value = await raceTimeout(ctx, readCover(ctx, songId), COVER_LOOKUP_BUDGET_MS);
-  return value ?? '';
+/** Bounded store read so a wedged io operation degrades to a missing cover
+ * instead of blocking a browse command. */
+async function readStoreBounded(ctx: EchoPluginContext): Promise<CoverStoreData | null> {
+  try {
+    const store = await raceTimeout(ctx, readCoverStore(ctx), COVER_LOOKUP_BUDGET_MS);
+    return store ?? null;
+  } catch (error) {
+    return null;
+  }
 }
 
-/** Cover lookup for the song rows the page currently displays. */
+async function readImageBounded(ctx: EchoPluginContext, hash: string): Promise<string> {
+  try {
+    const operation = ctx.io.readValue(coverImageKey(hash));
+    const value = (await raceTimeout(
+      ctx,
+      awaitOperation(operation),
+      COVER_LOOKUP_BUDGET_MS,
+    )) as JsonValue;
+    return typeof value === 'string' ? value : '';
+  } catch (error) {
+    return '';
+  }
+}
+
+/** Cover lookup for the song rows the page currently displays: one map read
+ * for the whole page, then one read per distinct artwork hash. */
 async function libraryCovers(args: Record<string, JsonValue>): Promise<JsonValue> {
   if (!libraryReady) return { covers: {} };
   const ctx = requireContext();
   const ids = argStringArray(args, 'ids');
   const covers: { [key: string]: JsonValue } = {};
+  const store = await readStoreBounded(ctx);
+  if (store) {
+    const images: { [hash: string]: string } = {};
+    const hashes: string[] = [];
+    for (const id of ids) {
+      const hash = coverEntryHash(store.map[id]);
+      if (hash && !images[hash]) {
+        images[hash] = '';
+        hashes.push(hash);
+      }
+    }
+    await Promise.all(
+      hashes.map(async (hash) => {
+        images[hash] = await readImageBounded(ctx, hash);
+      }),
+    );
+    for (const id of ids) {
+      const url = images[coverEntryHash(store.map[id])];
+      if (url) covers[id] = url;
+    }
+  }
+  // Songs still missing fall back to the legacy per-song entries until the
+  // next scan or clear retires them.
   await Promise.all(
     ids.map(async (id) => {
+      if (covers[id]) return;
       try {
-        const url = await readCoverBounded(ctx, id);
-        if (url) covers[id] = url;
+        const value = (await raceTimeout(
+          ctx,
+          awaitOperation(ctx.io.readValue(legacyCoverKey(id))),
+          COVER_LOOKUP_BUDGET_MS,
+        )) as JsonValue;
+        if (typeof value === 'string' && value) covers[id] = value;
       } catch (error) {
         // Missing covers simply keep the placeholder art.
       }
@@ -867,29 +1062,36 @@ export async function queueCoverForTrack(song: SongInit, cover: string): Promise
 async function coverForTrack(song: SongInit): Promise<string> {
   const ctx = requireContext();
   try {
-    const cached = await readCoverBounded(ctx, song.id);
-    if (cached) return cached;
+    const stored = await raceTimeout(ctx, readSongCover(ctx, song.id), COVER_LOOKUP_BUDGET_MS);
+    if (stored) return stored;
   } catch (error) {
     return '';
   }
-  if (!settings.readEmbedded || !tagReader) return '';
-  const tags = await raceTimeout(
-    ctx,
-    tagReader.readTags(song.folderId, song.path),
-    COVER_BUDGET_MS,
-  );
-  // Keep parity with the enrichment cache: artwork beyond the store limit is
-  // not persisted, otherwise oversized images inflate the KV repeatedly.
-  const url =
-    tags && tags.coverData && tags.coverData.length <= COVER_STORE_LIMIT ? coverDataUrl(tags) : '';
-  if (url) {
-    try {
-      await writeCover(ctx, song.id, url);
-    } catch (error) {
-      // Cover caching is best-effort.
+  // Embedded art: read the tag now and persist for the next play.
+  if (settings.readEmbedded && tagReader) {
+    const tags = await raceTimeout(
+      ctx,
+      tagReader.readTags(song.folderId, song.path),
+      COVER_BUDGET_MS,
+    );
+    const url = embeddedCoverUrl(tags);
+    if (url && tags && tags.coverData) {
+      // Keep parity with the scan pass: artwork beyond the store limit is
+      // never persisted, otherwise oversized images inflate the KV.
+      queuePersistCover(ctx, song, coverHashOfBytes(tags.coverData), url);
+      return url;
     }
   }
-  return url;
+  // Online completion: the play fills the gap and persists the result, so
+  // the next play of this song never repeats the lookup.
+  if (settings.onlineFetch) {
+    const remote = await kugouCover(ctx, song.title, song.artist);
+    if (remote) {
+      queuePersistCover(ctx, song, coverHashOfText(remote), remote);
+      return remote;
+    }
+  }
+  return '';
 }
 
 async function appendTracks(tracks: QueueTrack[], placement: 'next' | 'last'): Promise<JsonValue> {
@@ -1138,6 +1340,7 @@ export async function activate(ctx: EchoPluginContext): Promise<void> {
   ctx.registerCommand('library.page', (commandArgs) => libraryPage(commandArgs));
   ctx.registerCommand('library.albums', (commandArgs) => libraryAlbums(commandArgs));
   ctx.registerCommand('library.covers', (commandArgs) => libraryCovers(commandArgs));
+  ctx.registerCommand('library.cache.clear', () => clearCachedArtwork());
   ctx.registerCommand('play', (commandArgs) => playCommand(commandArgs));
 
   ctx.ui.setState({ settingsRevision, scan: null, libraryRevision: 0 });

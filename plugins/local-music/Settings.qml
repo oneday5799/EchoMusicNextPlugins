@@ -150,6 +150,24 @@ ColumnLayout {
         run("library.settings.patch", args, null);
     }
 
+    /** Host-style destructive action: the danger button opens a confirmation
+     * dialog; the dialog body runs the clear command itself. */
+    function confirmClearCache() {
+        const operation = plugin.ui.showDialog({
+            component: "ClearCacheDialog.qml",
+            width: 460,
+            title: "确认清除缓存的封面和歌词？"
+        });
+        if (!operation)
+            return;
+        const handler = function () {
+            operation.completed.disconnect(handler);
+            if (operation.state === 3)
+                plugin.toast.danger(operation.errorMessage || "无法打开确认对话框");
+        };
+        operation.completed.connect(handler);
+    }
+
     Component.onCompleted: {
         const state = plugin.ui.state;
         if (state && typeof state.settingsRevision === "number")
@@ -350,6 +368,25 @@ ColumnLayout {
                 checked: settingsRoot.onlineFetchFlag
                 Accessible.name: "在线补全封面与歌词"
                 onToggled: settingsRoot.patchFlag("onlineFetch", checked)
+            }
+        }
+
+        EchoDivider {
+            Layout.fillWidth: true
+            lineColor: Theme.withAlpha(Theme.floatingText, 0.12)
+        }
+
+        SettingRow {
+            Layout.fillWidth: true
+            heading: "清除缓存的封面和歌词"
+            description: "移除扫描与播放时持久化的封面图片与在线歌词，曲库与设置不受影响"
+
+            EchoSoftButton {
+                text: "立即清除"
+                danger: true
+                enabled: !settingsRoot.saving
+                colors: Theme.floating
+                onClicked: settingsRoot.confirmClearCache()
             }
         }
     }

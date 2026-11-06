@@ -6,12 +6,14 @@ import { awaitOperation } from 'echo:plugin-sdk';
 import type {
   EchoPluginContext,
   FileReference,
+  JsonValue,
   KugouDto_lyric_Lyrics,
   KugouDto_search_lyric_Candidate,
   LyricDocument,
   LyricResolverContext,
 } from 'echo:plugin-sdk';
 import { raceTimeout } from './async.ts';
+import { coerceJsonArray } from './codec.ts';
 import { buildLrcFromKugou, pickLyricCandidate } from './lrc.ts';
 import { baseName, dirNameOf, parseSourceId, stripExtension } from './library.ts';
 import type { AudioTags } from './tags.ts';
@@ -20,6 +22,151 @@ const RESOLVER_DEADLINE_MS = 2200;
 const STEP_BUDGET_MS = 900;
 const LYRIC_READ_LIMIT = 512 * 1024;
 const LYRIC_CACHE_LIMIT = 200;
+/** Persisted-lyric KV reads and writes must not stretch the resolver deadline. */
+const LYRIC_PERSIST_BUDGET_MS = 600;
+
+// ── Persisted online lyrics ────────────────────────────────────────────────
+//
+// Kugou lyrics fetched while playing are stored per song id so later plays
+// never repeat the online round trip. Records keep the title/artist they
+// were matched with, so a retagged file re-resolves instead of serving a
+// stale match. `lyricIndex` enumerates the ids for cleanup and the clear
+// command (the KV store has no key listing).
+
+const LYRIC_INDEX_KEY = 'lyricIndex';
+const LYRIC_STORE_PREFIX = 'lyric:';
+
+function lyricStoreKey(songId: string): string {
+  return `${LYRIC_STORE_PREFIX}${songId}`;
+}
+
+interface PersistedLyricRecord extends Record<string, JsonValue> {
+  t: string;
+  a: string;
+  format: string;
+  content: string;
+  translation: string;
+  romanization: string;
+  source: string;
+}
+
+function parsePersistedLyric(value: JsonValue | undefined): PersistedLyricRecord | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const record = value as { [key: string]: JsonValue };
+  if (typeof record.content !== 'string' || !record.content) return null;
+  const text = (key: string): string => (typeof record[key] === 'string' ? record[key] : '');
+  return {
+    t: text('t'),
+    a: text('a'),
+    format: 'lrc',
+    content: record.content,
+    translation: text('translation'),
+    romanization: text('romanization'),
+    source: text('source') || '酷狗歌词',
+  };
+}
+
+/** Online lyric stored for this song on an earlier play, when the track
+ * identity still matches. */
+export async function readPersistedLyric(
+  context: EchoPluginContext,
+  songId: string,
+  title: string,
+  artist: string,
+): Promise<LyricDocument | null> {
+  try {
+    const value = (await awaitOperation(context.io.readValue(lyricStoreKey(songId)))) as JsonValue;
+    const record = parsePersistedLyric(value);
+    if (!record || record.t !== title || record.a !== artist) return null;
+    return {
+      format: 'lrc',
+      content: record.content,
+      translation: record.translation,
+      romanization: record.romanization,
+      source: record.source,
+    };
+  } catch (error) {
+    return null;
+  }
+}
+
+export async function persistLyric(
+  context: EchoPluginContext,
+  songId: string,
+  title: string,
+  artist: string,
+  document: LyricDocument,
+): Promise<void> {
+  if (!songId || !document.content) return;
+  const record: PersistedLyricRecord = {
+    t: title,
+    a: artist,
+    format: 'lrc',
+    content: document.content,
+    translation: document.translation || '',
+    romanization: document.romanization || '',
+    source: document.source || '酷狗歌词',
+  };
+  await awaitOperation(context.io.writeValue(lyricStoreKey(songId), record));
+  const indexValue = (await awaitOperation(context.io.readValue(LYRIC_INDEX_KEY))) as JsonValue;
+  const index: string[] = [];
+  const seen: { [songId: string]: boolean } = {};
+  for (const item of coerceJsonArray(indexValue)) {
+    if (typeof item === 'string' && item && !seen[item]) {
+      seen[item] = true;
+      index.push(item);
+    }
+  }
+  if (!seen[songId]) index.push(songId);
+  await awaitOperation(context.io.writeValue(LYRIC_INDEX_KEY, index));
+}
+
+/** Removes every stored lyric record; returns how many were dropped. */
+export async function clearLyricStore(context: EchoPluginContext): Promise<number> {
+  let count = 0;
+  try {
+    const indexValue = (await awaitOperation(context.io.readValue(LYRIC_INDEX_KEY))) as JsonValue;
+    for (const item of coerceJsonArray(indexValue)) {
+      if (typeof item !== 'string' || !item) continue;
+      try {
+        await awaitOperation(context.io.removeValue(lyricStoreKey(item)));
+        count += 1;
+      } catch (error) {
+        // Best-effort.
+      }
+    }
+    await awaitOperation(context.io.removeValue(LYRIC_INDEX_KEY));
+  } catch (error) {
+    // No index: nothing persisted.
+  }
+  return count;
+}
+
+/** Drops lyric records for songs that no longer exist after a rescan. */
+export async function reconcileLyricStore(
+  context: EchoPluginContext,
+  validIds: { has(songId: string): boolean },
+): Promise<void> {
+  try {
+    const indexValue = (await awaitOperation(context.io.readValue(LYRIC_INDEX_KEY))) as JsonValue;
+    const kept: string[] = [];
+    for (const item of coerceJsonArray(indexValue)) {
+      if (typeof item !== 'string' || !item) continue;
+      if (validIds.has(item)) {
+        kept.push(item);
+        continue;
+      }
+      try {
+        await awaitOperation(context.io.removeValue(lyricStoreKey(item)));
+      } catch (error) {
+        // Best-effort.
+      }
+    }
+    await awaitOperation(context.io.writeValue(LYRIC_INDEX_KEY, kept));
+  } catch (error) {
+    // No index: nothing to clean.
+  }
+}
 
 interface LyricEngineOptions {
   onlineFetch: () => boolean;
@@ -196,6 +343,8 @@ export function createLyricEngine(
     async resolve(resolverContext: LyricResolverContext): Promise<LyricDocument | null> {
       const target = targetOf(resolverContext);
       if (!target) return null;
+      const title = resolverContext.track.title ?? '';
+      const artist = resolverContext.track.artist ?? '';
       const deadline = Date.now() + RESOLVER_DEADLINE_MS;
       const local = await raceTimeout(
         context,
@@ -205,15 +354,36 @@ export function createLyricEngine(
       if (local) {
         return { format: 'lrc', content: local, source: '本地歌词' };
       }
+      // A lyric completed online on an earlier play: serve it instead of
+      // repeating the search round trip.
+      const persisted = await raceTimeout(
+        context,
+        readPersistedLyric(context, target.songId, title, artist),
+        LYRIC_PERSIST_BUDGET_MS,
+      );
+      if (persisted) return persisted;
       if (options.onlineFetch()) {
         const remote = await kugouLyric(
           context,
-          resolverContext.track.title ?? '',
-          resolverContext.track.artist ?? '',
+          title,
+          artist,
           resolverContext.durationMs,
           deadline,
         );
-        if (remote) return remote;
+        if (remote) {
+          // Best-effort persistence; the play itself never waits on the KV
+          // write beyond a small budget.
+          try {
+            await raceTimeout(
+              context,
+              persistLyric(context, target.songId, title, artist, remote),
+              LYRIC_PERSIST_BUDGET_MS,
+            );
+          } catch (error) {
+            // The lyric still plays; the next run simply fetches again.
+          }
+          return remote;
+        }
       }
       return null;
     },

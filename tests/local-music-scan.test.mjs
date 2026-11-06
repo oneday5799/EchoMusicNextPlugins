@@ -672,3 +672,428 @@ test('授权重发：重装后按路径自动认领文件夹', async () => {
     await second.deactivate();
   }
 });
+
+// ── Cover / lyric cache tests ──────────────────────────────────────────────
+//
+// The persisted cover store needs real ID3 bytes with APIC frames; the
+// default harness readBytes returns 8 zero bytes, which parseAudioTags
+// rejects, so these tests patch files.readBytes with per-path payloads.
+
+function asciiBytes(text) {
+  const out = new Uint8Array(text.length);
+  for (let i = 0; i < text.length; i++) out[i] = text.charCodeAt(i) & 0xff;
+  return out;
+}
+
+/** Deterministic pseudo-PNG payload; the exact bytes matter for hashing. */
+function artBytes(seed, length) {
+  const out = new Uint8Array(length);
+  for (let i = 0; i < length; i++) out[i] = (seed + i * 7) & 0xff;
+  out[0] = 0x89;
+  out[1] = 0x50;
+  out[2] = 0x4e;
+  out[3] = 0x47;
+  return out;
+}
+
+function id3Frame(id, payload) {
+  const head = new Uint8Array(10);
+  for (let i = 0; i < 4; i++) head[i] = id.charCodeAt(i);
+  head[4] = (payload.length >>> 24) & 0xff;
+  head[5] = (payload.length >>> 16) & 0xff;
+  head[6] = (payload.length >>> 8) & 0xff;
+  head[7] = payload.length & 0xff;
+  const out = new Uint8Array(10 + payload.length);
+  out.set(head, 0);
+  out.set(payload, 10);
+  return out;
+}
+
+function id3Header(bodyLength) {
+  const header = new Uint8Array(10);
+  header[0] = 0x49;
+  header[1] = 0x44;
+  header[2] = 0x33;
+  header[3] = 3;
+  header[6] = (bodyLength >>> 21) & 0x7f;
+  header[7] = (bodyLength >>> 14) & 0x7f;
+  header[8] = (bodyLength >>> 7) & 0x7f;
+  header[9] = bodyLength & 0x7f;
+  return header;
+}
+
+function concatBytes(chunks) {
+  const total = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return out;
+}
+
+/** ID3v2.3 APIC: encoding 0 (latin1), "image/png", type 3, empty description. */
+function mp3WithCover(art) {
+  const payload = concatBytes([
+    Uint8Array.of(0),
+    asciiBytes('image/png'),
+    Uint8Array.of(0),
+    Uint8Array.of(3),
+    Uint8Array.of(0),
+    art,
+  ]);
+  const frame = id3Frame('APIC', payload);
+  return concatBytes([id3Header(frame.length), frame]);
+}
+
+function artUrl(art) {
+  return `data:image/png;base64,${Buffer.from(art).toString('base64')}`;
+}
+
+/** Serves per-path audio bytes instead of the 8-byte stub. */
+function patchReadBytes(harness, bytesForPath) {
+  harness.files.readBytes = (ref) => {
+    const op = new FakeOperation();
+    const path = ref && typeof ref.path === 'string' ? ref.path : '';
+    const bytes = bytesForPath[path];
+    if (bytes) {
+      const copy = bytes.slice();
+      op.resolve({ bytes: copy.buffer, bytesRead: copy.byteLength, truncated: false });
+      return op;
+    }
+    op.resolve({ bytes: new ArrayBuffer(8), bytesRead: 8, truncated: false });
+    return op;
+  };
+}
+
+async function scanAndWait(harness) {
+  assert.deepEqual(await harness.commands.get('library.scan')({}), { started: true });
+  await waitFor(() => harness.published.some((entry) => entry.scan && entry.scan.done === true));
+}
+
+function splitEntry(entry) {
+  const parts = String(entry).split('|');
+  return { hash: parts[0] || '', size: Number(parts[1]) };
+}
+
+test('封面持久化：扫描写入逐曲条目并按内容去重', async () => {
+  const artA = artBytes(1, 64);
+  const artB = artBytes(2, 80);
+  const harness = await activateWith(
+    { 'a.mp3': { size: 100 }, 'b.mp3': { size: 100 }, 'c.mp3': { size: 120 } },
+    {},
+  );
+  const { commands, store } = harness;
+  patchReadBytes(harness, {
+    'a.mp3': mp3WithCover(artA),
+    'b.mp3': mp3WithCover(artA),
+    'c.mp3': mp3WithCover(artB),
+  });
+  try {
+    await commands.get('folders.add')({});
+    await scanAndWait(harness);
+    await pollInfo(commands, (value) => value && value.ready);
+
+    const page = await commands.get('library.page')({ offset: 0, limit: 10, sort: 'name' });
+    assert.equal(page.total, 3);
+    const [rowA, rowB, rowC] = page.songs;
+
+    const map = store.get('coverMap');
+    const a = splitEntry(map[rowA.id]);
+    const b = splitEntry(map[rowB.id]);
+    const c = splitEntry(map[rowC.id]);
+    assert.equal(a.size, 100);
+    assert.equal(c.size, 120);
+    assert.equal(a.hash, b.hash, '相同内嵌图共享同一内容哈希');
+    assert.notEqual(a.hash, c.hash);
+
+    const hashes = store.get('coverHashes');
+    assert.deepEqual([...hashes].sort(), [a.hash, c.hash].sort());
+    assert.equal(store.get(`coverimg:${a.hash}`), artUrl(artA));
+    assert.equal(store.get(`coverimg:${c.hash}`), artUrl(artB));
+
+    // Row covers serve straight from the persisted store.
+    const covers = await commands.get('library.covers')({ ids: [rowA.id, rowB.id, rowC.id] });
+    assert.equal(covers.covers[rowA.id], artUrl(artA));
+    assert.equal(covers.covers[rowB.id], artUrl(artA));
+    assert.equal(covers.covers[rowC.id], artUrl(artB));
+  } finally {
+    await harness.deactivate();
+  }
+});
+
+test('重扫对账：不变保留、变更更新、删除清理孤儿与遗留数据', async () => {
+  const artA = artBytes(1, 64);
+  const artB = artBytes(2, 80);
+  const artB2 = artBytes(3, 96);
+  const store = new Map();
+  const first = await activateWith(
+    { 'a.mp3': { size: 100 }, 'b.mp3': { size: 100 }, 'c.mp3': { size: 120 } },
+    {},
+    store,
+  );
+  patchReadBytes(first, {
+    'a.mp3': mp3WithCover(artA),
+    'b.mp3': mp3WithCover(artA),
+    'c.mp3': mp3WithCover(artB),
+  });
+  let rowA;
+  let rowB;
+  let rowC;
+  let before;
+  try {
+    await first.commands.get('folders.add')({});
+    await scanAndWait(first);
+    const page = await first.commands.get('library.page')({ offset: 0, limit: 10, sort: 'name' });
+    [rowA, rowB, rowC] = page.songs;
+    before = store.get('coverMap');
+    assert.ok(before[rowA.id] && before[rowB.id] && before[rowC.id]);
+
+    // Leftovers an old plugin version may have written, plus a lyric that is
+    // about to lose its song.
+    store.set(`cover:${rowA.id}`, 'data:image/jpeg;base64,bGVnYWN5');
+    store.set('coverIndex', [rowA.id]);
+    store.set(`lyric:${rowA.id}`, {
+      t: 'a',
+      a: '',
+      format: 'lrc',
+      content: '[00:01.00]旧的歌词',
+      translation: '',
+      romanization: '',
+      source: '酷狗歌词',
+    });
+    store.set(`lyric:${rowC.id}`, {
+      t: 'c',
+      a: '',
+      format: 'lrc',
+      content: '[00:01.00]保留的歌词',
+      translation: '',
+      romanization: '',
+      source: '酷狗歌词',
+    });
+    store.set('lyricIndex', [rowA.id, rowC.id]);
+  } finally {
+    await first.deactivate();
+  }
+
+  // Session 2: a.mp3 removed, c.mp3 rewritten (size and art both change).
+  const second = await activateWith({ 'b.mp3': { size: 100 }, 'c.mp3': { size: 960 } }, {}, store);
+  patchReadBytes(second, { 'c.mp3': mp3WithCover(artB2) });
+  try {
+    await scanAndWait(second);
+
+    const map = store.get('coverMap');
+    assert.deepEqual(Object.keys(map).sort(), [rowB.id, rowC.id].sort(), '被删除歌曲的条目应移除');
+    assert.equal(map[rowB.id], before[rowB.id], '尺寸未变的曲目保留原条目');
+    const hashA = splitEntry(before[rowA.id]).hash;
+    const hashB = splitEntry(before[rowC.id]).hash;
+    const c = splitEntry(map[rowC.id]);
+    assert.equal(c.size, 960, '尺寸变更后条目跟随新大小');
+    assert.notEqual(c.hash, hashB, '封面变更后换用新内容哈希');
+
+    const hashes = store.get('coverHashes');
+    assert.deepEqual([...hashes].sort(), [hashA, c.hash].sort());
+    assert.equal(store.has(`coverimg:${hashB}`), false, '无引用的旧图应被回收');
+    assert.equal(store.get(`coverimg:${hashA}`), artUrl(artA), '仍被 b 引用的图保留');
+    assert.equal(store.get(`coverimg:${c.hash}`), artUrl(artB2));
+
+    assert.equal(store.has(`cover:${rowA.id}`), false, '遗留逐曲封面应清理');
+    assert.equal(store.has('coverIndex'), false, '遗留封面索引应清理');
+
+    assert.equal(store.has(`lyric:${rowA.id}`), false, '已删除歌曲的歌词应清理');
+    assert.equal(store.has(`lyric:${rowC.id}`), true, '仍存在歌曲的歌词保留');
+    assert.deepEqual(store.get('lyricIndex'), [rowC.id]);
+  } finally {
+    await second.deactivate();
+  }
+});
+
+test('播放补全：内嵌封面在播放时持久化', async () => {
+  const art = artBytes(5, 72);
+  const store = new Map();
+  const harness = await activateWith({ 'a.mp3': { size: 100 } }, {}, store);
+  const { commands, playlistCalls } = harness;
+  patchReadBytes(harness, { 'a.mp3': mp3WithCover(art) });
+  try {
+    await commands.get('folders.add')({});
+    // 读取内嵌关闭时扫描：曲库与封面缓存都不应出现封面。
+    await commands.get('library.settings.patch')({ readEmbedded: false });
+    await scanAndWait(harness);
+    assert.deepEqual(store.get('coverMap'), {});
+    assert.deepEqual(store.get('coverHashes'), []);
+
+    const page = await commands.get('library.page')({ offset: 0, limit: 10, sort: 'name' });
+    const row = page.songs[0];
+
+    // 重新开启内嵌读取后播放：封面即时补全并持久化。
+    await commands.get('library.settings.patch')({ readEmbedded: true });
+    playlistCalls.length = 0;
+    const play = await commands.get('play')({
+      mode: 'now',
+      keyword: '',
+      folderId: '',
+      album: '',
+      sort: 'name',
+      index: 0,
+    });
+    assert.equal(play.ok, true);
+    assert.equal(playlistCalls[0].tracks[0].cover, artUrl(art), '播放载荷应带补全的封面');
+
+    await waitFor(() => {
+      const map = store.get('coverMap');
+      return map && Object.keys(map).length === 1;
+    });
+    const entry = splitEntry(store.get('coverMap')[row.id]);
+    assert.equal(entry.size, 100);
+    assert.equal(store.get(`coverimg:${entry.hash}`), artUrl(art));
+    assert.ok(store.get('coverHashes').includes(entry.hash));
+  } finally {
+    await harness.deactivate();
+  }
+});
+
+test('播放补全：在线封面持久化后不再重复请求', async () => {
+  const remote = 'https://cdn.example.com/cover.jpg';
+  const store = new Map();
+  const harness = await activateWith({ 'a.mp3': { size: 100 } }, {}, store);
+  const { commands, playlistCalls } = harness;
+  let searches = 0;
+  harness.ctx.kugou = {
+    request(kind, params) {
+      const op = new FakeOperation();
+      if (kind === 'search') {
+        searches += 1;
+        op.resolve({ kind: 'songs', page: { items: [{ id: 'k1', cover_url: remote }] } });
+      } else {
+        op.reject(`unexpected kugou kind: ${kind}`);
+      }
+      return op;
+    },
+  };
+  try {
+    await commands.get('folders.add')({});
+    // 在线补全未开启：扫描与播放都不应请求 kugou。
+    await scanAndWait(harness);
+    assert.equal(searches, 0);
+    assert.deepEqual(store.get('coverMap'), {});
+
+    const page = await commands.get('library.page')({ offset: 0, limit: 10, sort: 'name' });
+    const row = page.songs[0];
+
+    const playArgs = { mode: 'now', keyword: '', folderId: '', album: '', sort: 'name', index: 0 };
+    playlistCalls.length = 0;
+    await commands.get('play')(playArgs);
+    assert.equal(searches, 0, '在线补全未开启时播放不请求 kugou');
+    assert.equal(playlistCalls[0].tracks[0].cover, undefined);
+
+    await commands.get('library.settings.patch')({ onlineFetch: true });
+    playlistCalls.length = 0;
+    await commands.get('play')(playArgs);
+    assert.equal(searches, 1, '开启后第一次播放请求一次 kugou');
+    assert.equal(playlistCalls[0].tracks[0].cover, remote);
+
+    await waitFor(() => {
+      const map = store.get('coverMap');
+      return map && Object.keys(map).length === 1;
+    });
+    const hash = splitEntry(store.get('coverMap')[row.id]).hash;
+    assert.equal(store.get(`coverimg:${hash}`), remote);
+
+    playlistCalls.length = 0;
+    await commands.get('play')(playArgs);
+    assert.equal(searches, 1, '持久化后第二次播放不再请求 kugou');
+    assert.equal(playlistCalls[0].tracks[0].cover, remote);
+  } finally {
+    await harness.deactivate();
+  }
+});
+
+test('歌词持久化与清除命令', async () => {
+  const remote = 'https://cdn.example.com/a.jpg';
+  const store = new Map();
+  const harness = await activateWith({ 'a.mp3': { size: 100 } }, {}, store);
+  const { commands, resolvers } = harness;
+  const calls = { search: 0, candidates: 0, lyric: 0 };
+  harness.ctx.kugou = {
+    request(kind, params) {
+      const op = new FakeOperation();
+      if (kind === 'search') {
+        calls.search += 1;
+        op.resolve({
+          kind: 'songs',
+          page: { items: [{ id: 'k1', cover_url: remote, duration_ms: 180000 }] },
+        });
+      } else if (kind === 'lyricCandidatesByKeywords') {
+        calls.candidates += 1;
+        op.resolve([
+          { source_id: 's1', access_key: 'k1', word_timed: true, scrollable: true, score: 9 },
+        ]);
+      } else if (kind === 'lyric') {
+        calls.lyric += 1;
+        op.resolve({ lines: [{ text: '你好', start_ms: 1000, translation: 'hello' }] });
+      } else {
+        op.reject(`unexpected kugou kind: ${kind}`);
+      }
+      return op;
+    },
+  };
+  try {
+    await commands.get('folders.add')({});
+    await commands.get('library.settings.patch')({ onlineFetch: true });
+    await scanAndWait(harness);
+    // 扫描阶段的专辑代表回退把在线封面持久化了。
+    const page = await commands.get('library.page')({ offset: 0, limit: 10, sort: 'name' });
+    const row = page.songs[0];
+    const coverHash = splitEntry(store.get('coverMap')[row.id]).hash;
+    assert.equal(store.get(`coverimg:${coverHash}`), remote);
+
+    const resolver = resolvers.lyrics[0];
+    const track = {
+      id: row.id,
+      sourceId: row.sourceId,
+      title: 'a',
+      artist: '',
+      data: { p: 'a.mp3', f: 'g1', s: 100 },
+    };
+    const doc = await resolver.resolve({ track, durationMs: 180000 });
+    assert.equal(doc.format, 'lrc');
+    assert.equal(doc.content, '[00:01.00]你好');
+    assert.equal(doc.translation, '[00:01.00]hello');
+    assert.equal(doc.source, '酷狗歌词');
+
+    const record = store.get(`lyric:${row.id}`);
+    assert.equal(record.t, 'a');
+    assert.equal(record.a, '');
+    assert.equal(record.content, doc.content);
+    assert.deepEqual(store.get('lyricIndex'), [row.id]);
+
+    // 复用：第二次解析命中持久化缓存，不重复请求在线。
+    const again = await resolver.resolve({ track, durationMs: 180000 });
+    assert.equal(again.content, doc.content);
+    assert.equal(calls.candidates, 1);
+    assert.equal(calls.lyric, 1);
+
+    // 标题/歌手身份不符：重新在线匹配并覆盖记录。
+    const retagged = await resolver.resolve({
+      track: { ...track, title: '别的歌' },
+      durationMs: 180000,
+    });
+    assert.equal(retagged.content, doc.content);
+    assert.equal(calls.lyric, 2);
+    assert.equal(store.get(`lyric:${row.id}`).t, '别的歌');
+
+    // 清除命令：封面与歌词全部移除，曲库设置不动。
+    const cleared = await commands.get('library.cache.clear')({});
+    assert.deepEqual(cleared, { ok: true, covers: 2, lyrics: 1 });
+    assert.equal(store.has('coverMap'), false);
+    assert.equal(store.has('coverHashes'), false);
+    assert.equal(store.has(`coverimg:${coverHash}`), false);
+    assert.equal(store.has('lyricIndex'), false);
+    assert.equal(store.has(`lyric:${row.id}`), false);
+    const settings = store.get('settings');
+    assert.equal(settings.folders.length, 1, '清除不应影响曲库设置');
+  } finally {
+    await harness.deactivate();
+  }
+});
