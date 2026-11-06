@@ -1046,6 +1046,23 @@ async function libraryPage(args: Record<string, JsonValue>): Promise<JsonValue> 
   };
 }
 
+/** Index of one song inside the current sorted/filtered view, so the page
+ * can locate a playing row that pagination has not loaded yet. */
+async function libraryLocate(args: Record<string, JsonValue>): Promise<JsonValue> {
+  if (!libraryReady) return { ready: false, index: -1, total: 0 };
+  const id = argString(args, 'id');
+  if (!id) return { ready: true, index: -1, total: 0 };
+  const view = collectionView(args);
+  let index = -1;
+  for (let i = 0; i < view.length; i += 1) {
+    if (view[i].id === id) {
+      index = i;
+      break;
+    }
+  }
+  return { ready: true, index, total: view.length };
+}
+
 async function libraryAlbums(args: Record<string, JsonValue>): Promise<JsonValue> {
   if (!libraryReady) return { ready: false, total: 0, offset: 0, limit: 0, albums: [] };
   const ctx = requireContext();
@@ -1480,6 +1497,7 @@ export async function activate(ctx: EchoPluginContext): Promise<void> {
   ctx.registerCommand('library.scan', () => startScanJob(requireContext()));
   ctx.registerCommand('library.abort', () => stopScan());
   ctx.registerCommand('library.page', (commandArgs) => libraryPage(commandArgs));
+  ctx.registerCommand('library.locate', (commandArgs) => libraryLocate(commandArgs));
   ctx.registerCommand('library.albums', (commandArgs) => libraryAlbums(commandArgs));
   ctx.registerCommand('library.covers', (commandArgs) => libraryCovers(commandArgs));
   ctx.registerCommand('library.cache.clear', () => clearCachedArtwork());

@@ -562,15 +562,76 @@ Item {
         songMenu.popup(local.x, local.y);
     }
 
+    /** Locate the playing row. The fast path scans the loaded rows; songs
+     * past the loaded pages ask the backend for their index in the current
+     * sort/filter view and append pages until the row exists. */
+    property bool locateLoading: false
+
     function locateCurrent() {
-        if (!libraryReady || currentTrackId.length === 0)
+        if (!libraryReady || locateLoading || loadingMore)
+            return;
+        const trackId = root.currentTrackId;
+        if (trackId.length === 0)
             return;
         for (let i = 0; i < pageRows.length; i++) {
-            if (pageRows[i].resourceId === currentTrackId) {
+            if (pageRows[i].resourceId === trackId) {
                 EchoListPositioning.positionIfNeeded(songList, i, ListView.Center, viewport);
                 return;
             }
         }
+        const epoch = pageEpoch;
+        locateLoading = true;
+        run("library.locate", {
+            id: trackId,
+            keyword: keyword.trim(),
+            folderId: folderFilter,
+            album: selectedAlbum,
+            sort: sortKey,
+            sortDir: sortDirection
+        }, function (result) {
+            if (epoch !== pageEpoch) {
+                locateLoading = false;
+                return;
+            }
+            const index = result && typeof result.index === "number" ? result.index : -1;
+            if (index < 0) {
+                locateLoading = false;
+                plugin.toast.info("当前播放的歌曲不在列表中");
+                return;
+            }
+            locateFillTo(index, epoch);
+        });
+    }
+
+    /** Append pages (bounded fetches, same view args as loadMore) until the
+     * located row is loaded, then center it. */
+    function locateFillTo(index, epoch) {
+        if (pageRows.length > index || pageRows.length >= songTotal) {
+            EchoListPositioning.positionIfNeeded(songList, Math.min(index, pageRows.length - 1), ListView.Center, viewport);
+            locateLoading = false;
+            return;
+        }
+        run("library.page", {
+            offset: pageRows.length,
+            limit: Math.min(500, index - pageRows.length + 100),
+            keyword: keyword.trim(),
+            folderId: folderFilter,
+            album: selectedAlbum,
+            sort: sortKey,
+            sortDir: sortDirection
+        }, function (result) {
+            if (epoch !== pageEpoch) {
+                locateLoading = false;
+                return;
+            }
+            if (!result || !result.ready) {
+                locateLoading = false;
+                return;
+            }
+            songTotal = result.total || 0;
+            appendSongRows((result.songs || []).map(rowModel));
+            locateFillTo(index, epoch);
+        });
     }
 
     function startScan() {

@@ -494,6 +494,25 @@ test('端到端：添加文件夹 → 扫描 → 页命令 → 播放与音源�
     });
     assert.equal(folderFiltered.total, 2);
 
+    // Locate: index of one song inside the sorted/filtered view, -1 when
+    // the id is unknown or filtered out.
+    const located = await commands.get('library.locate')({ id: mp3Row.id, sort: 'name' });
+    assert.equal(located.ready, true);
+    assert.equal(located.total, 2);
+    assert.ok(located.index >= 0 && located.index < 2);
+    assert.equal(
+      (await commands.get('library.locate')({ id: 'missing-id', sort: 'name' })).index,
+      -1,
+    );
+    assert.equal(
+      (await commands.get('library.locate')({ id: mp3Row.id, keyword: '标签' })).index,
+      0,
+    );
+    assert.equal(
+      (await commands.get('library.locate')({ id: flacRow.id, keyword: '标签' })).index,
+      -1,
+    );
+
     playlistCalls.length = 0;
     const play = await commands.get('play')({
       mode: 'now',
