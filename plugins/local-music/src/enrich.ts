@@ -20,7 +20,10 @@ import { coverDataUrl, parseAudioTags, tagReadTarget, type AudioTags } from './t
 const HEAD_PROBE_BYTES = 256 * 1024;
 const TAG_REREAD_MARGIN = 64 * 1024;
 const MAX_TAG_READ = 4 * 1024 * 1024;
-const FOLDER_COVER_LIMIT = 1024 * 1024;
+/** Folder images above this are not used. Same math as COVER_STORE_LIMIT:
+ * the data URL (×4/3) must stay far under the KV's 1 MiB per-value cap —
+ * 600 KB of image becomes an ~800 KB value. */
+const FOLDER_COVER_LIMIT = 600 * 1024;
 const METADATA_TIMEOUT_MS = 10000;
 const KUGOU_TIMEOUT_MS = 2500;
 /** Embedded art above this is not persisted. The KV caps a single value at
@@ -189,7 +192,14 @@ export async function writeCoverImage(
     // Claim the slot before the await: the scan pool runs concurrently and
     // two workers carrying identical artwork must not both push the hash.
     store.hashes.push(hash);
-    await awaitOperation(context.io.writeValue(coverImageKey(hash), url));
+    try {
+      await awaitOperation(context.io.writeValue(coverImageKey(hash), url));
+    } catch (error) {
+      // Roll the claim back: a dangling hash with no coverimg value behind
+      // it would make every rescan skip the songs that reference it.
+      store.hashes = store.hashes.filter((existing) => existing !== hash);
+      throw error;
+    }
   }
 }
 
@@ -381,15 +391,14 @@ export function createTagReader(
         const ref = refFor(folderId);
         if (!ref) return null;
         const bytes = await readTagBytes(context, { ...ref, path });
-        if (!bytes) {
-          bound(key, null);
-          return null;
-        }
+        if (!bytes) return null;
         const tags = parseAudioTags(bytes);
+        // Only a genuine parse result is cached — a failed or empty read
+        // may be a transient io hiccup, and caching null would pin it for
+        // the session (play-time lookups would never retry).
         bound(key, tags);
         return tags;
       } catch (error) {
-        bound(key, null);
         return null;
       } finally {
         inflight.delete(key);

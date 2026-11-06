@@ -36,6 +36,21 @@ const LYRIC_PERSIST_BUDGET_MS = 600;
 const LYRIC_INDEX_KEY = 'lyricIndex';
 const LYRIC_STORE_PREFIX = 'lyric:';
 
+// The lyric index is a read-modify-write cycle on one KV value: two songs
+// persisting concurrently (playback resolution is not serialized) would
+// both read the index and the second write would clobber the first, leaving
+// the loser's record orphaned. A task chain serializes the cycles.
+let lyricStoreChain: Promise<unknown> = Promise.resolve();
+
+function queueLyricStoreTask<T>(task: () => Promise<T>): Promise<T> {
+  const next = lyricStoreChain.then(task, task);
+  lyricStoreChain = next.then(
+    () => undefined,
+    () => undefined,
+  );
+  return next;
+}
+
 function lyricStoreKey(songId: string): string {
   return `${LYRIC_STORE_PREFIX}${songId}`;
 }
@@ -108,38 +123,42 @@ export async function persistLyric(
     source: document.source || '酷狗歌词',
   };
   await awaitOperation(context.io.writeValue(lyricStoreKey(songId), record));
-  const indexValue = (await awaitOperation(context.io.readValue(LYRIC_INDEX_KEY))) as JsonValue;
-  const index: string[] = [];
-  const seen: { [songId: string]: boolean } = {};
-  for (const item of coerceJsonArray(indexValue)) {
-    if (typeof item === 'string' && item && !seen[item]) {
-      seen[item] = true;
-      index.push(item);
+  await queueLyricStoreTask(async () => {
+    const indexValue = (await awaitOperation(context.io.readValue(LYRIC_INDEX_KEY))) as JsonValue;
+    const index: string[] = [];
+    const seen: { [songId: string]: boolean } = {};
+    for (const item of coerceJsonArray(indexValue)) {
+      if (typeof item === 'string' && item && !seen[item]) {
+        seen[item] = true;
+        index.push(item);
+      }
     }
-  }
-  if (!seen[songId]) index.push(songId);
-  await awaitOperation(context.io.writeValue(LYRIC_INDEX_KEY, index));
+    if (!seen[songId]) index.push(songId);
+    await awaitOperation(context.io.writeValue(LYRIC_INDEX_KEY, index));
+  });
 }
 
 /** Removes every stored lyric record; returns how many were dropped. */
 export async function clearLyricStore(context: EchoPluginContext): Promise<number> {
-  let count = 0;
-  try {
-    const indexValue = (await awaitOperation(context.io.readValue(LYRIC_INDEX_KEY))) as JsonValue;
-    for (const item of coerceJsonArray(indexValue)) {
-      if (typeof item !== 'string' || !item) continue;
-      try {
-        await awaitOperation(context.io.removeValue(lyricStoreKey(item)));
-        count += 1;
-      } catch (error) {
-        // Best-effort.
+  return queueLyricStoreTask(async () => {
+    let count = 0;
+    try {
+      const indexValue = (await awaitOperation(context.io.readValue(LYRIC_INDEX_KEY))) as JsonValue;
+      for (const item of coerceJsonArray(indexValue)) {
+        if (typeof item !== 'string' || !item) continue;
+        try {
+          await awaitOperation(context.io.removeValue(lyricStoreKey(item)));
+          count += 1;
+        } catch (error) {
+          // Best-effort.
+        }
       }
+      await awaitOperation(context.io.removeValue(LYRIC_INDEX_KEY));
+    } catch (error) {
+      // No index: nothing persisted.
     }
-    await awaitOperation(context.io.removeValue(LYRIC_INDEX_KEY));
-  } catch (error) {
-    // No index: nothing persisted.
-  }
-  return count;
+    return count;
+  });
 }
 
 /** Drops lyric records for songs that no longer exist after a rescan. */
@@ -147,25 +166,27 @@ export async function reconcileLyricStore(
   context: EchoPluginContext,
   validIds: { has(songId: string): boolean },
 ): Promise<void> {
-  try {
-    const indexValue = (await awaitOperation(context.io.readValue(LYRIC_INDEX_KEY))) as JsonValue;
-    const kept: string[] = [];
-    for (const item of coerceJsonArray(indexValue)) {
-      if (typeof item !== 'string' || !item) continue;
-      if (validIds.has(item)) {
-        kept.push(item);
-        continue;
+  await queueLyricStoreTask(async () => {
+    try {
+      const indexValue = (await awaitOperation(context.io.readValue(LYRIC_INDEX_KEY))) as JsonValue;
+      const kept: string[] = [];
+      for (const item of coerceJsonArray(indexValue)) {
+        if (typeof item !== 'string' || !item) continue;
+        if (validIds.has(item)) {
+          kept.push(item);
+          continue;
+        }
+        try {
+          await awaitOperation(context.io.removeValue(lyricStoreKey(item)));
+        } catch (error) {
+          // Best-effort.
+        }
       }
-      try {
-        await awaitOperation(context.io.removeValue(lyricStoreKey(item)));
-      } catch (error) {
-        // Best-effort.
-      }
+      await awaitOperation(context.io.writeValue(LYRIC_INDEX_KEY, kept));
+    } catch (error) {
+      // No index: nothing to clean.
     }
-    await awaitOperation(context.io.writeValue(LYRIC_INDEX_KEY, kept));
-  } catch (error) {
-    // No index: nothing to clean.
-  }
+  });
 }
 
 interface LyricEngineOptions {

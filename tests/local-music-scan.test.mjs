@@ -1088,7 +1088,9 @@ test('暖启动封面补全：缓存就绪后无需重扫', async () => {
     const page = await second.commands.get('library.page')({ offset: 0, limit: 10 });
     const covers = await second.commands.get('library.covers')({ ids: [page.songs[0].id] });
     assert.equal(covers.covers[page.songs[0].id], artUrl(artA));
-    assert.equal(second.store.get('__diag').stage, 'warm');
+    // The old `__diag` snapshot was removed with the cover investigation;
+    // the coverMap above is the observable outcome of the backfill.
+    assert.equal(second.store.has('__diag'), false);
   } finally {
     await second.deactivate();
   }

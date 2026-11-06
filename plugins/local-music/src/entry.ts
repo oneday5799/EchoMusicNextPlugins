@@ -55,7 +55,6 @@ import {
   normalizeSortKey,
   parseSourceId,
   qualityForExtension,
-  SOURCE_ID_PREFIX,
   sortSongs,
   type SongInit,
   type SongSortKey,
@@ -88,6 +87,8 @@ const PAGE_LIMIT_MAX = 500;
 const ALBUM_PAGE_LIMIT_MAX = 120;
 const QUEUE_KEY = 'library';
 const QUEUE_TITLE = '本地音乐';
+/** Boot-time settings recovery: 2s then 6s intervals (~26s total window). */
+const SETTINGS_RECOVERY_ATTEMPTS = 5;
 
 interface SongRowJson extends Record<string, JsonValue> {
   id: string;
@@ -494,16 +495,6 @@ function queuePersistCover(
   queueCoverStoreTask(() => persistCoverEntry(ctx, song, hash, url)).catch(() => undefined);
 }
 
-/** Temporary diagnostic snapshot for the cover-cache investigation; the
- * activation cleanup drops the previous one, the latest pass overwrites it. */
-async function writeCoverDiag(ctx: EchoPluginContext, payload: JsonValue): Promise<void> {
-  try {
-    await awaitOperation(ctx.io.writeValue('__diag', payload));
-  } catch (error) {
-    // Diagnostics are best-effort.
-  }
-}
-
 let backfillTimer: { dispose(): void } | null = null;
 
 /** A cache-restored library has no cover pass behind it — the pass runs
@@ -539,14 +530,10 @@ async function runWarmCoverBackfill(ctx: EchoPluginContext): Promise<void> {
       resolveScanCovers(ctx, { shouldAbort }, { allowOnline: false }),
     );
     if (shouldAbort()) return;
-    await reconcileCoverStore(ctx, libraryById);
+    await queueCoverStoreTask(() => reconcileCoverStore(ctx, libraryById));
     if (stats.after > stats.before) notifyLibraryChanged();
-    void writeCoverDiag(ctx, { stage: 'warm', missing, ...stats });
   } catch (error) {
-    void writeCoverDiag(ctx, {
-      stage: 'warm-error',
-      message: error instanceof Error ? error.message : String(error),
-    });
+    // The backfill is opportunistic; the next scan retries the misses.
   }
 }
 
@@ -591,6 +578,9 @@ async function resolveScanCovers(
     repFolder: 0,
     repOnline: 0,
   };
+  // The body flushes the store itself on success; the finally-write is
+  // only for a throw (abort mid-pass) so partial results survive.
+  let settled = false;
   try {
     let total = librarySongs.length;
     let done = 0;
@@ -673,14 +663,17 @@ async function resolveScanCovers(
     }
     await writeCoverStore(ctx, store);
     stats.after = Object.keys(store.map).length;
+    settled = true;
     return stats;
   } finally {
-    // Keep partial results on abort; a broken write simply leaves the store
-    // as it was.
-    try {
-      await writeCoverStore(ctx, store);
-    } catch (error) {
-      // Best-effort.
+    if (!settled) {
+      // Keep partial results on abort; a broken write simply leaves the
+      // store as it was.
+      try {
+        await writeCoverStore(ctx, store);
+      } catch (error) {
+        // Best-effort.
+      }
     }
   }
 }
@@ -784,14 +777,10 @@ async function runScanJob(ctx: EchoPluginContext, job: ScanJob, epoch: number): 
           },
         }),
       );
-      await reconcileCoverStore(ctx, libraryById);
+      // Inside the store chain: a play-time completion flushed mid-reconcile
+      // would clobber this map rewrite.
+      await queueCoverStoreTask(() => reconcileCoverStore(ctx, libraryById));
       await reconcileLyricStore(ctx, libraryById);
-      void writeCoverDiag(ctx, {
-        stage: 'scan',
-        readEmbedded: settings.readEmbedded,
-        onlineFetch: settings.onlineFetch,
-        ...coverStats,
-      });
     }
     await persistLibraryCache(ctx, cacheTruncated);
     finishTask('completed', `扫描完成，共 ${librarySongs.length} 首`);
@@ -874,7 +863,7 @@ async function stopScan(): Promise<JsonValue> {
  * revision notification. */
 async function clearCachedArtwork(): Promise<JsonValue> {
   const ctx = requireContext();
-  const covers = await clearCoverStore(ctx);
+  const covers = await queueCoverStoreTask(() => clearCoverStore(ctx));
   const lyrics = await clearLyricStore(ctx);
   clearLyricCache();
   notifyLibraryChanged();
@@ -886,8 +875,10 @@ async function clearCachedArtwork(): Promise<JsonValue> {
 async function persistSettings(next: LocalSettings): Promise<void> {
   const ctx = requireContext();
   const foldersChanged = folderSignatureOf(settings) !== folderSignatureOf(next);
-  settings = next;
   await awaitOperation(ctx.io.writeValue(SETTINGS_KEY, settingsToValue(next)));
+  // Only commit to memory after the write succeeded: a failed persist must
+  // not leave disk and memory disagreeing about folders or flags.
+  settings = next;
   settingsRevision += 1;
   if (foldersChanged) {
     libraryReady = false;
@@ -1527,8 +1518,11 @@ export async function activate(ctx: EchoPluginContext): Promise<void> {
   // And the same belt-and-braces for the settings row: if the activation
   // read came back empty, retry shortly after boot so the sidebar and
   // the library page show the recovered state without any interaction.
+  // The chain is capped: an empty-but-valid store (fresh install) must not
+  // leave the plugin polling io every few seconds forever.
   if (settings.folders.length === 0) {
     const recover = (delayMs: number, attempt: number) => {
+      if (attempt > SETTINGS_RECOVERY_ATTEMPTS) return;
       ctx.setTimer(`settings-recheck-${attempt}`, delayMs, false, () => {
         void (async () => {
           const active = context;
@@ -1550,7 +1544,9 @@ export async function activate(ctx: EchoPluginContext): Promise<void> {
 export async function deactivate(): Promise<void> {
   scanEpoch += 1;
   if (scanJob) {
-    scanJob.aborted = true;
+    // requestScanAbort also cancels the in-flight listing/metadata operation;
+    // leaving it running would keep a host operation alive past deactivation.
+    requestScanAbort(scanJob);
     try {
       scanJob.task?.finish('aborted', { progress: { label: '插件已停用' } });
     } catch (error) {
