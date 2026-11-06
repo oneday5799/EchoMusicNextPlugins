@@ -12,12 +12,14 @@
 
 排查「点击添加文件夹后设置页显示 0 个文件夹、能扫描到歌曲、重启后全部消失」这一现象过程中，确认了三个宿主侧行为缺陷与一个插件生态约定问题：
 
-| 编号 | 问题                                                                                 | 严重度                          | 状态                             |
-| ---- | ------------------------------------------------------------------------------------ | ------------------------------- | -------------------------------- |
-| H1   | io 服务跨 FFI 交付的 JSON 数组丢失 `Array` 原型（JS 与 QML 双方向）                  | **高（数据类 API 全面受影响）** | 插件侧已兜底，建议宿主根修       |
-| H2   | 插件激活期 `io.readValue` / 授权账本首次读取存在“瞬态为空”窗口                       | 中                              | 插件侧已自愈，建议宿主根修       |
-| H3   | QML `plugin.executeCommand` 按命令名全局路由，跨插件同名命令互相抢答且**无任何告警** | 高（静默数据错接）              | 插件改名回避，建议宿主加冲突检测 |
-| E1   | 插件生态层面 `settings.get` 等通用命令名的使用约定缺失                               | 低                              | 文档/命名约定即可                |
+| 编号 | 问题                                                                                   | 严重度                          | 状态                             |
+| ---- | -------------------------------------------------------------------------------------- | ------------------------------- | -------------------------------- |
+| H1   | io 服务跨 FFI 交付的 JSON 数组丢失 `Array` 原型（JS 与 QML 双方向）                    | **高（数据类 API 全面受影响）** | 插件侧已兜底，建议宿主根修       |
+| H2   | 插件激活期 `io.readValue` / 授权账本首次读取存在“瞬态为空”窗口                         | 中                              | 插件侧已自愈，建议宿主根修       |
+| H3   | QML `plugin.executeCommand` 按命令名全局路由，跨插件同名命令互相抢答且**无任何告警**   | 高（静默数据错接）              | 插件改名回避，建议宿主加冲突检测 |
+| H4   | 队列曲目 `cover` 超过 16384 字符时整体拒收，错误信息不指明字段                         | 中                              | 插件侧已钳制，建议宿主改进       |
+| H5   | 队列入库重写 `sourceId`（追加 `<插件id>/` 前缀）后 resolver match 静默失配，无任何告警 | 中                              | 插件侧已兼容，建议宿主统一约定   |
+| E1   | 插件生态层面 `settings.get` 等通用命令名的使用约定缺失                                 | 低                              | 文档/命名约定即可                |
 
 ---
 
@@ -144,6 +146,79 @@ QML 方向：注册一个返回 `{ folders: [...] }` 的命令，在 QML 页 `pl
 
 ---
 
+## H4 队列曲目 `cover` 超 16384 字符时整体拒收，且错误不指明字段
+
+### 现象
+
+- 插件点击播放任意歌曲，报 `Error: Invalid queue, tracks or startIndex`，播放完全无法开始。
+- 该错误来自 `EchoPluginPlaylist::replace`（`PluginSdk/EchoPluginPlaylist.cpp`）的静态校验拒绝， bouquet 中所有有效负载形态（约 46 首、格式正确的字段）共用同一条错误，无法定位是哪个字段出错。
+
+### 证据（插件端梯式探针实测）
+
+插件在 `playlist.replace` 被拒后，用一次性队列 key + `startIndex=-1`（只入队不播放）把负载逐级切片重放，定位到：
+
+```
+A=fail                              ← 完整 46 首被拒
+single-field probes（第 1 首）全 ok ← {id, sourceId, title} 基座 + 单字段子集全部通过
+bad@4 covMax=808887@4 noCover=ok    ← 第 5 首的 cover 为 80.9 万字符，去掉后通过
+```
+
+- 第 5 首内嵌 600KB FLAC 封面图，插件把 `data:image/...;base64,` 全文作为 `track.cover` 提交；
+- 宿主校验在 `EchoPluginPlaylist::parse`（约 88 行）：`track.cover.size() > 16384 → return false`；
+- 同一批队列中其余 45 首的 cover 均正常，但整批因这一首被整体拒收。
+
+### 根因定位
+
+- 宿主 `PlaybackService::cover()` 直接取 `m_track.cover`，除 kugou 曲库的内嵌封面提取外没有其它面向插件队列封面的取道，插件只能把封面 art 塞进 `track.cover` 字符串；
+- 16384 字符上限对 remote URL 足够，但对内嵌 base64（常见 200KB–1MB 级封面）必然超限；
+- 超限后**整批 replace 拒收**而非裁剪/拒收该曲目，且 `Invalid queue, tracks or startIndex` 不指明哪个曲目/字段，插件只能盲猜。
+
+### 建议修复
+
+1. 超限时的错误信息细化：例如 `InvalidArgument: track[4].cover too large (808887 > 16384)`，并把校验结果带上曲目索引（宿主单点改动，成本极低）；
+2. 长期考虑封面临界策略：播放队列 art 可由 playback 侧查询 `EchoCoverRegistry` 的 fallback（插件运行时注册 resolver、按当前曲目返回 `data:image/...`，上限 1MB 已在 `EchoPluginCover::setFallback` 实现好），这样队列持久化体积不膨胀，内嵌封面也能全量展示；
+3. 若保留字符串通道，可考虑放宽 data URL 上限并对整队列 JSON 体积（4MB）统一设账。
+
+### 插件侧临时规避（已上线）
+
+`plugins/local-music/src/entry.ts`：
+
+- `QUEUE_COVER_LIMIT = 16000`（宿主上限留 384 字符余量），`queueCoverForTrack()` 在装配播放队列时超限封面**整体不提交**；
+- `coverForTrack()` 补上与 enrich 相同的 `COVER_STORE_LIMIT`（384KB 原始字节）判定，避免超限内嵌图反复写入 KV。
+
+---
+
+## H5 队列入库重写 sourceId 后 resolver match 静默失配
+
+### 现象
+
+- 插件队列播放开始后，宿主音源链完全跳过该插件的 resolver，最终报兜底错误「获取歌曲播放地址失败」，全程无 resolver 调用记录、无日志、无告警。
+- 排查期间插件在 resolver 两侧埋点后确认：`match` 收到的 `sourceId` 是 `local-music/local:b81f7da6…`，而插件持久化与队列提交的形态是 `local:b81f7da6…`。
+
+### 根因
+
+`EchoPluginPlaylist::parse`（`PluginSdk/EchoPluginPlaylist.cpp`）在队列入库时对不带 `<插件id>/` 前缀的 sourceId 做了重写：
+
+```cpp
+const auto prefix = m_scope.id() + "/";            // "local-music/"
+track.catalogMetadata["plugin_source"] =
+    source.startsWith(prefix) || dependency ? source : prefix + source;
+```
+
+之后 `PlaybackSourceRequest::extensionContext` 把重写后的 `plugin_source` 原样交给 resolver 的 `match`/`resolve`。**文档只描述了「曲库 hash 自定义曲目需要 capability」，没有把 `<插件id>/<资源id>` 的 sourceId 命名形态写成硬性约定**——插件按自己的自然形态（`scheme:scope:id`）提交，入库后与 resolver 侧看到的值不再一致，match 用前缀判断即静默失配。
+
+### 建议修复
+
+1. 把「sourceId 必须为 `<插件id>/<资源id>` 形态」写成 SDK 契约：在 `registerResolver` / `registerCommand` 文档、`check-*` 工具链中给出硬性校验；
+2. `EchoPluginPlaylist::parse` 对 sourceId 重写时产生 WARN 日志（当前完全静默）；
+3. 或者在 resolver 上下文中同时提供原始 sourceId 与重写后 sourceId（`sourceIdRaw`），避免两侧各写一套前缀处理。
+
+### 插件侧临时规避（已上线）
+
+`plugins/local-music/src/library.ts` 的 `parseSourceId` 兼容可选的 `<插件id>/` 前缀（`/^(?:[^/:]+\/)?(?=local:)/` 剥离），`entry.ts` 的 `matchLocalTrack` 同样接受带前缀与不带前缀两种形态。
+
+---
+
 ## E1 生态约定：通用命令名命名空间化
 
 - 本次事故的 H3 一半根因是三个插件都选了“通用度最高”的名字。建议在插件开发文档中明确：
@@ -155,17 +230,19 @@ QML 方向：注册一个返回 `{ folders: [...] }` 的命令，在 QML 页 `pl
 
 ## 排查过程时间线（摘要）
 
-| 时刻（本地） | 事件                                                                            | 关键证据                                                        |
-| ------------ | ------------------------------------------------------------------------------- | --------------------------------------------------------------- |
-| 07:15 会话   | 旧构建加载；用户报告添加后计数 0、能扫描                                        | 插件 runtime 目录与 KV 均正常写入                               |
-| 07:15        | 重装新构建（含两笔授权自愈修复）；用户添加 `3ea98a30…`、扫描 46 首 | KV `settings`/`library` 均正确持久化                            |
-| 07:45 重启   | 设置页 0、曲库空（用户观察）；日志无插件错误                                    | KV 数据仍在 → 数据未丢，读取链路存疑                            |
-| 08:01        | 用户重新添加（新 grant `acc5f819…`）                                            | 库 `library` 元数据变为新 id（id 每场会话变化，与 H2 竞态一致） |
-| 08:12        | 安装改名版 + 重启；报告仍丢                                                     | `settings` 落盘 `bded9075…`；激活读取仍空                       |
-| 09:06        | 安装持久化诊断版；`__diag2` 显示**激活读取已拿到完整数据但 `foldersLoaded: 0`** | 定位到归一化层的 `Array.isArray` 误判                           |
-| 09:18        | 类型指纹版：`foldersIsArray: false`、真数组还原后 `foldersLoaded: 1`            | **H1 实锤**                                                     |
-| 09:27+       | `coerceJsonArray` 全链路修复；toast 显示结果含完整 folders 但 QML 计数仍 0      | **H1/QML 方向实锤**                                             |
-| 最终         | QML `asArray` 兜底后全部正常：设置页 1 个文件夹、曲库 46 首热启动、重启持久     | 用户确认                                                        |
+| 时刻（本地） | 事件                                                                                                 | 关键证据                                                        |
+| ------------ | ---------------------------------------------------------------------------------------------------- | --------------------------------------------------------------- |
+| 07:15 会话   | 旧构建加载；用户报告添加后计数 0、能扫描                                                             | 插件 runtime 目录与 KV 均正常写入                               |
+| 07:15        | 重装新构建（含两笔授权自愈修复）；用户添加 `3ea98a30…`、扫描 46 首                                   | KV `settings`/`library` 均正确持久化                            |
+| 07:45 重启   | 设置页 0、曲库空（用户观察）；日志无插件错误                                                         | KV 数据仍在 → 数据未丢，读取链路存疑                            |
+| 08:01        | 用户重新添加（新 grant `acc5f819…`）                                                                 | 库 `library` 元数据变为新 id（id 每场会话变化，与 H2 竞态一致） |
+| 08:12        | 安装改名版 + 重启；报告仍丢                                                                          | `settings` 落盘 `bded9075…`；激活读取仍空                       |
+| 09:06        | 安装持久化诊断版；`__diag2` 显示**激活读取已拿到完整数据但 `foldersLoaded: 0`**                      | 定位到归一化层的 `Array.isArray` 误判                           |
+| 09:18        | 类型指纹版：`foldersIsArray: false`、真数组还原后 `foldersLoaded: 1`                                 | **H1 实锤**                                                     |
+| 09:27+       | `coerceJsonArray` 全链路修复；toast 显示结果含完整 folders 但 QML 计数仍 0                           | **H1/QML 方向实锤**                                             |
+| 最终         | QML `asArray` 兜底后全部正常：设置页 1 个文件夹、曲库 46 首热启动、重启持久                          | 用户确认                                                        |
+| 下午         | 播放报 `Invalid queue...`；探针梯三轮定位：单字段全过 → 二分 → `bad@4 covMax=808887@4 noCover=ok`    | **H4 实锤**（队列 cover 超限整批拒收）                          |
+| 下午         | 队列修复后播放报「获取歌曲播放地址失败」；resolver 两侧埋点发现 `match-skip sid=local-music/local:…` | **H5 实锤**（sourceId 入库重写 → match 静默失配）               |
 
 旁证：`coverIndex` 长期只剩 1 条、专辑封面清理失效，与 H1 同源（`cleanupCovers` 读回失败即提前返回）。
 
@@ -176,7 +253,9 @@ QML 方向：注册一个返回 `{ folders: [...] }` 的命令，在 QML 页 `pl
 1. **H1 io/操作结果数组原型丢失**——影响所有插件的所有数组型数据读写，建议尽快修，并补形状回归用例。
 2. **H3 命令名全局路由抢答**——静默数据错接，影响面是所有使用通用命令名的插件；建议注册期冲突检测 + 作用域路由。
 3. **H2 激活期读取竞态**——影响首体验（空页面/丢状态假象）；建议 ioutil 就绪前挂起 或激活延后。
-4. **E1 文档与工具链**——命名约定写成规范，`check-*` 增加重名检测。
+4. **H4 队列 cover 校验**——字段级错误信息（低改动量即可），长期考虑 playback 侧 fallback 注册播放封面。
+5. **H5 sourceId 命名约定**——SDK 契约补全 + 重写时 WARN，避免 resolver 静默失配。
+6. **E1 文档与工具链**——命名约定写成规范，`check-*` 增加重名检测。
 
 ## 插件仓库状态（2026-11-06）
 
