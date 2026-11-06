@@ -1106,51 +1106,85 @@ async function readImageBounded(ctx: EchoPluginContext, hash: string): Promise<s
 }
 
 /** Cover lookup for the song rows the page currently displays: one map read
- * for the whole page, then one read per distinct artwork hash. */
+ * for the whole page, then one read per distinct artwork hash.
+ *
+ * The result crosses the FFI as JSON, and a whole page of full-size data
+ * URLs can reach tens of megabytes — enough of a conversion spike to stall
+ * the host. The page therefore requests covers per visible batch; these
+ * caps are the backstop. `truncated` tells the page which requested ids
+ * were withheld so it can retry them instead of writing them off. */
+const COVER_RESULT_MAX_ITEMS = 32;
+const COVER_RESULT_MAX_CHARS = 4 * 1024 * 1024;
+
 async function libraryCovers(args: Record<string, JsonValue>): Promise<JsonValue> {
-  if (!libraryReady) return { covers: {} };
+  if (!libraryReady) return { covers: {}, truncated: false };
   const ctx = requireContext();
   const ids = argStringArray(args, 'ids');
   const covers: { [key: string]: JsonValue } = {};
+  let served = 0;
+  let chars = 0;
+  let truncated = false;
+  const fits = (): boolean => served < COVER_RESULT_MAX_ITEMS && chars < COVER_RESULT_MAX_CHARS;
   const store = await readStoreBounded(ctx);
+  const hashOfId: { [id: string]: string } = {};
   if (store) {
-    const images: { [hash: string]: string } = {};
     const hashes: string[] = [];
     for (const id of ids) {
       const hash = coverEntryHash(store.map[id]);
-      if (hash && !images[hash]) {
-        images[hash] = '';
-        hashes.push(hash);
+      if (hash) {
+        hashOfId[id] = hash;
+        if (hashes.indexOf(hash) < 0) hashes.push(hash);
       }
     }
-    await Promise.all(
-      hashes.map(async (hash) => {
-        images[hash] = await readImageBounded(ctx, hash);
-      }),
-    );
-    for (const id of ids) {
-      const url = images[coverEntryHash(store.map[id])];
-      if (url) covers[id] = url;
+    // Read images one by one as the response budget allows, assigning each
+    // to every requested song sharing that artwork. The JSON payload repeats
+    // the URL per id, so the budget counts assignments, not images.
+    for (const hash of hashes) {
+      if (!fits()) {
+        truncated = true;
+        break;
+      }
+      const url = await readImageBounded(ctx, hash);
+      if (!url) continue;
+      for (const id of ids) {
+        if (hashOfId[id] !== hash) continue;
+        if (!fits()) {
+          truncated = true;
+          break;
+        }
+        covers[id] = url;
+        served += 1;
+        chars += url.length;
+      }
+      if (truncated) break;
     }
   }
-  // Songs still missing fall back to the legacy per-song entries until the
-  // next scan or clear retires them.
-  await Promise.all(
-    ids.map(async (id) => {
-      if (covers[id]) return;
+  if (!truncated) {
+    // Songs still missing fall back to the legacy per-song entries until the
+    // next scan or clear retires them.
+    for (const id of ids) {
+      if (covers[id]) continue;
+      if (!fits()) {
+        truncated = true;
+        break;
+      }
       try {
         const value = (await raceTimeout(
           ctx,
           awaitOperation(ctx.io.readValue(legacyCoverKey(id))),
           COVER_LOOKUP_BUDGET_MS,
         )) as JsonValue;
-        if (typeof value === 'string' && value) covers[id] = value;
+        if (typeof value === 'string' && value && fits()) {
+          covers[id] = value;
+          served += 1;
+          chars += value.length;
+        }
       } catch (error) {
         // Missing covers simply keep the placeholder art.
       }
-    }),
-  );
-  return { covers };
+    }
+  }
+  return { covers, truncated };
 }
 
 // ── Playback ───────────────────────────────────────────────────────────────

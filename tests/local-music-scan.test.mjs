@@ -777,6 +777,37 @@ function splitEntry(entry) {
   return { hash: parts[0] || '', size: Number(parts[1]) };
 }
 
+test('封面命令：单次响应有数量上限并标记截断', async () => {
+  const art = artBytes(9, 64);
+  const tree = {};
+  for (let i = 0; i < 40; i += 1) tree[`${i}.mp3`] = { size: 100 + i };
+  const harness = await activateWith(tree, {});
+  const { commands, store } = harness;
+  const bytes = {};
+  for (let i = 0; i < 40; i += 1) bytes[`${i}.mp3`] = mp3WithCover(art);
+  patchReadBytes(harness, bytes);
+  try {
+    await commands.get('folders.add')({});
+    await scanAndWait(harness);
+    const page = await commands.get('library.page')({ offset: 0, limit: 100 });
+    assert.equal(page.total, 40);
+    const covers = await commands.get('library.covers')({ ids: page.songs.map((row) => row.id) });
+    assert.equal(Object.keys(covers.covers).length, 32, '单次响应最多 32 张');
+    assert.equal(covers.truncated, true, '截断应标记给调用方');
+    // A small batch fits comfortably and is not truncated.
+    const small = await commands.get('library.covers')({
+      ids: page.songs.slice(0, 8).map((row) => row.id),
+    });
+    assert.equal(Object.keys(small.covers).length, 8);
+    assert.equal(small.truncated, false);
+    assert.ok(store.get('coverMap'), '扫描仍按内容哈希去重');
+    assert.equal(Object.keys(store.get('coverMap')).length, 40);
+    assert.equal(store.get('coverHashes').length, 1);
+  } finally {
+    await harness.deactivate();
+  }
+});
+
 test('封面持久化：扫描写入逐曲条目并按内容去重', async () => {
   const artA = artBytes(1, 64);
   const artB = artBytes(2, 80);

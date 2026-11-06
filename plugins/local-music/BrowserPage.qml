@@ -240,9 +240,39 @@ Item {
         };
     }
 
-    function applyCovers(result) {
+    /** Cover delivery for song rows. Delegates request their own cover as
+     * they enter the view and the requests batch into small library.covers
+     * calls: a whole-page batch of full-size data URLs reaches tens of MB
+     * across the FFI and stalls the host, so a reply is bounded by the
+     * visible window, never by the page size. */
+    property var coverRequests: ({})
+    property var coverMisses: ({})
+    property bool coversInFlight: false
+    readonly property int coverBatchSize: 16
+
+    Timer {
+        id: coverBatchTimer
+        interval: 60
+        onTriggered: root.requestCoverBatch()
+    }
+
+    function applyCovers(result, requestedIds) {
         const covers = result && result.covers ? result.covers : {};
+        const truncated = !!(result && result.truncated);
         let changed = false;
+        for (let i = 0; i < requestedIds.length; i++) {
+            const id = requestedIds[i];
+            if (covers[id])
+                continue;
+            if (truncated) {
+                // The reply hit its payload cap; retry this id in a later
+                // batch instead of writing it off.
+                coverRequests[id] = true;
+            } else {
+                // No entry exists for this song; delegates stop re-requesting.
+                coverMisses[id] = true;
+            }
+        }
         const next = pageRows.map(function (entry) {
             const url = covers[entry.resourceId];
             if (!url || entry.coverUrl === url)
@@ -254,19 +284,49 @@ Item {
         });
         if (changed)
             pageRows = next;
+        if (Object.keys(coverRequests).length > 0 && !coverBatchTimer.running)
+            coverBatchTimer.restart();
     }
 
-    function fetchCovers(rows) {
-        const ids = rows.filter(function (entry) {
-            return entry.coverUrl.length === 0;
-        }).map(function (entry) {
-            return entry.resourceId;
-        });
+    function scheduleRowCover(id, currentUrl) {
+        if (!id || id.length === 0 || currentUrl.length > 0)
+            return;
+        if (coverMisses[id] || coverRequests[id])
+            return;
+        coverRequests[id] = true;
+        if (!coverBatchTimer.running)
+            coverBatchTimer.restart();
+    }
+
+    function requestCoverBatch() {
+        const ids = Object.keys(coverRequests);
         if (ids.length === 0)
             return;
-        run("library.covers", {
-            ids: ids
-        }, applyCovers);
+        if (coversInFlight) {
+            coverBatchTimer.restart();
+            return;
+        }
+        const batch = ids.slice(0, root.coverBatchSize);
+        for (let i = 0; i < batch.length; i++)
+            delete coverRequests[batch[i]];
+        coversInFlight = true;
+        // Hand-rolled instead of run(): a failed batch must settle quietly
+        // (no toast) and leave re-requesting to the delegates when they
+        // enter the view again.
+        const operation = plugin.executeCommand("library.covers", {
+            ids: batch
+        });
+        if (!operation) {
+            coversInFlight = false;
+            return;
+        }
+        const handler = function () {
+            operation.completed.disconnect(handler);
+            coversInFlight = false;
+            if (operation.state === 2)
+                applyCovers(operation.result, batch);
+        };
+        operation.completed.connect(handler);
     }
 
     function pageLoad() {
@@ -293,9 +353,7 @@ Item {
                 return;
             }
             songTotal = result.total || 0;
-            const rows = (result.songs || []).map(rowModel);
-            pageRows = pageRows.concat(rows);
-            fetchCovers(rows);
+            pageRows = pageRows.concat((result.songs || []).map(rowModel));
         });
     }
 
@@ -322,11 +380,27 @@ Item {
                 return;
             }
             songTotal = result.total || 0;
-            const rows = (result.songs || []).map(rowModel);
-            pageRows = pageRows.concat(rows);
-            fetchCovers(rows);
+            pageRows = pageRows.concat((result.songs || []).map(rowModel));
         });
     }
+
+    function albumRowsFrom(result) {
+        return (result.albums || []).map(function (album) {
+            return {
+                title: album.name,
+                artistText: "",
+                extraText: `${album.count} 首`,
+                coverUrl: album.cover || "",
+                durationText: "",
+                resourceId: album.name
+            };
+        });
+    }
+
+    /** Album cards carry their rep cover inline; a batch of 24 keeps the
+     * FFI payload of one reply bounded instead of shipping every album's
+     * artwork at once. */
+    readonly property int albumBatchSize: 24
 
     function albumsLoad() {
         if (!libraryReady)
@@ -335,7 +409,7 @@ Item {
         albumsLoading = true;
         run("library.albums", {
             offset: albumRows.length,
-            limit: 60,
+            limit: root.albumBatchSize,
             keyword: keyword.trim(),
             folderId: folderFilter,
             sort: sortKey,
@@ -351,17 +425,34 @@ Item {
                 return;
             }
             albumTotal = result.total || 0;
-            const rows = (result.albums || []).map(function (album) {
-                return {
-                    title: album.name,
-                    artistText: "",
-                    extraText: `${album.count} 首`,
-                    coverUrl: album.cover || "",
-                    durationText: "",
-                    resourceId: album.name
-                };
-            });
-            albumRows = albumRows.concat(rows);
+            albumRows = albumRows.concat(albumRowsFrom(result));
+        });
+    }
+
+    /** Grid scroll reached the end: fetch the next album batch. Appends keep
+     * the current epoch, like the song list's loadMore. */
+    function albumsAppend() {
+        if (!libraryReady || albumsLoading || !albumGridActive)
+            return;
+        if (albumRows.length >= albumTotal)
+            return;
+        const epoch = albumEpoch;
+        albumsLoading = true;
+        run("library.albums", {
+            offset: albumRows.length,
+            limit: root.albumBatchSize,
+            keyword: keyword.trim(),
+            folderId: folderFilter,
+            sort: sortKey,
+            sortDir: sortDirection
+        }, function (result) {
+            if (epoch !== albumEpoch)
+                return;
+            albumsLoading = false;
+            if (!result || !result.ready)
+                return;
+            albumTotal = result.total || 0;
+            albumRows = albumRows.concat(albumRowsFrom(result));
         });
     }
 
@@ -550,6 +641,11 @@ Item {
                 playing: root.plugin.player.playing
                 playbackLoading: root.plugin.player.loading
                 playbackAvailable: root.libraryReady
+                // Rows entering the view (created or reused out of the pool)
+                // ask for their own cover; the batch machinery dedupes.
+                Component.onCompleted: root.scheduleRowCover(resourceId, coverUrl)
+                onPooledChanged: if (!pooled)
+                    root.scheduleRowCover(resourceId, coverUrl)
                 // No favorite ledger for local files; leaving this false
                 // disables the heart instead of offering a dead toggle.
                 actionsAvailable: false
@@ -637,6 +733,9 @@ Item {
             bottomMargin: 48
             sourceModel: root.albumRows
             loading: root.albumsLoading && root.albumRows.length === 0
+            hasMore: root.albumGridActive && root.albumRows.length < root.albumTotal
+            loadingMore: root.albumsLoading
+            onLoadMoreRequested: root.albumsAppend()
             navigationAvailable: true
             onOpenRequested: name => root.selectedAlbum = name
         }
