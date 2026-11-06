@@ -972,9 +972,12 @@ Item {
                         counts: [root.songTotal, root.albumTotal]
                         currentIndex: root.viewTab
                         onPicked: index => {
-                            if (index === 1)
-                                root.selectedAlbum = "";
+                            // Any tab pick exits an album drill-in: the tabs
+                            // are top-level navigation, so returning to 歌曲
+                            // must restore the plain list and its title, not
+                            // stay filtered on the album.
                             root.viewTab = index;
+                            root.selectedAlbum = "";
                             root.resetView();
                         }
                     }
