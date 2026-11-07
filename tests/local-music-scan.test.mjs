@@ -600,10 +600,14 @@ test('设置命令：重命名、开关与移除文件夹', async () => {
     assert.equal(snapshot.folders[0].name, '我的音乐');
     assert.equal(snapshot.folders[0].path, 'C:/Music');
 
-    await commands.get('library.settings.patch')({ onlineFetch: true, readEmbedded: false });
+    await commands.get('library.settings.patch')({ onlineMode: 'scan', readEmbedded: false });
     snapshot = await commands.get('library.settings.get')({});
-    assert.equal(snapshot.onlineFetch, true);
+    assert.equal(snapshot.onlineMode, 'scan');
     assert.equal(snapshot.readEmbedded, false);
+    // 遗留布尔补丁仍被接受并按原状态映射。
+    await commands.get('library.settings.patch')({ onlineFetch: true });
+    snapshot = await commands.get('library.settings.get')({});
+    assert.equal(snapshot.onlineMode, 'scan');
 
     const removed = await commands.get('folders.remove')({ id: 'g1' });
     assert.equal(removed.ok, true);
@@ -1024,8 +1028,10 @@ test('播放补全：在线封面持久化后不再重复请求', async () => {
   };
   try {
     await commands.get('folders.add')({});
-    // 在线补全未开启：扫描与播放都不应请求 kugou。无变更的扫描是只读的，
-    // 空 map 不落盘（见 resolveScanCovers 的 changed 门控），允许缺键。
+    // 默认档已是播放补全，「关闭」须显式选择：扫描与播放都不应请求
+    // kugou。无变更的扫描是只读的，空 map 不落盘（见 resolveScanCovers
+    // 的 changed 门控），允许缺键。
+    await commands.get('library.settings.patch')({ onlineMode: 'off' });
     await scanAndWait(harness);
     assert.equal(searches, 0);
     assert.deepEqual(store.get('coverMap') ?? {}, {});
@@ -1056,6 +1062,51 @@ test('播放补全：在线封面持久化后不再重复请求', async () => {
     await commands.get('play')(playArgs);
     assert.equal(searches, 1, '持久化后第二次播放不再请求 kugou');
     assert.equal(playlistCalls[0].tracks[0].cover, remote);
+  } finally {
+    await harness.deactivate();
+  }
+});
+
+test('播放补全：扫描不查 kugou，仅播放的那首歌补全', async () => {
+  const remote = 'https://cdn.example.com/cover.jpg';
+  const store = new Map();
+  const harness = await activateWith({ 'a.mp3': { size: 100 } }, {}, store);
+  const { commands, playlistCalls } = harness;
+  let searches = 0;
+  harness.ctx.kugou = {
+    request(kind, params) {
+      const op = new FakeOperation();
+      if (kind === 'search') {
+        searches += 1;
+        op.resolve({ kind: 'songs', page: { items: [{ id: 'k1', cover_url: remote }] } });
+      } else {
+        op.reject(`unexpected kugou kind: ${kind}`);
+      }
+      return op;
+    },
+  };
+  try {
+    await commands.get('folders.add')({});
+    await commands.get('library.settings.patch')({ onlineMode: 'play' });
+    // 播放补全不含扫描兜底：专辑代表回退不请求 kugou，封面库保持为空。
+    await scanAndWait(harness);
+    assert.equal(searches, 0, '播放补全模式下扫描不请求 kugou');
+    assert.deepEqual(store.get('coverMap') ?? {}, {});
+
+    const page = await commands.get('library.page')({ offset: 0, limit: 10, sort: 'name' });
+    const row = page.songs[0];
+    const playArgs = { mode: 'now', keyword: '', folderId: '', album: '', sort: 'name', index: 0 };
+    playlistCalls.length = 0;
+    await commands.get('play')(playArgs);
+    assert.equal(searches, 1, '播放补全在播放时请求 kugou');
+    assert.equal(playlistCalls[0].tracks[0].cover, remote);
+
+    await waitFor(() => {
+      const map = store.get('coverMap');
+      return map && Object.keys(map).length === 1;
+    });
+    const hash = splitEntry(store.get('coverMap')[row.id]).hash;
+    assert.equal(store.get(`coverimg:${hash}`), remote);
   } finally {
     await harness.deactivate();
   }

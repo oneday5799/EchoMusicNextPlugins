@@ -15,24 +15,33 @@ export interface LocalFolderConfig {
   path: string;
 }
 
+/** Online completion scope: nothing, only the playing track's own gaps, or
+ * the full behavior including the scan's album-representative fallback. */
+export type OnlineMode = 'off' | 'play' | 'scan';
+export const ONLINE_MODES: OnlineMode[] = ['off', 'play', 'scan'];
+
 export interface LocalSettings {
   folders: LocalFolderConfig[];
   /** Read embedded covers and lyrics from file headers during enrichment. */
   readEmbedded: boolean;
-  /** Fill missing covers/lyrics/albums from the Kugou catalog. */
-  onlineFetch: boolean;
+  /** Fill missing covers/lyrics from the Kugou catalog. */
+  onlineMode: OnlineMode;
 }
 
 export const DEFAULT_SETTINGS: LocalSettings = {
   folders: [],
   readEmbedded: true,
-  onlineFetch: false,
+  onlineMode: 'play',
 };
 
 export const SETTINGS_KEY = 'settings';
 
 function asBoolean(value: JsonValue | undefined, fallback: boolean): boolean {
   return typeof value === 'boolean' ? value : fallback;
+}
+
+function normalizeOnlineMode(value: JsonValue | undefined): OnlineMode | null {
+  return value === 'off' || value === 'play' || value === 'scan' ? value : null;
 }
 
 function normalizeFolder(value: JsonValue | undefined): LocalFolderConfig | null {
@@ -61,10 +70,15 @@ export function normalizeSettings(value: JsonValue | undefined): LocalSettings {
       folders.push(folder);
     }
   }
+  // The boolean the dropdown replaced migrates one-to-one (on → 扫描补全,
+  // off → 关闭补全) so an upgraded store keeps its behavior; only a store
+  // that never carried the flag picks up the new default 播放补全.
+  const legacyMode =
+    record.onlineFetch === true ? 'scan' : record.onlineFetch === false ? 'off' : null;
   return {
     folders,
     readEmbedded: asBoolean(record.readEmbedded, DEFAULT_SETTINGS.readEmbedded),
-    onlineFetch: asBoolean(record.onlineFetch, DEFAULT_SETTINGS.onlineFetch),
+    onlineMode: normalizeOnlineMode(record.onlineMode) ?? legacyMode ?? DEFAULT_SETTINGS.onlineMode,
   };
 }
 

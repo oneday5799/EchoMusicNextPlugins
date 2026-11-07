@@ -18,7 +18,13 @@ import type {
 } from 'echo:plugin-sdk';
 import { createWorkPacer, raceTimeout, type WorkPacer } from './async.ts';
 import { coerceJsonArray } from './codec.ts';
-import { findFolder, normalizeSettings, SETTINGS_KEY, type LocalSettings } from './config.ts';
+import {
+  findFolder,
+  normalizeSettings,
+  ONLINE_MODES as onlineModes,
+  SETTINGS_KEY,
+  type LocalSettings,
+} from './config.ts';
 import {
   cleanupLegacyCovers,
   clearCoverStore,
@@ -425,7 +431,7 @@ async function settingsGet(): Promise<JsonValue> {
       available: grantRefs.has(folder.id),
     })),
     readEmbedded: settings.readEmbedded,
-    onlineFetch: settings.onlineFetch,
+    onlineMode: settings.onlineMode,
   };
 }
 
@@ -701,7 +707,7 @@ async function resolveScanCovers(
       let url = await folderCoverUrl(ctx, refFor, rep.folderId, folderCoverPath);
       if (url) {
         stats.repFolder += 1;
-      } else if (settings.onlineFetch && options.allowOnline !== false) {
+      } else if (settings.onlineMode === 'scan' && options.allowOnline !== false) {
         url = await kugouCover(ctx, rep.title, rep.artist);
         if (url) stats.repOnline += 1;
       }
@@ -1016,16 +1022,24 @@ function settingsToValue(value: LocalSettings): JsonValue {
       path: folder.path,
     })),
     readEmbedded: value.readEmbedded,
-    onlineFetch: value.onlineFetch,
+    onlineMode: value.onlineMode,
   };
 }
 
 async function settingsPatch(args: Record<string, JsonValue>): Promise<JsonValue> {
+  // The dropdown sends onlineMode; the legacy onlineFetch boolean stays
+  // accepted so older callers keep working and maps to the same modes.
+  let onlineMode = settings.onlineMode;
+  if (typeof args?.onlineMode === 'string' && onlineModes.includes(args.onlineMode as never)) {
+    onlineMode = args.onlineMode as LocalSettings['onlineMode'];
+  } else if (typeof args?.onlineFetch === 'boolean') {
+    onlineMode = args.onlineFetch ? 'scan' : 'off';
+  }
   const next: LocalSettings = {
     folders: settings.folders,
     readEmbedded:
       typeof args?.readEmbedded === 'boolean' ? args.readEmbedded : settings.readEmbedded,
-    onlineFetch: typeof args?.onlineFetch === 'boolean' ? args.onlineFetch : settings.onlineFetch,
+    onlineMode,
   };
   await persistSettings(next);
   return { ok: true };
@@ -1386,8 +1400,10 @@ async function coverForTrack(song: SongInit): Promise<string> {
     }
   }
   // Online completion: the play fills the gap and persists the result, so
-  // the next play of this song never repeats the lookup.
-  if (settings.onlineFetch) {
+  // the next play of this song never repeats the lookup. Both non-off
+  // modes complete here — 播放补全 is exactly this, and 扫描补全 keeps the
+  // old enabled behavior (scan fallback plus this).
+  if (settings.onlineMode !== 'off') {
     const remote = await kugouCover(ctx, song.title, song.artist);
     if (remote) {
       queuePersistCover(ctx, song, coverHashOfText(remote), remote);
@@ -1605,7 +1621,7 @@ export async function activate(ctx: EchoPluginContext): Promise<void> {
   coverPacer = createWorkPacer(ctx, COVER_PACE_GAP_MS);
   tagReader = createTagReader(ctx, refFor, coverPacer);
   lyricEngine = createLyricEngine(ctx, {
-    onlineFetch: () => settings.onlineFetch,
+    onlineFetch: () => settings.onlineMode !== 'off',
     readEmbedded: () => settings.readEmbedded,
     readTags: (folderId, path) =>
       tagReader ? tagReader.readTags(folderId, path) : Promise.resolve(null),

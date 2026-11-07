@@ -99,18 +99,24 @@ test('normalizeSettings 去重并回退默认值', () => {
       { id: 'b' },
     ],
     readEmbedded: 'no',
-    onlineFetch: true,
+    onlineMode: 'scan',
   });
   assert.deepEqual(settings.folders, [
     { id: 'a', name: '音乐', path: '' },
     { id: 'b', name: '', path: '' },
   ]);
   assert.equal(settings.readEmbedded, true);
-  assert.equal(settings.onlineFetch, true);
+  assert.equal(settings.onlineMode, 'scan');
+  // 旧布尔开关按原状态迁移：开 → 扫描补全，关 → 关闭补全。
+  assert.equal(normalizeSettings({ onlineFetch: true }).onlineMode, 'scan');
+  assert.equal(normalizeSettings({ onlineFetch: false }).onlineMode, 'off');
+  // 显式 onlineMode 优先于遗留布尔；非法值与新库都落到默认「播放补全」。
+  assert.equal(normalizeSettings({ onlineMode: 'play', onlineFetch: true }).onlineMode, 'play');
+  assert.equal(normalizeSettings({ onlineMode: 'bogus' }).onlineMode, 'play');
   const fallback = normalizeSettings(undefined);
   assert.deepEqual(fallback.folders, []);
   assert.equal(fallback.readEmbedded, true);
-  assert.equal(fallback.onlineFetch, false);
+  assert.equal(fallback.onlineMode, 'play');
   assert.equal(findFolder(settings, 'a').name, '音乐');
   assert.equal(findFolder(settings, 'zz'), null);
   assert.equal(findFolder(settings, ''), null);

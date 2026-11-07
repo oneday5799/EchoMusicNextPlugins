@@ -21,7 +21,9 @@ ColumnLayout {
     required property EchoPluginContext plugin
     property var folders: []
     property bool readEmbeddedFlag: true
-    property bool onlineFetchFlag: false
+    // Online completion scope: "off" | "play" | "scan"; the stored value is
+    // normalized by the backend, so this only ever holds a valid mode.
+    property string onlineMode: "play"
     property int busy: 0
     property string errorMessage: ""
     readonly property bool saving: busy > 0
@@ -89,7 +91,8 @@ ColumnLayout {
         run("library.settings.get", {}, function (result) {
             folders = result ? asArray(result.folders) : [];
             readEmbeddedFlag = !result || result.readEmbedded !== false;
-            onlineFetchFlag = !!result && result.onlineFetch === true;
+            onlineMode = result && typeof result.onlineMode === "string"
+                         && result.onlineMode.length > 0 ? result.onlineMode : "play";
         });
     }
 
@@ -144,25 +147,31 @@ ColumnLayout {
         });
     }
 
-    function patchFlag(key, value) {
+    function patchFlag(value) {
         errorMessage = "";
-        const previous = key === "readEmbedded" ? readEmbeddedFlag
-                                               : key === "onlineFetch" ? onlineFetchFlag : false;
-        if (key === "readEmbedded")
-            readEmbeddedFlag = value === true;
-        else if (key === "onlineFetch")
-            onlineFetchFlag = value === true;
-        const args = {};
-        args[key] = value;
-        run("library.settings.patch", args, function (result) {
+        const previous = readEmbeddedFlag;
+        readEmbeddedFlag = value === true;
+        run("library.settings.patch", {
+            readEmbedded: value
+        }, function (result) {
             // The switch flipped optimistically; restore the stored value
             // when the patch failed so it never lies about the state.
-            if (!result) {
-                if (key === "readEmbedded")
-                    readEmbeddedFlag = previous;
-                else if (key === "onlineFetch")
-                    onlineFetchFlag = previous;
-            }
+            if (!result)
+                readEmbeddedFlag = previous;
+        });
+    }
+
+    /** Same optimistic patch for the completion dropdown: the selection
+     * updates at once and reverts when the backend rejects it. */
+    function patchOnlineMode(value) {
+        errorMessage = "";
+        const previous = onlineMode;
+        onlineMode = value;
+        run("library.settings.patch", {
+            onlineMode: value
+        }, function (result) {
+            if (!result)
+                onlineMode = previous;
         });
     }
 
@@ -366,7 +375,7 @@ ColumnLayout {
             EchoSwitch {
                 checked: settingsRoot.readEmbeddedFlag
                 Accessible.name: "读取内嵌封面与歌词"
-                onToggled: settingsRoot.patchFlag("readEmbedded", checked)
+                onToggled: settingsRoot.patchFlag(checked)
             }
         }
 
@@ -380,10 +389,21 @@ ColumnLayout {
             heading: "在线补全封面与歌词"
             description: "缺少内嵌与文件夹封面，或没有本地歌词时，从在线曲库检索补全"
 
-            EchoSwitch {
-                checked: settingsRoot.onlineFetchFlag
+            // Same dropdown pattern as the host settings' 深浅色模式 row:
+            // an EchoSelect at 144px on the row's trailing slot.
+            EchoSelect {
+                id: onlineModeSelect
+                colors: Theme.floating
+                Layout.preferredWidth: 144
+                readonly property var modes: ["off", "play", "scan"]
+                model: ["关闭补全", "播放补全", "扫描补全"]
+                currentIndex: {
+                    const at = settingsRoot.onlineMode !== ""
+                                ? onlineModeSelect.modes.indexOf(settingsRoot.onlineMode) : -1;
+                    return at >= 0 ? at : onlineModeSelect.modes.indexOf("play");
+                }
                 Accessible.name: "在线补全封面与歌词"
-                onToggled: settingsRoot.patchFlag("onlineFetch", checked)
+                onActivated: index => settingsRoot.patchOnlineMode(onlineModeSelect.modes[index])
             }
         }
 
