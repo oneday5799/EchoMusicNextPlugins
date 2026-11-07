@@ -2,6 +2,7 @@
   "repository": "https://github.com/hoowhoami/EchoMusicNextPlugins",
   "plugins": [
     "plugins/spectrum-visualizer",
-    "plugins/auto-team-vip"
+    "plugins/auto-team-vip",
+    "plugins/local-music"
   ]
 }
