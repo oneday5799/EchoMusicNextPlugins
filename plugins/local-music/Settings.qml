@@ -11,9 +11,9 @@ import EchoMusic.Theme
 // stay a plain layout without nested scrolling. Layout follows the host
 // settings pages: icon + heading above a muted card, rows inside the card
 // separated by hairline dividers.
-// Folder add/remove/rename and both switches persist immediately — there is
-// deliberately no draft/save pair to keep the grant ledger and the settings
-// store in sync.
+// Folder add/remove/rename and the tag rows (toggle + dropdown) persist
+// immediately — there is deliberately no draft/save pair to keep the grant
+// ledger and the settings store in sync.
 ColumnLayout {
     id: settingsRoot
     objectName: "localMusicSettings"
@@ -387,7 +387,7 @@ ColumnLayout {
         SettingRow {
             Layout.fillWidth: true
             heading: "在线补全封面与歌词"
-            description: "缺少内嵌与文件夹封面，或没有本地歌词时，从在线曲库检索补全"
+            description: "缺少内嵌与文件夹封面，或没有本地歌词时，从在线曲库检索补全；播放补全仅当前歌曲，扫描补全另含扫描时的专辑封面兜底"
 
             // Same dropdown pattern as the host settings' 深浅色模式 row:
             // an EchoSelect at 144px on the row's trailing slot.
