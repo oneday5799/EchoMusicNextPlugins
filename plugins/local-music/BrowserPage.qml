@@ -1167,10 +1167,14 @@ Item {
                             const exitingDrillIn = root.selectedAlbum.length > 0;
                             root.viewTab = index;
                             root.selectedAlbum = "";
-                            // Clearing selectedAlbum on the 专辑 tab already
-                            // re-ran resetView through onSelectedAlbumChanged;
-                            // only the other picks need the explicit call.
-                            if (!exitingDrillIn)
+                            // Clearing selectedAlbum re-runs resetView through
+                            // onSelectedAlbumChanged, but that handler only
+                            // fires while the album tab stays active: picking
+                            // 歌曲 set viewTab first, so its change signal saw
+                            // albumTab false and skipped the reload. Such picks
+                            // need the explicit call or the song list keeps the
+                            // drill-in's album-filtered rows.
+                            if (!exitingDrillIn || !root.albumTab)
                                 root.resetView();
                         }
                     }
