@@ -317,6 +317,9 @@ Item {
      * across the FFI and stalls the host, so a reply carries a fixed batch
      * of coverBatchSize ids, independent of the page size. */
     property var coverRequests: ({})
+    // ids already shipped in a batch that has not landed yet: a delegate
+    // entering the view must not stack a duplicate request behind it.
+    property var coverInFlightIds: ({})
     property var coverMisses: ({})
     property bool coversInFlight: false
     readonly property int coverBatchSize: 16
@@ -345,18 +348,22 @@ Item {
         }
         // In-place row update plus a poke at the live delegate: the model
         // array is never reassigned here, so no reset can fire mid-scroll.
-        // Rows revealed later pick the cover up through normal delegate
-        // creation, which reads the mutated row.
+        // Rows revealed later pick the cover up through delegate creation
+        // and reuse, which read the mutated row. Both writes are diffed:
+        // a row can already hold the URL from an earlier batch while its
+        // delegate sat in the reuse pool, and the poke must heal that
+        // delegate instead of skipping it.
         const ids = Object.keys(covers);
         for (let i = 0; i < ids.length; i++) {
             const id = ids[i];
             const url = covers[id];
             const index = songIndexById[id];
-            if (!url || index === undefined || !pageRows[index] || pageRows[index].coverUrl === url)
+            if (!url || index === undefined || !pageRows[index])
                 continue;
-            pageRows[index].coverUrl = url;
+            if (pageRows[index].coverUrl !== url)
+                pageRows[index].coverUrl = url;
             const item = songList.itemAtIndex(index);
-            if (item && !item.pooled)
+            if (item && !item.pooled && item.coverUrl !== url)
                 item.coverUrl = url;
         }
         if (Object.keys(coverRequests).length > 0 && !coverBatchTimer.running)
@@ -366,11 +373,21 @@ Item {
     function scheduleRowCover(id, currentUrl) {
         if (!id || id.length === 0 || currentUrl.length > 0)
             return;
-        if (coverMisses[id] || coverRequests[id])
+        if (coverMisses[id] || coverRequests[id] || coverInFlightIds[id])
             return;
         coverRequests[id] = true;
         if (!coverBatchTimer.running)
             coverBatchTimer.restart();
+    }
+
+    /** The authoritative cover for a song id, straight off the page rows:
+     * a delegate re-derives its coverUrl from this on reuse instead of
+     * keeping whatever the previous row left imperatively poked. */
+    function rowCoverFor(id) {
+        const index = songIndexById[id];
+        if (index === undefined || !pageRows[index])
+            return "";
+        return pageRows[index].coverUrl;
     }
 
     function requestCoverBatch() {
@@ -382,8 +399,10 @@ Item {
             return;
         }
         const batch = ids.slice(0, root.coverBatchSize);
-        for (let i = 0; i < batch.length; i++)
+        for (let i = 0; i < batch.length; i++) {
             delete coverRequests[batch[i]];
+            coverInFlightIds[batch[i]] = true;
+        }
         coversInFlight = true;
         // Hand-rolled instead of run(): a failed batch must settle quietly
         // (no toast) and leave re-requesting to the delegates when they
@@ -392,12 +411,16 @@ Item {
             ids: batch
         });
         if (!operation) {
+            for (let i = 0; i < batch.length; i++)
+                delete coverInFlightIds[batch[i]];
             coversInFlight = false;
             return;
         }
         const handler = function () {
             operation.completed.disconnect(handler);
             coversInFlight = false;
+            for (let i = 0; i < batch.length; i++)
+                delete coverInFlightIds[batch[i]];
             if (operation.state === 2)
                 applyCovers(operation.result, batch);
         };
@@ -837,7 +860,17 @@ Item {
                 resourceActive: root.pageActive && !pooled
                 contextTarget: root.menuSongId.length > 0 && resourceId === root.menuSongId
                 ListView.onPooled: pooled = true
-                ListView.onReused: pooled = false
+                // A pooled delegate keeps every statically assigned property
+                // from its previous row — applyCovers pokes coverUrl
+                // imperatively, so reuse must re-derive it for the new row
+                // or the artwork of another song bleeds through. onReused
+                // runs after the model has re-bound the required properties,
+                // and the onPooledChanged handler above then re-requests the
+                // (now empty) cover through the deduped batch path.
+                ListView.onReused: {
+                    coverUrl = root.rowCoverFor(resourceId);
+                    pooled = false;
+                }
                 onPlayRequested: id => {
                     if (id === root.currentTrackId) {
                         root.plugin.player.toggle();
