@@ -851,7 +851,11 @@ Item {
                 property bool pooled: false
                 width: songList.width
                 geometry: listGeometry
-                showAlbum: root.selectedAlbum.length === 0
+                // The album column stays filled inside a drill-in too: the
+                // host album detail page leaves SongList.showAlbum at its
+                // default, and hiding the cell left the column header over
+                // an empty column.
+                showAlbum: true
                 active: resourceId.length > 0 && resourceId === root.currentTrackId
                 playing: root.plugin.player.playing
                 playbackLoading: root.plugin.player.loading
