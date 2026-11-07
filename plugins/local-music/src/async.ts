@@ -35,6 +35,82 @@ export function cancelOperationAfter(
   };
 }
 
+/** Resolves after at least one host timer tick, i.e. after the event loop
+ * got a chance to process posted events (completion events, window update
+ * requests). Used to hand the main thread back to rendering between
+ * CPU-heavy synchronous work items. */
+export function delay(context: EchoPluginContext, ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    timerSequence += 1;
+    const timer = context.setTimer(
+      `local-music-delay-${timerSequence}`,
+      Math.max(0, ms),
+      false,
+      () => resolve(),
+    );
+    if (!timer) resolve();
+  });
+}
+
+export interface WorkPacer {
+  run<T>(work: () => T): Promise<T>;
+}
+
+/** Serializes CPU-heavy synchronous work across concurrent workers. Each
+ * queued block runs alone, after a host-timer yield, so the event loop can
+ * process rendering between blocks. Plain promise chaining is not enough:
+ * multiple FFI completions dispatch inside one event-loop pass, and their
+ * continuations would then run back-to-back for the duration of the whole
+ * run, starving the compositor. A slot whose timer expired while another
+ * block was still running re-arms itself, so every block is preceded by a
+ * real render gap even when several slots piled up behind a long block. */
+export function createWorkPacer(context: EchoPluginContext, gapMs: number): WorkPacer {
+  let tail: Promise<unknown> = Promise.resolve();
+  let sequence = 0;
+  let lastEnd = 0;
+  return {
+    run<T>(work: () => T): Promise<T> {
+      const result = tail.then(
+        () =>
+          new Promise<T>((resolve) => {
+            const runWork = () => {
+              try {
+                resolve(work());
+              } finally {
+                lastEnd = Date.now();
+              }
+            };
+            const arm = (ms: number) => {
+              const timer = context.setTimer(
+                `local-music-pace-${(sequence += 1)}`,
+                Math.max(0, ms),
+                false,
+                fire,
+              );
+              if (!timer) runWork();
+            };
+            const fire = () => {
+              const rest = gapMs - (Date.now() - lastEnd);
+              if (rest > 0) {
+                // A long block just finished inside this gap; hand the loop
+                // one more pass before starting the next block.
+                arm(rest);
+                return;
+              }
+              runWork();
+            };
+            arm(gapMs);
+          }),
+      );
+      tail = result.then(
+        () => undefined,
+        () => undefined,
+      );
+      return result;
+    },
+  };
+}
+
 /** Resolves with the promise value, or null once the budget lapses. */
 export function raceTimeout<T>(
   context: EchoPluginContext,

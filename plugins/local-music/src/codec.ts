@@ -62,13 +62,16 @@ export function coerceJsonArray(value: JsonValue | undefined): JsonValue[] {
 const BASE64_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
 const FLUSH_SIZE = 32768;
 
-export function bytesToBase64(bytes: Uint8Array): string {
+/** Encodes bytes[start, end) as base64. Callers must keep both bounds
+ * 3-aligned except for the natural end of the data, so that concatenating
+ * the ranges of successive chunks reproduces bytesToBase64 exactly: only
+ * the chunk that reaches the end emits padding. */
+export function bytesToBase64Range(bytes: Uint8Array, start: number, end: number): string {
   const parts: string[] = [];
   let out = '';
-  const total = bytes.length;
-  for (let i = 0; i < total; i += 3) {
-    const hasSecond = i + 1 < total;
-    const hasThird = i + 2 < total;
+  for (let i = start; i < end; i += 3) {
+    const hasSecond = i + 1 < end;
+    const hasThird = i + 2 < end;
     const first = bytes[i];
     const second = hasSecond ? bytes[i + 1] : 0;
     const third = hasThird ? bytes[i + 2] : 0;
@@ -83,6 +86,10 @@ export function bytesToBase64(bytes: Uint8Array): string {
   }
   parts.push(out);
   return parts.join('');
+}
+
+export function bytesToBase64(bytes: Uint8Array): string {
+  return bytesToBase64Range(bytes, 0, bytes.length);
 }
 
 export function utf8Decode(bytes: Uint8Array, start?: number, end?: number): string {

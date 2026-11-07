@@ -16,7 +16,7 @@ import type {
   JsonValue,
   QueueTrack,
 } from 'echo:plugin-sdk';
-import { raceTimeout } from './async.ts';
+import { createWorkPacer, raceTimeout, type WorkPacer } from './async.ts';
 import { coerceJsonArray } from './codec.ts';
 import { findFolder, normalizeSettings, SETTINGS_KEY, type LocalSettings } from './config.ts';
 import {
@@ -25,11 +25,12 @@ import {
   coverEntryFor,
   coverEntryHash,
   coverEntrySize,
-  coverHashOfBytes,
+  coverHashOfTagBytes,
+  createCoverHashResolver,
   coverHashOfText,
   coverImageKey,
   createTagReader,
-  embeddedCoverUrl,
+  encodedCoverUrl,
   enrichMetadata,
   folderCoverUrl,
   kugouCover,
@@ -139,6 +140,7 @@ interface ScanJob {
 let context: EchoPluginContext | null = null;
 let settings: LocalSettings = normalizeSettings(undefined);
 let tagReader: TagReader | null = null;
+let coverPacer: WorkPacer | null = null;
 let lyricEngine: LyricEngine | null = null;
 let registrations: EchoPluginRegistration[] = [];
 /** grantId → current FileReference, refreshed on activation and on failure. */
@@ -485,6 +487,13 @@ function applyCollected(collected: ScanCollected): void {
 
 const COVER_SCAN_POOL = 4;
 
+/** Event-loop gap inserted between the cover pass's CPU-heavy synchronous
+ * blocks (tag parse, data-URL encode, content hash). All blocks share one
+ * pacer so concurrent workers cannot chain them back-to-back inside a
+ * single event-loop pass; 8ms is short enough to keep the pass quick while
+ * letting the compositor render between blocks. */
+const COVER_PACE_GAP_MS = 8;
+
 /** Cover-store read-modify-write cycles must not interleave: the scan's map
  * flush would clobber a play-time completion written mid-pass. */
 let coverStoreChain: Promise<unknown> = Promise.resolve();
@@ -592,6 +601,7 @@ async function resolveScanCovers(
 ): Promise<CoverPassStats> {
   const store = await readCoverStore(ctx);
   const reader = settings.readEmbedded ? tagReader : null;
+  const coverHash = createCoverHashResolver();
   const stats: CoverPassStats = {
     songs: librarySongs.length,
     before: Object.keys(store.map).length,
@@ -638,13 +648,18 @@ async function resolveScanCovers(
             COVER_BUDGET_MS,
           );
           if (!tags) stats.tagFailures += 1;
-          if (tags && tags.coverData && tags.coverData.length > COVER_STORE_LIMIT) {
-            stats.oversized += 1;
-          }
-          url = embeddedCoverUrl(tags);
-          if (url && tags && tags.coverData) {
-            hash = coverHashOfBytes(tags.coverData);
-            stats.embedded += 1;
+          const data = tags ? tags.coverData : null;
+          if (data && data.length > COVER_STORE_LIMIT) stats.oversized += 1;
+          if (tags && data && data.length > 0 && data.length <= COVER_STORE_LIMIT) {
+            // Hash first: it is far cheaper than the encode, and it lets
+            // encodedCoverUrl reuse the session memo for duplicate artwork.
+            // Hash, tag parse (inside readTags) and encode chunks each land
+            // on their own event-loop pass so frames keep rendering.
+            hash = coverPacer ? await coverPacer.run(() => coverHash(data)) : coverHash(data);
+            if (hash) {
+              url = await encodedCoverUrl(ctx, hash, data, tags.coverMime || 'image/jpeg');
+              if (url) stats.embedded += 1;
+            }
           }
         }
         if (url && hash) {
@@ -1327,12 +1342,15 @@ async function coverForTrack(song: SongInit): Promise<string> {
       tagReader.readTags(song.folderId, song.path),
       COVER_BUDGET_MS,
     );
-    const url = embeddedCoverUrl(tags);
-    if (url && tags && tags.coverData) {
+    if (tags && tags.coverData && tags.coverData.length > 0) {
       // Keep parity with the scan pass: artwork beyond the store limit is
       // never persisted, otherwise oversized images inflate the KV.
-      queuePersistCover(ctx, song, coverHashOfBytes(tags.coverData), url);
-      return url;
+      const hash = coverHashOfTagBytes(tags.coverData);
+      const url = await encodedCoverUrl(ctx, hash, tags.coverData, tags.coverMime || 'image/jpeg');
+      if (url) {
+        queuePersistCover(ctx, song, hash, url);
+        return url;
+      }
     }
   }
   // Online completion: the play fills the gap and persists the result, so
@@ -1552,7 +1570,8 @@ export async function activate(ctx: EchoPluginContext): Promise<void> {
   // installation before anything renders them as unavailable.
   await refreshGrants(ctx);
   await reconcileFolders(ctx);
-  tagReader = createTagReader(ctx, refFor);
+  coverPacer = createWorkPacer(ctx, COVER_PACE_GAP_MS);
+  tagReader = createTagReader(ctx, refFor, coverPacer);
   lyricEngine = createLyricEngine(ctx, {
     onlineFetch: () => settings.onlineFetch,
     readEmbedded: () => settings.readEmbedded,
@@ -1687,6 +1706,7 @@ export async function deactivate(): Promise<void> {
     tagReader.dispose();
     tagReader = null;
   }
+  coverPacer = null;
   lyricEngine = null;
   clearLyricCache();
   grantRefs = new Map();

@@ -12,8 +12,8 @@ import type {
   JsonValue,
   KugouDto_domain_SearchSong,
 } from 'echo:plugin-sdk';
-import { cancelOperationAfter, raceTimeout } from './async.ts';
-import { asArrayBuffer, bytesToBase64, coerceJsonArray } from './codec.ts';
+import { cancelOperationAfter, delay, raceTimeout, type WorkPacer } from './async.ts';
+import { asArrayBuffer, bytesToBase64, bytesToBase64Range, coerceJsonArray } from './codec.ts';
 import { extensionOf, type SongInit } from './library.ts';
 import { coverDataUrl, parseAudioTags, tagReadTarget, type AudioTags } from './tags.ts';
 
@@ -132,6 +132,50 @@ export function coverHashOfBytes(bytes: Uint8Array): string {
   const first = (fnv1a(bytes, 0x811c9dc5) ^ (bytes.length & 0xffff)) >>> 0;
   const second = fnv1a(bytes, 0x46b6d5a3);
   return `${hex8(first)}${hex8(second)}`;
+}
+
+// Hashing the artwork bytes is per-song work even when every track of an
+// album carries the same image, and for large covers the two FNV passes
+// cost more main-thread time than the rest of the pass combined. The memo
+// keys by byte-object identity: the tag reader's in-memory cache hands the
+// same AudioTags (and thus the same coverData reference) back for every
+// re-scan of an unchanged file within the session, so the FNV passes run
+// once per read instead of once per scan. A fresh read — new session,
+// changed file — is a different object and is hashed again, so the memo
+// can never answer with a stale hash.
+
+const coverHashByBytes = new WeakMap<Uint8Array, string>();
+
+/** Content hash for one file's artwork bytes, memoized per byte identity. */
+export function coverHashOfTagBytes(bytes: Uint8Array): string {
+  const memo = coverHashByBytes.get(bytes);
+  if (memo !== undefined) return memo;
+  const hash = coverHashOfBytes(bytes);
+  coverHashByBytes.set(bytes, hash);
+  return hash;
+}
+
+const COVER_FULL_HASH_MAX = 160 * 1024;
+const COVER_FINGERPRINT_BYTES = 64 * 1024;
+
+/** Per-pass hash resolver. Covers up to COVER_FULL_HASH_MAX hash directly
+ * (the FNV passes are cheap at that size); larger artwork fingerprints
+ * through head+tail 64 KiB and the exact length, and identical artwork —
+ * every track of an album — hashes its full bytes only once per pass. */
+export function createCoverHashResolver(): (bytes: Uint8Array) => string {
+  const byFingerprint = new Map<string, string>();
+  return (bytes: Uint8Array): string => {
+    if (bytes.length <= COVER_FULL_HASH_MAX) return coverHashOfTagBytes(bytes);
+    const fingerprint =
+      coverHashOfBytes(bytes.subarray(0, COVER_FINGERPRINT_BYTES)) +
+      coverHashOfBytes(bytes.subarray(bytes.length - COVER_FINGERPRINT_BYTES)) +
+      `:${bytes.length}`;
+    const known = byFingerprint.get(fingerprint);
+    if (known !== undefined) return known;
+    const hash = coverHashOfTagBytes(bytes);
+    byFingerprint.set(fingerprint, hash);
+    return hash;
+  };
 }
 
 export function coverHashOfText(text: string): string {
@@ -412,6 +456,7 @@ async function readTagBytes(
 export function createTagReader(
   context: EchoPluginContext,
   refFor: (folderId: string) => FileReference | null,
+  pacer?: WorkPacer,
 ): TagReader {
   const cache = new Map<string, AudioTags | null>();
   const inflight = new Map<string, Promise<AudioTags | null>>();
@@ -437,7 +482,11 @@ export function createTagReader(
         if (!ref) return null;
         const bytes = await readTagBytes(context, { ...ref, path });
         if (!bytes) return null;
-        const tags = parseAudioTags(bytes);
+        // Parsing the header bytes is the readTags path's heaviest
+        // synchronous block; running it through the shared pacer (when one
+        // is wired in) keeps concurrent scan workers from chaining their
+        // blocks back-to-back inside a single event-loop pass.
+        const tags = pacer ? await pacer.run(() => parseAudioTags(bytes)) : parseAudioTags(bytes);
         // Only a genuine parse result is cached — a failed or empty read
         // may be a transient io hiccup, and caching null would pin it for
         // the session (play-time lookups would never retry).
@@ -571,6 +620,56 @@ export function embeddedCoverUrl(tags: AudioTags | null): string {
   if (!tags || !tags.coverData || tags.coverData.length === 0) return '';
   if (tags.coverData.length > COVER_STORE_LIMIT) return '';
   return coverDataUrl(tags);
+}
+
+// Encoding a cover data URL is the cover pass's most expensive synchronous
+// work: bytesToBase64 walks every image byte, so an 800 KB artwork holds
+// the main thread for well over 100 ms. Two counters keep it from stalling
+// the scan: a session memo keyed by content hash (duplicate artwork across
+// songs — every track of an album — and a re-scan after clear cache reuse
+// the already-encoded URL) and a chunked encoder that yields to the event
+// loop between chunks so one encode never holds a frame hostage.
+
+const COVER_ENCODE_CHUNK = 49152; // 48 KiB, multiple of 3
+const COVER_URL_MEMO_LIMIT = 32;
+
+const coverUrlMemo = new Map<string, string>();
+
+function memoCoverUrl(hash: string, url: string): void {
+  if (coverUrlMemo.has(hash)) coverUrlMemo.delete(hash);
+  coverUrlMemo.set(hash, url);
+  while (coverUrlMemo.size > COVER_URL_MEMO_LIMIT) {
+    const oldest = coverUrlMemo.keys().next();
+    if (oldest.done) break;
+    coverUrlMemo.delete(oldest.value);
+  }
+}
+
+/** Cover data URL for embedded art: reuses the session memo per content
+ * hash and otherwise encodes the bytes in bounded chunks, yielding to the
+ * event loop between chunks. '' when there is nothing (or too much) to
+ * store. */
+export async function encodedCoverUrl(
+  context: EchoPluginContext,
+  hash: string,
+  bytes: Uint8Array,
+  mime: string,
+): Promise<string> {
+  if (!hash || !bytes || bytes.length === 0) return '';
+  if (bytes.length > COVER_STORE_LIMIT) return '';
+  const memo = coverUrlMemo.get(hash);
+  if (memo !== undefined) return memo;
+  const parts: string[] = [];
+  let start = 0;
+  while (start < bytes.length) {
+    const end = Math.min(bytes.length, start + COVER_ENCODE_CHUNK);
+    parts.push(bytesToBase64Range(bytes, start, end));
+    start = end;
+    if (start < bytes.length) await delay(context, 0);
+  }
+  const url = `data:${mime || 'image/jpeg'};base64,${parts.join('')}`;
+  memoCoverUrl(hash, url);
+  return url;
 }
 
 /** Folder cover image read into a data URL; '' when absent or unreadable. */
