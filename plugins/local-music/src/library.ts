@@ -172,6 +172,10 @@ export interface SongInit {
   size: number;
   /** Sidecar lyric path from the scan, if one matched. */
   lyricPath: string;
+  /** Text metadata was read for this file content (id + size); the enrich
+   * pass skips such songs so a rescan of an unchanged library costs no
+   * per-song `files.metadata` round trips. */
+  enriched: boolean;
 }
 
 export function songFromEntry(input: {
@@ -193,7 +197,30 @@ export function songFromEntry(input: {
     durationMs: 0,
     size: input.size,
     lyricPath: '',
+    enriched: false,
   };
+}
+
+/** Rescan fast path: a song whose file is unchanged inherits the previous
+ * library's enriched text metadata so the enrich pass can skip its round
+ * trip. The song id (the hash of folder|path) pins identity and the file
+ * size is the change signal — the same trade-off the cover pass makes, so a
+ * tag edit that preserves the file size is the accepted blind spot. Only
+ * previously *enriched* songs carry values over: cache rows from before the
+ * flag existed re-read once and persist the flag on the next scan write. */
+export function carryOverMetadata(previous: SongInit[], fresh: SongInit[]): void {
+  if (previous.length === 0 || fresh.length === 0) return;
+  const byId = new Map<string, SongInit>();
+  for (const song of previous) byId.set(song.id, song);
+  for (const song of fresh) {
+    const prev = byId.get(song.id);
+    if (!prev || !prev.enriched || prev.size !== song.size) continue;
+    song.title = prev.title;
+    song.artist = prev.artist;
+    song.album = prev.album;
+    song.durationMs = prev.durationMs;
+    song.enriched = true;
+  }
 }
 
 export function albumKeyOf(song: { album?: string }): string {
@@ -339,7 +366,9 @@ export function buildQueueTrack(song: SongInit, extras?: QueueTrackExtras | null
 
 const COMPACT_LENGTH = 10;
 
-/** [id, sourceId, path, folderId, title, artist, album, durationMs, size, lyricPath] */
+/** [id, sourceId, path, folderId, title, artist, album, durationMs, size,
+ * lyricPath, enriched?] — the trailing enriched flag is optional so rows
+ * written before the flag existed (10 fields) still read back. */
 export function compactSong(song: SongInit): JsonValue[] {
   return [
     song.id,
@@ -352,6 +381,7 @@ export function compactSong(song: SongInit): JsonValue[] {
     Math.round(song.durationMs),
     song.size,
     song.lyricPath,
+    song.enriched === true,
   ];
 }
 
@@ -388,6 +418,7 @@ export function expandCompactSong(value: JsonValue): SongInit | null {
       typeof durationMs === 'number' && isFinite(durationMs) && durationMs > 0 ? durationMs : 0,
     size: typeof size === 'number' && isFinite(size) && size >= 0 ? size : 0,
     lyricPath: typeof lyricPath === 'string' ? lyricPath : '',
+    enriched: fields[10] === true,
   };
 }
 

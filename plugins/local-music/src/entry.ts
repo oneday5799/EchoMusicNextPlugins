@@ -48,6 +48,7 @@ import {
   albumKeyOf,
   baseName,
   buildQueueTrack,
+  carryOverMetadata,
   dirNameOf,
   extensionOf,
   filterSongs,
@@ -460,13 +461,15 @@ function requestScanAbort(job: ScanJob): void {
 /** Adopts scan results into the library: drops songs of folders removed
  * mid-scan, pairs sidecar lyrics and stores the folder-cover map. Pairing
  * re-runs here because an abort's partial collection skips collectLibrary's
- * own ending. */
+ * own ending. Songs unchanged since the previous library carry their
+ * enriched metadata over, so the enrich pass skips them (rescan fast path). */
 function applyCollected(collected: ScanCollected): void {
   const valid = new Set(folderIdsOf(settings));
   const songs = collected.songs.filter((song) => valid.has(song.folderId));
   // Pair again for the abort path: a thrown walk skips collectLibrary's
   // ending, and pairing is idempotent for the success path.
   pairLyricPaths({ ...collected, songs });
+  carryOverMetadata(librarySongs, songs);
   indexLibrary(songs);
   dirCovers = collected.dirCovers;
 }
@@ -603,6 +606,10 @@ async function resolveScanCovers(
   // The body flushes the store itself on success; the finally-write is
   // only for a throw (abort mid-pass) so partial results survive.
   let settled = false;
+  // An unchanged-library rescan mutates nothing; skipping the two full
+  // store flushes then keeps the pass read-only instead of rewriting the
+  // whole per-song map (and every image claim) twice for no effect.
+  let storeChanged = false;
   try {
     let total = librarySongs.length;
     let done = 0;
@@ -642,10 +649,12 @@ async function resolveScanCovers(
         }
         if (url && hash) {
           store.map[song.id] = coverEntryFor(hash, song.size);
+          storeChanged = true;
           await writeCoverImage(ctx, store, hash, url);
         } else if (existing) {
           // The file changed and carries no embedded art anymore.
           delete store.map[song.id];
+          storeChanged = true;
         }
         done += 1;
         announce();
@@ -654,7 +663,7 @@ async function resolveScanCovers(
     const runners: Promise<void>[] = [];
     for (let i = 0; i < Math.min(COVER_SCAN_POOL, total); i += 1) runners.push(worker());
     await Promise.all(runners);
-    await writeCoverStore(ctx, store);
+    if (storeChanged) await writeCoverStore(ctx, store);
 
     // Album representatives still without art: folder image, then Kugou.
     const reps: SongInit[] = [];
@@ -678,17 +687,18 @@ async function resolveScanCovers(
       if (url) {
         const hash = coverHashOfText(url);
         store.map[rep.id] = coverEntryFor(hash, rep.size);
+        storeChanged = true;
         await writeCoverImage(ctx, store, hash, url);
       }
       done += 1;
       announce();
     }
-    await writeCoverStore(ctx, store);
+    if (storeChanged) await writeCoverStore(ctx, store);
     stats.after = Object.keys(store.map).length;
     settled = true;
     return stats;
   } finally {
-    if (!settled) {
+    if (!settled && storeChanged) {
       // Keep partial results on abort; a broken write simply leaves the
       // store as it was.
       try {
@@ -769,6 +779,14 @@ async function runScanJob(ctx: EchoPluginContext, job: ScanJob, epoch: number): 
     }
   };
   let indexed = false;
+  // Whether a rendered library already exists when the scan starts. On a
+  // rescan the page keeps showing the old rows and the old cache stays valid
+  // on disk, so the mid-scan persist + notify pair below is pure overhead:
+  // two full library serializations and two whole-page rebuilds (delegate
+  // churn + cover re-fetch) for information the end-of-scan pair delivers
+  // just as well. A first scan (empty list) keeps the mid-scan pair so
+  // results appear while tags/covers are still being read.
+  const wasReady = libraryReady;
   try {
     let folders = usableFolders();
     if (folders.length === 0 && settings.folders.length > 0) {
@@ -806,8 +824,10 @@ async function runScanJob(ctx: EchoPluginContext, job: ScanJob, epoch: number): 
     indexed = true;
     cacheTruncated = collected.truncated;
     libraryReady = true;
-    await persistLibraryCache(ctx, collected.truncated);
-    notifyLibraryChanged();
+    if (!wasReady) {
+      await persistLibraryCache(ctx, collected.truncated);
+      notifyLibraryChanged();
+    }
     flushProgress();
     publishScan({
       stage: 'enrich',

@@ -692,8 +692,17 @@ Item {
         resetView();
     }
 
-    onPageActiveChanged: if (pageActive && folders.length === 0)
-        refreshSettings(true)
+    onPageActiveChanged: {
+        if (!pageActive)
+            return;
+        if (pendingLibraryRefresh) {
+            pendingLibraryRefresh = false;
+            refreshSettings(true);
+            return;
+        }
+        if (folders.length === 0)
+            refreshSettings(true);
+    }
 
     onSelectedAlbumChanged: if (libraryReady && albumTab)
         resetView()
@@ -717,6 +726,10 @@ Item {
     }
 
     property int lastLibraryRevision: -1
+    // A library notification while the page sits in a background stack
+    // would still rebuild every row delegate and re-request covers for
+    // nothing the user can see; the reload waits for reactivation.
+    property bool pendingLibraryRefresh: false
 
     // Every publish hands over a fresh state object; assigning it re-evaluates
     // every banner binding and each of those re-renders rakes the scene graph
@@ -745,7 +758,10 @@ Item {
             const revision = state && typeof state.libraryRevision === "number" ? state.libraryRevision : -1;
             if (revision >= 0 && revision !== root.lastLibraryRevision) {
                 root.lastLibraryRevision = revision;
-                root.refreshSettings(true);
+                if (root.pageActive)
+                    root.refreshSettings(true);
+                else
+                    root.pendingLibraryRefresh = true;
             }
         }
     }

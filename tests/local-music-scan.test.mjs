@@ -967,11 +967,12 @@ test('播放补全：内嵌封面在播放时持久化', async () => {
   patchReadBytes(harness, { 'a.mp3': mp3WithCover(art) });
   try {
     await commands.get('folders.add')({});
-    // 读取内嵌关闭时扫描：曲库与封面缓存都不应出现封面。
+    // 读取内嵌关闭时扫描：曲库与封面缓存都不应出现封面。changed 门控下
+    // 无变更的扫描是只读的，连空 map 也不会落盘，因此允许缺键。
     await commands.get('library.settings.patch')({ readEmbedded: false });
     await scanAndWait(harness);
-    assert.deepEqual(store.get('coverMap'), {});
-    assert.deepEqual(store.get('coverHashes'), []);
+    assert.deepEqual(store.get('coverMap') ?? {}, {});
+    assert.deepEqual(store.get('coverHashes') ?? [], []);
 
     const page = await commands.get('library.page')({ offset: 0, limit: 10, sort: 'name' });
     const row = page.songs[0];
@@ -1023,10 +1024,11 @@ test('播放补全：在线封面持久化后不再重复请求', async () => {
   };
   try {
     await commands.get('folders.add')({});
-    // 在线补全未开启：扫描与播放都不应请求 kugou。
+    // 在线补全未开启：扫描与播放都不应请求 kugou。无变更的扫描是只读的，
+    // 空 map 不落盘（见 resolveScanCovers 的 changed 门控），允许缺键。
     await scanAndWait(harness);
     assert.equal(searches, 0);
-    assert.deepEqual(store.get('coverMap'), {});
+    assert.deepEqual(store.get('coverMap') ?? {}, {});
 
     const page = await commands.get('library.page')({ offset: 0, limit: 10, sort: 'name' });
     const row = page.songs[0];

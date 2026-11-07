@@ -506,7 +506,10 @@ function applyMedia(
   return changed;
 }
 
-/** Reads host metadata for every song with a small concurrency pool. */
+/** Reads host metadata for every song with a small concurrency pool. Songs
+ * already carrying enriched metadata for their current file content (see
+ * carryOverMetadata) are skipped, so rescanning an unchanged library issues
+ * no per-song round trips at all. */
 export async function enrichMetadata(
   context: EchoPluginContext,
   songs: SongInit[],
@@ -525,6 +528,11 @@ export async function enrichMetadata(
       if (callbacks.shouldAbort && callbacks.shouldAbort()) throw new Error('扫描已中止');
       const song = songs[index];
       index += 1;
+      if (song.enriched) {
+        done += 1;
+        announce();
+        continue;
+      }
       const ref = refFor(song.folderId);
       if (ref) {
         const operation = context.files.metadata({ ...ref, path: song.path });
@@ -532,7 +540,12 @@ export async function enrichMetadata(
         const disarm = cancelOperationAfter(context, operation, METADATA_TIMEOUT_MS + 500);
         try {
           const result = await awaitOperation(operation);
-          applyMedia(song, result && result.media ? result.media : null);
+          const media = result && result.media ? result.media : null;
+          applyMedia(song, media);
+          // Only a reply that actually carried media marks the song: a null
+          // or failed read may be transient, and pinning it would freeze the
+          // filename-parsed identity until the file size changes.
+          if (media) song.enriched = true;
         } catch (error) {
           // Unreadable file: keep the filename-parsed identity.
         } finally {
