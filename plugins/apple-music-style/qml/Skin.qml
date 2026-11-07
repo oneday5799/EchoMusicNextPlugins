@@ -110,6 +110,156 @@ Item {
         }
     }
     readonly property bool hostBlurActive: root.visible && root.coverUrl.toString().length > 0 && !root.hostFrosted && root.hostMaterialOpacity > 0
+    // ===== 背景均色估计（渐变带切片色的背景项注入，见 AmllLine.__sweepPoses）=====
+    // 不透明外观切片要与半透明未唱字无缝衔接，切片色须含背景贡献。复刻宿主
+    // 合成链的均值：封面 → background-preprocess（对比 .4 → 饱和 ×3 →
+    // 对比 1.7 → 亮度 .75，8bit 钳制）→ 8 次盒模糊（均值保持）→ lyric-fluid
+    // （×0.5 压暗，backgroundOpacity 权重叠在底色渐变 #20242c→#12151b 上）。
+    // 封面均值经 Canvas 8×8 采样；模糊不可用时与宿主一致只显示底色四边形
+    // （磨砂时 55% 黑）。采样前退化为底色估计，不劣于旧黑底烘焙。
+    property bool coverSampled: false
+    property color coverAvgColor: "#000000"
+    readonly property color lyricGradMid: Qt.rgba(25 / 255, 28.5 / 255, 35.5 / 255, 1)
+    readonly property color backdropColor: {
+        const g = root.lyricGradMid, bo = root.hostMaterialOpacity;
+        if (root.hostBlurActive && root.coverSampled)
+            return Qt.rgba(root.coverAvgColor.r * 0.5 * bo + g.r * (1 - bo),
+                           root.coverAvgColor.g * 0.5 * bo + g.g * (1 - bo),
+                           root.coverAvgColor.b * 0.5 * bo + g.b * (1 - bo), 1);
+        if (root.hostFrosted)
+            return Qt.rgba(g.r * 0.45, g.g * 0.45, g.b * 0.45, 1);
+        return Qt.rgba(root.hostDisplayedBaseColor.r * bo + g.r * (1 - bo),
+                       root.hostDisplayedBaseColor.g * bo + g.g * (1 - bo),
+                       root.hostDisplayedBaseColor.b * bo + g.b * (1 - bo), 1);
+    }
+    // ===== 背景逐像素估计器（v10，直接抓宿主渲染结果）=====
+    // 可见背景 = 皮肤 bgLoader 里的宿主 PlaybackBlurredBackground 输出四边形
+    // （模糊封面网格 + 晕影 + ×0.5 压暗 + ×BO），以 alpha=BO 叠在皮肤渐变底
+    // #20242c→#12151b 上，故可见背景 = 四边形输出 + grad·(1−BO)。
+    // v9 曾在 JS 逐级复刻渲染链（grade→盒模糊→Coons 网格逆映射→晕影），其中
+    // 网格逆映射无法离线验证，采样落点偏移会把封面饱和色直接烘进切片墨色
+    // （所见"暗端取封面色"）。v10 不再复刻：grabToImage 直接抓宿主组件的
+    // 渲染结果并由 GPU 降到 48×24，Canvas 只做像素读回——模糊/网格/晕影/
+    // 压暗/换曲交叉淡化全部真实，复刻只剩一句渐变透出。LUT 只在抓取回调
+    // （异步、绑定外）写入，__sampleBg 纯读，poses 绑定求值期不再有属性
+    // 写入，绑定环随之消失。
+    property var __blurTex: null
+    property var __bgLut: null
+    property bool __bgGrabDirty: true
+    property bool __bgFadeActive: false
+    property var __bgGrabResult: null
+    // 律动推进时相位持续变化，按 400ms 步进跟进重抓
+    readonly property bool __bgRhythmMoving: root.hostRhythmActive && root.player.playing
+    onWidthChanged: root.__scheduleBgGrab()
+    onHeightChanged: root.__scheduleBgGrab()
+    onHostMaterialOpacityChanged: root.__scheduleBgGrab()
+
+    // background-preprocess 全链：grade（一次 8bit 钳制）+ 8 道盒模糊
+    function __buildBlurChain(d) {
+        const piv = 128 / 255;
+        let tex = new Float32Array(32 * 32 * 3);
+        for (let i = 0, o = 0; i < d.length; i += 4, o += 3) {
+            let r = (d[i] / 255 - piv) * 0.4 + piv, g = (d[i + 1] / 255 - piv) * 0.4 + piv, b = (d[i + 2] / 255 - piv) * 0.4 + piv;
+            const gray = 0.3 * r + 0.59 * g + 0.11 * b;
+            r = ((3 * r - 2 * gray - piv) * 1.7 + piv) * 0.75;
+            g = ((3 * g - 2 * gray - piv) * 1.7 + piv) * 0.75;
+            b = ((3 * b - 2 * gray - piv) * 1.7 + piv) * 0.75;
+            tex[o] = Math.round(Math.min(1, Math.max(0, r)) * 255) / 255;
+            tex[o + 1] = Math.round(Math.min(1, Math.max(0, g)) * 255) / 255;
+            tex[o + 2] = Math.round(Math.min(1, Math.max(0, b)) * 255) / 255;
+        }
+        // 偶道水平/奇道垂直；偶道后 RGBA16F（无量化）、奇道后 RGBA8（量化）
+        for (let p = 0; p < 8; ++p) {
+            const horiz = p % 2 === 0, quant = !horiz;
+            const dst = new Float32Array(32 * 32 * 3);
+            for (let y = 0; y < 32; ++y)
+                for (let x = 0; x < 32; ++x) {
+                    let r = 0, g = 0, b = 0;
+                    for (let i = -2; i <= 2; ++i) {
+                        const sx = horiz ? Math.min(31, Math.max(0, x + i)) : x;
+                        const sy = horiz ? y : Math.min(31, Math.max(0, y + i));
+                        const oo = (sy * 32 + sx) * 3;
+                        r += tex[oo];
+                        g += tex[oo + 1];
+                        b += tex[oo + 2];
+                    }
+                    const o = (y * 32 + x) * 3;
+                    if (quant) {
+                        dst[o] = Math.round(r / 5 * 255) / 255;
+                        dst[o + 1] = Math.round(g / 5 * 255) / 255;
+                        dst[o + 2] = Math.round(b / 5 * 255) / 255;
+                    } else {
+                        dst[o] = r / 5;
+                        dst[o + 1] = g / 5;
+                        dst[o + 2] = b / 5;
+                    }
+                }
+            tex = dst;
+        }
+        root.__blurTex = tex;
+    }
+    // 抓取调度：脏标记 + 30ms 合并窗（封面/尺寸/透明度变化、换曲补抓）
+    function __scheduleBgGrab() {
+        root.__bgGrabDirty = true;
+        bgGrabKick.restart();
+    }
+    // 抓取宿主 bgLoader 的渲染结果（真实模糊封面合成）。ready 才抓（纹理链
+    // 就绪）；grabToImage 第二参数由 GPU 直接降到 48×24，结果由 Image 元素
+    // 中转读回像素（见 bgGrabImg/bgLutCanvas）。
+    // 两个踩坑记录：grab 结果 url 是 "itemgrabber:#N" 内存 scheme，
+    // Canvas.loadImage 不认（静默挂起），必须走 Image 元素（QQuickPixmap
+    // 支持该 scheme）；activeArtwork.texture 是不可见 live:false RGBA16F
+    // ShaderEffectSource，抓出全零，故抓可见的合成四边形本身——fluid 的
+    // ×0.5×BO 压暗与换曲交叉淡化已烘入，__fillBgLut 仅补渐变透出。
+    function __captureBg() {
+        const item = bgLoader.item;
+        if (!item || item.ready !== true || root.width <= 0 || root.height <= 0)
+            return;
+        item.grabToImage(function (result) {
+            if (!result)
+                return;
+            root.__bgGrabResult = result;
+        }, Qt.size(48, 24));
+    }
+    // 像素 → LUT：合成四边形抓取已含模糊/网格/晕影/压暗/淡化与抖动，
+    // 补渐变透出项 grad·(1−BO)（bg 四边形 alpha=BO，皮肤渐变底自下透出）。
+    function __fillBgLut(d) {
+        const LW = 48, LH = 24;
+        const lut = new Float32Array(LW * LH * 3);
+        const gw = 1 - root.hostMaterialOpacity;
+        for (let iy = 0; iy < LH; ++iy) {
+            const t = (iy + 0.5) / LH;
+            const gr = (32 + (18 - 32) * t) / 255, gg = (36 + (21 - 36) * t) / 255, gb = (44 + (27 - 44) * t) / 255;
+            for (let ix = 0; ix < LW; ++ix) {
+                const o = (iy * LW + ix) * 3, p = (iy * LW + ix) * 4;
+                lut[o] = d[p] / 255 + gr * gw;
+                lut[o + 1] = d[p + 1] / 255 + gg * gw;
+                lut[o + 2] = d[p + 2] / 255 + gb * gw;
+            }
+        }
+        root.__bgLut = lut;
+        root.__bgGrabDirty = false;
+    }
+    function __sampleBg(fx, fy) {
+        // 纯读：LUT 由抓取回调异步填写，绑定求值期不触发任何属性写入
+        const lut = root.__bgLut;
+        if (!lut)
+            return null;
+        const LW = 48, LH = 24;
+        const gx = Math.min(LW - 1.001, Math.max(0, fx * (LW - 1)));
+        const gy = Math.min(LH - 1.001, Math.max(0, fy * (LH - 1)));
+        const x0 = Math.floor(gx), y0 = Math.floor(gy);
+        const ax = gx - x0, ay = gy - y0, x1 = x0 + 1, y1 = y0 + 1;
+        const o00 = (y0 * LW + x0) * 3, o10 = (y0 * LW + x1) * 3, o01 = (y1 * LW + x0) * 3, o11 = (y1 * LW + x1) * 3;
+        return [(lut[o00] * (1 - ax) + lut[o10] * ax) * (1 - ay) + (lut[o01] * (1 - ax) + lut[o11] * ax) * ay,
+                (lut[o00 + 1] * (1 - ax) + lut[o10 + 1] * ax) * (1 - ay) + (lut[o01 + 1] * (1 - ax) + lut[o11 + 1] * ax) * ay,
+                (lut[o00 + 2] * (1 - ax) + lut[o10 + 2] * ax) * (1 - ay) + (lut[o01 + 2] * (1 - ax) + lut[o11 + 2] * ax) * ay];
+    }
+    // LyricFlow→AmllLine 的每片背景项入口：条目坐标 → 皮肤分数 → LUT 采样
+    function backdropSample(item, x, y) {
+        const p = item.mapToItem(root, x, y);
+        return root.__sampleBg(p.x / Math.max(1, root.width), p.y / Math.max(1, root.height));
+    }
     // 背景律动取宿主歌词设置 backgroundRhythm（settings.host 授权后经 read/observe 同步）
     property bool hostRhythm: false
     readonly property bool hostRhythmActive: root.hostBlurActive && root.hostRhythm && root.motion
@@ -125,6 +275,8 @@ Item {
         root.plugin.settings.observe('apple-music-style-background-rhythm', 'lyrics', values => {
             root.hostRhythm = values.backgroundRhythm === true;
         });
+        if (root.coverUrl.length > 0)
+            coverSampler.loadImage(root.coverUrl);
     }
 
     // 无封面时的基础底色，与宿主封面占位观感一致
@@ -159,6 +311,102 @@ Item {
             baseColor: root.hostDisplayedBaseColor
             backgroundOpacity: root.hostMaterialOpacity
         }
+    }
+    // 封面采样：32×32 降采样 ≡ 宿主 Image sourceSize(32,32)，onPaint 里构建
+    // grade+盒模糊纹理（回退均色 backdropColor 的输入；LUT 走 bgLoader 实抓）
+    Canvas {
+        id: coverSampler
+        visible: false
+        width: 32
+        height: 32
+        property string sampleUrl: root.coverUrl
+        onSampleUrlChanged: {
+            root.coverSampled = false;
+            root.__blurTex = null;
+            root.__bgLut = null;
+            // 换曲交叉淡化（500ms）期间补抓，避免 LUT 停在旧封面/中途淡化态
+            root.__bgFadeActive = true;
+            bgFadeStop.restart();
+            if (sampleUrl.length > 0)
+                loadImage(sampleUrl);
+        }
+        onImageLoaded: requestPaint()
+        onPaint: {
+            const ctx = coverSampler.getContext('2d');
+            ctx.clearRect(0, 0, 32, 32);
+            if (coverSampler.sampleUrl.length === 0)
+                return;
+            ctx.drawImage(coverSampler.sampleUrl, 0, 0, 32, 32);
+            const d = ctx.getImageData(0, 0, 32, 32).data;
+            root.__buildBlurChain(d);
+            root.__scheduleBgGrab();
+            // 回退用全局均色：模糊纹理均值（已含 grade+模糊，语义同宿主合成）
+            let r = 0, g = 0, b = 0;
+            const tex = root.__blurTex;
+            for (let i = 0; i < tex.length; i += 3) {
+                r += tex[i];
+                g += tex[i + 1];
+                b += tex[i + 2];
+            }
+            const n = tex.length / 3;
+            root.coverAvgColor = Qt.rgba(r / n, g / n, b / n, 1);
+            root.coverSampled = true;
+        }
+    }
+    // 背景抓取降采样画布：bgLoader 渲染结果 → 48×24 像素（LUT 数据源）
+    // 背景抓取读回：grab 结果（itemgrabber: 内存 scheme）由 Image 元素加载
+    // （Canvas.loadImage 不认该 scheme），就绪后触发降采样画布取像素填 LUT
+    Image {
+        id: bgGrabImg
+        visible: false
+        cache: false
+        source: root.__bgGrabResult ? root.__bgGrabResult.url : ""
+        onStatusChanged: {
+            if (bgGrabImg.status === Image.Ready)
+                bgLutCanvas.requestPaint();
+            else if (bgGrabImg.status === Image.Error)
+                console.warn('[bg-grab] Image 读回失败 ' + bgGrabImg.source);
+        }
+    }
+    Canvas {
+        id: bgLutCanvas
+        visible: false
+        width: 48
+        height: 24
+        onPaint: {
+            if (!root.__bgGrabResult || bgGrabImg.status !== Image.Ready)
+                return;
+            const ctx = bgLutCanvas.getContext('2d');
+            ctx.clearRect(0, 0, 48, 24);
+            try {
+                ctx.drawImage(bgGrabImg, 0, 0, 48, 24);
+            } catch (e) {
+                console.warn('[bg-grab] drawImage 异常: ' + e);
+                return;
+            }
+            root.__fillBgLut(ctx.getImageData(0, 0, 48, 24).data);
+            root.__bgGrabResult = null;
+        }
+    }
+    // 抓取节奏：30ms 合并窗处理突发失效；400ms 步进跟进律动相位与换曲淡化
+    Timer {
+        id: bgGrabKick
+        interval: 30
+        onTriggered: root.__captureBg()
+    }
+    Timer {
+        id: bgGrabPacer
+        interval: 400
+        repeat: true
+        running: root.visible && root.hostBlurActive && !!root.__blurTex
+                 && (root.__bgGrabDirty || root.__bgRhythmMoving || root.__bgFadeActive)
+        onTriggered: root.__captureBg()
+    }
+    // 换曲交叉淡化补抓窗口（500ms 淡化 + 余量）
+    Timer {
+        id: bgFadeStop
+        interval: 1200
+        onTriggered: root.__bgFadeActive = false
     }
     // 与宿主 PlaybackBackground 一致：律动相位按 30fps 上限推进
     FrameAnimation {
@@ -675,6 +923,10 @@ Item {
             // 扫掠前沿才有可感知的明暗对比
             textColor: "#ffffff"
             unplayedColor: Qt.rgba(1, 1, 1, 0.2)
+            // 背景均色估计：渐变带切片色注入背景项（消除带端明暗边界）
+            backdropColor: root.backdropColor
+            // v9 逐像素背景估计器（null 时 AmllLine 回退 backdropColor 均色）
+            backdropSampler: root.backdropSample
             focusPosition: root.s.alignPosition / 100
             wordFade: root.s.fadeWidth / 100
             blurEnabled: root.s.enableBlur

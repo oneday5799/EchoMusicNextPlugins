@@ -20,6 +20,10 @@ Item {
     property font secondaryFont: Theme.store.lyricBaseFont
     property color textColor: "#ffffff"
     property color unplayedColor: "#ebffffff"
+    // 背景均色估计（Skin 复刻宿主合成链算出）：渐变带切片色注入背景项
+    property color backdropColor: "#000000"
+    // v9 逐像素背景估计（Skin.backdropSample）；null 时 AmllLine 回退均色
+    property var backdropSampler: null
     // 0..1，歌词对齐高度比例（旧设置 alignPosition/100）
     property real focusPosition: 0.48
     // 0..1，软边宽度系数（旧设置 fadeWidth/100）
@@ -646,6 +650,8 @@ Item {
                         font: flow.baseFont
                         playedColor: flow.textColor
                         unplayedColor: flow.unplayedColor
+                        backdropColor: flow.backdropColor
+                        backdropAt: flow.backdropSampler ? (x, y) => flow.backdropSampler(lyric, x, y) : null
                         fadeWidth: flow.wordFade
                         animateWords: flow.scaleEnabled && flow.motion
                     }

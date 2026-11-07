@@ -30,6 +30,14 @@ Item {
     property font font
     property color playedColor: "#ffffff"
     property color unplayedColor: Qt.rgba(1, 1, 1, 0.2)
+    // 背景均色估计（Skin 复刻宿主模糊封面合成链算出）。扫掠切片是不透明
+    // 外观层，颜色须含背景贡献才与半透明未唱字无缝衔接（否则带尾暗端
+    // 相对未唱字有 −bg(1−dimA) 的明暗边界）。
+    property color backdropColor: "#000000"
+    // v9 逐位置背景估计（Skin.backdropSample 复刻整条背景渲染链）：入参
+    // (行局部 x, 行 y)，返回 [r,g,b] 0..1；null 时回退 backdropColor 均色。
+    // 背景在空间上大幅变化（封面映射+网格形变），均色无法锚定带端。
+    property var backdropAt: null
     // 0..1，软边宽度系数（对应旧 AMLL 的 fadeWidth）
     property real fadeWidth: 0.5
     property bool animateWords: true
@@ -56,6 +64,10 @@ Item {
     property var wordSpans: []
     // 每个词元簇的连续 x（与 wordSpans 同源）
     property var clusterBases: []
+    // 塑形指标缓存（__refreshGeometry 时与 clusterBases 同步更新）：
+    // __sweepPoses 经它取 graphemes/height/baseline，避免 poses 绑定直接依赖
+    // run.metrics——metrics 随 pose 应用重建并再通知，会让 poses 绑定成环
+    property var __metricsCache: null
     readonly property real rawEdge: {
         if (timeMs < 0 || highlightAmount <= 0)
             return -2 * fade;
@@ -164,6 +176,7 @@ Item {
         // 由整行塑形结果重建词的连续坐标跨度；同一行内词元共享基线 y，
         // 行前缀 = 之前各行横向步进之和
         const m = line.runMetrics;
+        __metricsCache = m;
         const graphemes = m ? m.graphemes : [];
         const rows = [];
         const bases = [];
@@ -283,16 +296,41 @@ Item {
             }];
     }
     // 逐簇 pose 复现宿主/AMLL 的逐像素渐变前沿：o(x) = 0.5 + (前沿 − x)/软边宽。
-    // GlyphRun 的 pose 颜色整簇均匀，无法在簇内取样新变；
-    // 改用暗基底 + 分级亮带叠加：亮带以 pose.clip（run 局部坐标、
-    // 逐像素 fwidth 抗锯齿）裁出各自亮度线，透明度 1/(N−j+1) 使合成严格线性，
-    // 字内呈现连续明暗新变而非整字跳变。强调变换所有层共享，halo 只挂基底。
+    // GlyphRun 的 pose 颜色整簇均匀，无法在簇内取样渐变；按前沿把簇切成
+    // 亮核 + n 段含背景项的不透明外观切片 + 半透明暗基底（clip 为 run 局部坐标）。
+    // 关键：上层切片的左过渡带（fwidth 抗锯齿斜坡）必须整体落在下层切片的
+    // 不透明全覆盖区内，下层残尾由上层不透明内部盖住——若相邻两层在边界
+    // 同时部分覆盖，premultiplied over 会损失 T_A·T_B·c·(1−c)（亮端 0.25，
+    // 与切片数无关；亚像素切片间距还会与像素网格混叠成宽条纹）。
+    // 切片 rgb 取基底渲染值↔亮预乘的外观插值、a=1：与半透明渲染逐像素同值
+    // （背景项由 Skin 的 backdropColor 估计）。强调变换所有层共享。
+    // 强调辉光独立层（形体透明只留 halo），垫在所有字迹层之下——canvas
+    // shadowBlur 语义（辉光在字后）。挂在不透明字迹之上会把 228 墨色抬向
+    // 255，形成渐变带亮端比已唱平台亮 +18 的竖向亮带。
+    function __haloPose(halos, start, y, ex, ey, escale): var {
+        const pose = {
+                "key": "line",
+                "start": start,
+                "instance": "h",
+                "y": y,
+                "opacity": 1,
+                "color": Qt.rgba(1, 1, 1, 0),
+                "halos": halos
+            };
+        if (ex !== 0 || ey !== 0 || escale !== 1) {
+            pose.x = ex;
+            pose.y = ey;
+            pose.scale = escale;
+        }
+        return pose;
+    }
+
     function __sweepPoses(): var {
         if (line.text.length === 0)
             return [];
         if (!line.hasWordTiming)
             return line.__flatPoses();
-        const m = line.runMetrics;
+        const m = line.__metricsCache;
         const graphemes = m ? m.graphemes : [];
         const bases = line.clusterBases;
         if (line.wordSpans.length === 0 || graphemes.length === 0 || bases.length === 0)
@@ -302,6 +340,10 @@ Item {
         const lastG = graphemes[graphemes.length - 1];
         if ((Number(lastG.start) || 0) + (Number(lastG.length) || 0) !== line.text.length)
             return line.__transitionalPoses();
+        // 簇基与词元必须同长：塑形晚于 words 到达时（delegate 复用/宽度变化），
+        // bases 可能仍是旧文本的——偏短则尾簇 x 取 0 被判全亮，一行出现两处高亮
+        if (bases.length !== graphemes.length)
+            return line.__transitionalPoses();
         const list = [];
         const seen = new Set();
         const edge = line.edge, fade = line.fade;
@@ -310,6 +352,34 @@ Item {
         // GlyphRun 缩放围绕簇锚点（中点 x、基线 y），
         // AMLL 围绕字盒中心：需 (1−scale)×(盒中心−基线) 补偿
         const centerDy = m.height / 2 - m.baseline;
+        // 渐变分区几何：不透明外观切片（色含背景项、a=1）+ 暗基底，pitch = F。
+        // 宿主 clip 为软边缘（以裁剪边为中心、宽 = footprint 的渐变）：每片右缘
+        // 多伸 F，ramp-down 尾恰好整个落在下级内部、ramp-up 窗恰好整个落在上级
+        // 内部——满覆盖处中间层不透明，遮住邻片残尾，任意点只显现单层外观，
+        // 带内梯度 = 逐格常色 + 1px 线性过渡，台阶 Δ ≈ (bright−dim 外观)·F/fade
+        // ≈ 3/255（旧方案 pitch≥2F 时 Δ≈13，即用户所见条纹）。
+        // 切片色 = 基底渲染值 U 与亮预乘的插值（U = dimPr + bg(1−dimA)，bg 取
+        // Skin 的背景均色估计）：不透明层渲染 lerp(U, brightPr, τ)，与"半透明
+        // 亮墨 τ 叠暗基底"逐像素同值，带两端与已唱/未唱平台精确锚定，无明暗
+        // 边界；bg 估计残差只表现为中心段 ≤ ±8/255 的平滑倾斜（无周期结构）。
+        // 半透明分解（α=τ 亮切片叠基底）虽天然含背景项，但相邻切片软窗重叠
+        // 过合成 / 互补窗欠覆盖（±26~38），条纹不可接受，不可取。
+        // F 为设计 footprint 上限（dpr ≥ 1、强调 scale ≥ 1 → 实际 ≤ 1）。
+        const F = 1.0;
+        const g0 = edge - fade * 0.5, g1 = edge + fade * 0.5;
+        const K = Math.max(1, Math.ceil(fade / F));
+        const pitch = fade / K;
+        const dimA = line.dimColor.a, brightA = line.brightColor.a;
+        const dc = line.dimColor, bc = line.brightColor;
+        const dimPr = [dc.r * dimA, dc.g * dimA, dc.b * dimA];
+        const brightPr = [bc.r * brightA, bc.g * brightA, bc.b * brightA];
+        // 基底渲染值（含背景项）：暗墨叠背景 = 已唱/未唱平台间的暗端锚点。
+        // v9 有逐位置估计器时切片各自取样（背景空间变化大，均色锚不住带端），
+        // 此均值仅作估计器未就绪时的回退。
+        const bgc = line.backdropColor;
+        const baseApp = [dimPr[0] + bgc.r * (1 - dimA),
+                         dimPr[1] + bgc.g * (1 - dimA),
+                         dimPr[2] + bgc.b * (1 - dimA)];
         for (let i = 0; i < graphemes.length; ++i) {
             const g = graphemes[i];
             const start = Number(g.clusterStart) || 0;
@@ -361,78 +431,35 @@ Item {
             // 簇两端亮度：oL（左缘）≥ oR（右缘，亮度沿 x 递减）
             const oL = 0.5 + (edge - x) / fade;
             const oR = 0.5 + (edge - x - advance) / fade;
-            if (oR >= 1 || oL <= 0) {
-                // 整簇全亮 / 全暗：单层 pose
+            if (oR >= 1) {
+                // 整簇全亮（右缘未进过渡带）：halo 垫底 + 单层 pose
+                if (halos)
+                    list.push(line.__haloPose(halos, start, y, ex, ey, escale));
                 const pose = {
                         "key": "line",
                         "start": start,
                         "y": y,
                         "opacity": 1,
-                        "color": oR >= 1 ? line.brightColor : line.dimColor
+                        "color": line.brightColor
                     };
                 if (ex !== 0 || ey !== 0 || escale !== 1) {
                     pose.x = ex;
                     pose.y = ey;
                     pose.scale = escale;
                 }
-                if (halos)
-                    pose.halos = halos;
                 list.push(pose);
                 continue;
             }
-            // 跨越簇：每像素恰好一层 —— 48 段互斥亮度切片（亚像素宽，像素内 2-3 段
-            // 覆盖互补平均，边界 dip 被抹平）+ 两端截段。
-            // 叠层方案会让同一字形的抗锯齿边缘覆盖率复利（变粗、偏亮），
-            // 互斥切片不叠层；切片边缘由 clip 的 fwidth 抗锯齿衔接，
-            // 亮度步进 (亮−暗)/16 不可辨。同簇多层 pose 需互异 instance。
-            const slices = 48;
-            const brightA = line.brightColor.a, dimA = line.dimColor.a;
-            const bc = line.brightColor;
-            if (oL > 1) {
-                // 全亮段（x ≤ 前沿 − 软边/2）与簇相交：亮核截段
+            if (oL <= 0) {
+                // 整簇全暗：halo 垫底 + 单层 pose
+                if (halos)
+                    list.push(line.__haloPose(halos, start, y, ex, ey, escale));
                 const pose = {
                         "key": "line",
                         "start": start,
-                        "instance": "c",
                         "y": y,
                         "opacity": 1,
-                        "color": line.brightColor,
-                        "clip": {
-                            "x": -100000,
-                            "y": -100000,
-                            "width": (edge - rowPrefix) - fade * 0.5 + 100000,
-                            "height": 200000
-                        }
-                    };
-                if (ex !== 0 || ey !== 0 || escale !== 1) {
-                    pose.x = ex;
-                    pose.y = ey;
-                    pose.scale = escale;
-                }
-                if (halos)
-                    pose.halos = halos;
-                list.push(pose);
-            }
-            for (let k = 1; k <= slices; ++k) {
-                const sl = edge + fade * (0.5 - k / slices);
-                const sr = edge + fade * (0.5 - (k - 1) / slices);
-                if (sl >= x + advance)
-                    continue;   // 切片在簇右侧（k 小时偏右）
-                if (sr <= x)
-                    break;      // 切片已整体越到簇左侧（k 大时偏左）
-                const pose = {
-                        "key": "line",
-                        "start": start,
-                        "instance": "s" + k,
-                        "y": y,
-                        "opacity": dimA + (brightA - dimA) * (k - 0.5) / slices,
-                        "color": Qt.rgba(bc.r, bc.g, bc.b, 1),
-                        "clip": {
-                            "x": sl - rowPrefix,
-                            "y": -100000,
-                            "width": sr - sl,
-                            "height": 200000
-                        }
+                        "color": line.dimColor
                     };
                 if (ex !== 0 || ey !== 0 || escale !== 1) {
                     pose.x = ex;
@@ -440,9 +467,15 @@ Item {
                     pose.scale = escale;
                 }
                 list.push(pose);
+                continue;
             }
-            if (oR < 0) {
-                // 全暗段（x ≥ 前沿 + 软边/2）与簇相交：暗基底截段
+            // 跨越簇：halo 垫底 → 不透明外观切片（先铺暗基底：其 ramp-up 窗整个
+            // 落在切片 1 的不透明内部之下，被遮住）。切片 1 强制 τ=1 并向左无限
+            // 延伸（兼作旧亮核，满亮区无台阶）；同簇多层 pose 需互异 instance。
+            if (halos)
+                list.push(line.__haloPose(halos, start, y, ex, ey, escale));
+            const bandL = g0;
+            {
                 const pose = {
                         "key": "line",
                         "start": start,
@@ -451,7 +484,7 @@ Item {
                         "opacity": 1,
                         "color": line.dimColor,
                         "clip": {
-                            "x": (edge - rowPrefix) + fade * 0.5,
+                            "x": bandL - rowPrefix,
                             "y": -100000,
                             "width": 900000,
                             "height": 200000
@@ -464,16 +497,46 @@ Item {
                 }
                 list.push(pose);
             }
-            if (halos) {
-                // 强调辉光独立层：形体透明只留 halo，不经 clip 完整环绕
+            for (let s = 1; s <= K; ++s) {
+                const li = bandL + pitch * (s - 1);     // 切片左缘（= 台阶边界）
+                if (li >= x + advance)
+                    break;      // 切片已越到簇右侧
+                const ri = li + pitch + F;              // 右缘多伸 F：残尾没入下级内部
+                if (s > 1 && ri <= x)
+                    continue;   // 切片整体在簇左侧（切片 1 向左无限延伸，不受此限）
+                const tau = s === 1
+                        ? 1
+                        : Math.min(1, Math.max(0, 0.5 + (edge - (li + pitch * 0.5)) / fade));
+                if (tau <= 0.005)
+                    break;      // 余下切片与暗基底同观感
+                // 每片自己的背景项：切片中心行局部 x（= clip 坐标系）取样；
+                // 带端与未唱字衔接的是该片所在位置的背景，而非整行均值
+                let b0 = baseApp[0], b1 = baseApp[1], b2 = baseApp[2];
+                if (line.backdropAt) {
+                    const bgS = line.backdropAt(li - rowPrefix + pitch * 0.5, y);
+                    if (bgS) {
+                        b0 = dimPr[0] + bgS[0] * (1 - dimA);
+                        b1 = dimPr[1] + bgS[1] * (1 - dimA);
+                        b2 = dimPr[2] + bgS[2] * (1 - dimA);
+                    }
+                }
+                // 不透明外观：外观目标 P(τ) = lerp(baseApp, brightPr, τ)（a=1 时
+                // 直色 = 预乘色），与半透明亮墨叠暗基底逐像素同值
                 const pose = {
                         "key": "line",
                         "start": start,
-                        "instance": "h",
+                        "instance": "s" + s,
                         "y": y,
                         "opacity": 1,
-                        "color": Qt.rgba(1, 1, 1, 0),
-                        "halos": halos
+                        "color": Qt.rgba(b0 + (brightPr[0] - b0) * tau,
+                                         b1 + (brightPr[1] - b1) * tau,
+                                         b2 + (brightPr[2] - b2) * tau, 1),
+                        "clip": {
+                            "x": s === 1 ? -100000 : li - rowPrefix,
+                            "y": -100000,
+                            "width": (s === 1 ? ri + 100000 : ri - li),
+                            "height": 200000
+                        }
                     };
                 if (ex !== 0 || ey !== 0 || escale !== 1) {
                     pose.x = ex;
@@ -487,6 +550,9 @@ Item {
     }
 
     onWordsChanged: __refreshGeometry()
+    // 塑形结果异步晚于 words 到达（delegate 复用/换行/宽度变化都会触发重排）：
+    // metrics 落地时必须重建几何，否则 clusterBases/wordSpans 永远停在旧文本上
+    onRunMetricsChanged: __refreshGeometry()
     onCurrentChanged: refreshLifts()
     onTimeMsChanged: refreshLifts()
     onAnimateWordsChanged: refreshLifts()
