@@ -993,7 +993,10 @@ Item {
                 width: skeletonList.width
                 geometry: listGeometry
                 animate: root.pageActive && !pooled
-                showAlbum: root.selectedAlbum.length === 0
+                // Match the song rows: the album column stays visible inside
+                // a drill-in too, so the skeleton does not flash an empty
+                // column under the header's album cell.
+                showAlbum: true
                 ListView.onPooled: pooled = true
                 ListView.onReused: pooled = false
             }

@@ -303,6 +303,9 @@ let viewCacheKey = '';
 let viewCacheSongs: SongInit[] = [];
 let albumCacheKey = '';
 let albumCacheList: AlbumSummary[] = [];
+/** Album total for library.info, grouped once per index rebuild instead of
+ * re-grouping the whole library on every info poll. */
+let albumCountCache = 0;
 
 function indexLibrary(songs: SongInit[]): void {
   librarySongs = songs;
@@ -313,6 +316,7 @@ function indexLibrary(songs: SongInit[]): void {
   viewCacheSongs = [];
   albumCacheKey = '';
   albumCacheList = [];
+  albumCountCache = groupAlbums(songs).length;
 }
 
 function publishState(): void {
@@ -439,7 +443,7 @@ async function libraryInfo(): Promise<JsonValue> {
   return {
     ready: libraryReady,
     count: librarySongs.length,
-    albums: groupAlbums(librarySongs).length,
+    albums: albumCountCache,
     truncated: cacheTruncated,
     stale,
     scanning: !!scanJob,
@@ -1190,21 +1194,47 @@ async function libraryAlbums(args: Record<string, JsonValue>): Promise<JsonValue
   const { offset, limit } = parsePageArgs(args, ALBUM_PAGE_LIMIT_MAX);
   const albums = albumView(args);
   const page = albums.slice(offset, offset + limit);
-  const covers = await Promise.all(
-    page.map(async (album) => {
-      try {
-        return await raceTimeout(
-          ctx,
-          readSongCover(ctx, album.representativeId),
-          COVER_LOOKUP_BUDGET_MS,
-        );
-      } catch (error) {
-        return '';
+  // Same batched lookup the song rows use (libraryCovers): one store read
+  // for the whole page, then one read per distinct artwork hash, albums
+  // sharing artwork splitting the cost. readSongCover per album would
+  // re-read the whole cover map (plus image, plus legacy key on miss) for
+  // every card. Resolution order matches readSongCover: store image first,
+  // legacy per-song entry as the fallback.
+  const covers: string[] = new Array(page.length).fill('');
+  const store = await readStoreBounded(ctx);
+  const hashOfAlbum: { [index: number]: string } = {};
+  const hashes: string[] = [];
+  if (store) {
+    for (let i = 0; i < page.length; i += 1) {
+      const hash = coverEntryHash(store.map[page[i].representativeId]);
+      if (hash) {
+        hashOfAlbum[i] = hash;
+        if (hashes.indexOf(hash) < 0) hashes.push(hash);
       }
-    }),
-  );
+    }
+    for (const hash of hashes) {
+      const url = await readImageBounded(ctx, hash);
+      if (!url) continue;
+      for (let i = 0; i < page.length; i += 1) {
+        if (hashOfAlbum[i] === hash) covers[i] = url;
+      }
+    }
+  }
+  for (let i = 0; i < page.length; i += 1) {
+    if (covers[i]) continue;
+    try {
+      const value = (await raceTimeout(
+        ctx,
+        awaitOperation(ctx.io.readValue(legacyCoverKey(page[i].representativeId))),
+        COVER_LOOKUP_BUDGET_MS,
+      )) as JsonValue;
+      if (typeof value === 'string' && value) covers[i] = value;
+    } catch (error) {
+      // Missing covers simply keep the placeholder art.
+    }
+  }
   const rows: AlbumRowJson[] = page.map((album, index) =>
-    albumRow(album.name, album.count, covers[index] ?? '', album.artist),
+    albumRow(album.name, album.count, covers[index], album.artist),
   );
   return { ready: true, total: albums.length, offset, limit, albums: rows };
 }
