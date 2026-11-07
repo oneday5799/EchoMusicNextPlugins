@@ -486,10 +486,17 @@ Item {
 
     function albumRowsFrom(result) {
         return (result.albums || []).map(function (album) {
+            // Subtitle format of the host purchased-albums cards
+            // (SongCatalogModel::replaceCards): the artist, or
+            // "artist • N 首歌曲" once the count is known; a count without
+            // an artist degrades to "N 首歌曲".
+            const artist = album.artist || "";
+            const count = album.count | 0;
+            const label = count > 0 ? `${count} 首歌曲` : "";
             return {
                 title: album.name,
                 artistText: "",
-                extraText: `${album.count} 首`,
+                extraText: artist ? (label ? `${artist} • ${label}` : artist) : label,
                 coverUrl: album.cover || "",
                 durationText: "",
                 resourceId: album.name
@@ -942,12 +949,16 @@ Item {
         ContentGrid {
             id: albumGrid
             x: root.contentInset
-            width: Math.max(0, parent.width - root.contentInset * 2)
+            // Match the host purchased-albums grid: the width keeps the
+            // trailing 20px gutter so the row's last card ends flush at the
+            // right inset instead of one gutter short, and the top margin
+            // clears the header by the host's 16px.
+            width: Math.max(0, parent.width - root.contentInset * 2 + 20)
             height: parent.height
             visible: root.albumGridActive
             pageActive: root.pageActive && root.albumGridActive
             pageContainer: viewport
-            topMargin: detailHeader.expandedHeight + toolbar.height + 8
+            topMargin: detailHeader.expandedHeight + toolbar.height + 16
             bottomMargin: 48
             sourceModel: albumModel
             loading: root.albumsLoading && root.albumRows.length === 0

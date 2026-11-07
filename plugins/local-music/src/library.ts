@@ -233,6 +233,9 @@ export interface AlbumSummary {
   count: number;
   /** Song id whose cached cover represents the album. */
   representativeId: string;
+  /** Artist of the representative song — the grid card subtitle, matching
+   * the host card builder ("artist • N 首歌曲"). */
+  artist: string;
 }
 
 /** Group songs by album keeping first-seen order as the representative. */
@@ -246,7 +249,12 @@ export function groupAlbums(songs: SongInit[]): AlbumSummary[] {
       existing.count += 1;
       continue;
     }
-    const summary: AlbumSummary = { name: key, count: 1, representativeId: song.id };
+    const summary: AlbumSummary = {
+      name: key,
+      count: 1,
+      representativeId: song.id,
+      artist: song.artist || '',
+    };
     seen[key] = summary;
     order.push(key);
   }

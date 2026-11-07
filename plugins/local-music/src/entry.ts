@@ -127,6 +127,8 @@ interface AlbumRowJson extends Record<string, JsonValue> {
   name: string;
   count: number;
   cover: string;
+  /** Representative artist for the grid card subtitle (host card format). */
+  artist: string;
 }
 
 interface ScanJob {
@@ -350,8 +352,8 @@ function songRow(song: SongInit): SongRowJson {
   };
 }
 
-function albumRow(name: string, count: number, cover: string): AlbumRowJson {
-  return { name, count, cover };
+function albumRow(name: string, count: number, cover: string, artist: string): AlbumRowJson {
+  return { name, count, cover, artist };
 }
 
 function parsePageArgs(
@@ -1202,7 +1204,7 @@ async function libraryAlbums(args: Record<string, JsonValue>): Promise<JsonValue
     }),
   );
   const rows: AlbumRowJson[] = page.map((album, index) =>
-    albumRow(album.name, album.count, covers[index] ?? ''),
+    albumRow(album.name, album.count, covers[index] ?? '', album.artist),
   );
   return { ready: true, total: albums.length, offset, limit, albums: rows };
 }
