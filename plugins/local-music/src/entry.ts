@@ -166,6 +166,12 @@ let scanJob: ScanJob | null = null;
 let scanEpoch = 0;
 let settingsRevision = 0;
 let libraryRevision = 0;
+/** Bumped when a play-time completion persists a cover: the page reacts by
+ * re-requesting the rows' art without waiting for a rescan. */
+let coverRevision = 0;
+/** Song ids whose covers landed since the last publish; publishState
+ * flushes the list so the page can target the re-request. */
+let pendingCoveredIds: string[] = [];
 /** Last value published under scan; setState replaces the whole state, so
  * every publish must carry all keys. */
 let lastScanState: JsonValue = null;
@@ -329,7 +335,13 @@ function publishState(): void {
   const ctx = context;
   if (!ctx) return;
   try {
-    ctx.ui.setState({ settingsRevision, scan: lastScanState, libraryRevision });
+    ctx.ui.setState({
+      settingsRevision,
+      scan: lastScanState,
+      libraryRevision,
+      coverRevision,
+      coveredIds: pendingCoveredIds.splice(0),
+    });
   } catch (error) {
     // UI may already be draining during deactivation.
   }
@@ -538,7 +550,16 @@ function queuePersistCover(
   hash: string,
   url: string,
 ): void {
-  queueCoverStoreTask(() => persistCoverEntry(ctx, song, hash, url)).catch(() => undefined);
+  queueCoverStoreTask(() => persistCoverEntry(ctx, song, hash, url))
+    .then(() => {
+      // The page holds rows whose earlier lookup missed this entry; publish
+      // the landed id so it re-requests instead of waiting for a rescan.
+      coverRevision += 1;
+      if (pendingCoveredIds.indexOf(song.id) < 0 && pendingCoveredIds.length < 16)
+        pendingCoveredIds.push(song.id);
+      publishState();
+    })
+    .catch(() => undefined);
 }
 
 let backfillTimer: { dispose(): void } | null = null;
@@ -1675,7 +1696,13 @@ export async function activate(ctx: EchoPluginContext): Promise<void> {
   ctx.registerCommand('library.cache.clear', () => clearCachedArtwork());
   ctx.registerCommand('play', (commandArgs) => playCommand(commandArgs));
 
-  ctx.ui.setState({ settingsRevision, scan: null, libraryRevision: 0 });
+  ctx.ui.setState({
+    settingsRevision,
+    scan: null,
+    libraryRevision: 0,
+    coverRevision: 0,
+    coveredIds: [],
+  });
   lastScanState = null;
   void warmStart(ctx);
   // Belt and braces: if the grant table reads empty while folders are

@@ -1071,7 +1071,7 @@ test('播放补全：扫描不查 kugou，仅播放的那首歌补全', async ()
   const remote = 'https://cdn.example.com/cover.jpg';
   const store = new Map();
   const harness = await activateWith({ 'a.mp3': { size: 100 } }, {}, store);
-  const { commands, playlistCalls } = harness;
+  const { commands, playlistCalls, published } = harness;
   let searches = 0;
   harness.ctx.kugou = {
     request(kind, params) {
@@ -1107,6 +1107,19 @@ test('播放补全：扫描不查 kugou，仅播放的那首歌补全', async ()
     });
     const hash = splitEntry(store.get('coverMap')[row.id]).hash;
     assert.equal(store.get(`coverimg:${hash}`), remote);
+
+    // 播放期落盘必须通知页面：state 带 coverRevision 与补全的曲目 id，
+    // 页面据此重取封面而不等重扫。
+    await waitFor(() =>
+      published.some(
+        (entry) => Array.isArray(entry.coveredIds) && entry.coveredIds.includes(row.id),
+      ),
+    );
+    const notified = published.find(
+      (entry) => Array.isArray(entry.coveredIds) && entry.coveredIds.includes(row.id),
+    );
+    assert.equal(typeof notified.coverRevision, 'number');
+    assert.equal(notified.coverRevision > 0, true);
   } finally {
     await harness.deactivate();
   }

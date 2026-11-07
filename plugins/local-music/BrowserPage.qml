@@ -390,6 +390,30 @@ Item {
         return pageRows[index].coverUrl;
     }
 
+    /** A play-time cover completion persisted rows' art: re-request the
+     * given ids that are in the current song rows and still show the
+     * placeholder. Rows scrolled out (or in other views) heal through the
+     * cleared miss cache when their delegates re-derive. */
+    function healCoveredRows(ids) {
+        if (!ids || ids.length === 0)
+            return;
+        let scheduled = false;
+        for (let i = 0; i < ids.length; i++) {
+            const id = ids[i];
+            if (!id || coverInFlightIds[id] || coverRequests[id])
+                continue;
+            const index = songIndexById[id];
+            if (index === undefined || !pageRows[index])
+                continue;
+            if (pageRows[index].coverUrl.length > 0)
+                continue;
+            coverRequests[id] = true;
+            scheduled = true;
+        }
+        if (scheduled && !coverBatchTimer.running)
+            coverBatchTimer.restart();
+    }
+
     function requestCoverBatch() {
         const ids = Object.keys(coverRequests);
         if (ids.length === 0)
@@ -752,10 +776,14 @@ Item {
         scanState = state && state.scan ? state.scan : {};
         const revision = state && typeof state.libraryRevision === "number" ? state.libraryRevision : 0;
         lastLibraryRevision = revision;
+        lastCoverRevision = state && typeof state.coverRevision === "number" ? state.coverRevision : 0;
         refreshSettings(true);
     }
 
     property int lastLibraryRevision: -1
+    // Play-time cover completions publish a revision with the landed ids;
+    // the page re-requests those rows' art without waiting for a rescan.
+    property int lastCoverRevision: -1
     // A library notification while the page sits in a background stack
     // would still rebuild every row delegate and re-request covers for
     // nothing the user can see; the reload waits for reactivation.
@@ -792,6 +820,15 @@ Item {
                     root.refreshSettings(true);
                 else
                     root.pendingLibraryRefresh = true;
+            }
+            const coverRevision = state && typeof state.coverRevision === "number" ? state.coverRevision : -1;
+            if (coverRevision >= 0 && coverRevision !== root.lastCoverRevision) {
+                root.lastCoverRevision = coverRevision;
+                // The store gained entries the earlier lookups did not see;
+                // drop the miss cache so rows entering the view re-derive,
+                // and re-request the completed ids' rows right away.
+                coverMisses = ({});
+                root.healCoveredRows(asArray(state.coveredIds));
             }
         }
     }
