@@ -49,6 +49,24 @@ Item {
         const seconds = total % 60;
         return minutes + ":" + (seconds < 10 ? "0" : "") + seconds;
     }
+    // 收起播放页走 playback.page 部件的 close action：宿主 onActionRequested →
+    // PlaybackPage.close()，与收起按钮同路径共享 Popup 退出过渡（Qt 退出过渡期
+    // 间 visible 保持 true，弹层在过渡结束后才释放）。淡出与封面飞行来自下方
+    // hostOpacity 绑定与 findPageMotion 的 targetCover 接管；命令通道
+    // closePlayback 同样落到 playbackPageLoader.close()，仅作部件兜底。
+    function closePlayback(): void {
+        const part = root.plugin.ui.parts.queryUnique({
+            "role": "playback.page",
+            "key": "player",
+            "surface": "playback"
+        });
+        if (part && part.valid && part.actions.includes("close")) {
+            const op = part.invoke("close");
+            if (op && !(op.finished && op.state === EchoPluginOperation.Failed))
+                return;
+        }
+        root.page.command("closePlayback");
+    }
     function openDetail(name: string, resourceId: string): void {
         if (!name || !resourceId)
             return;
@@ -63,12 +81,12 @@ Item {
             return;
         if (op.finished) {
             if (op.state === EchoPluginOperation.Succeeded)
-                root.page.command("closePlayback");
+                closePlayback();
             return;
         }
         op.completed.connect(() => {
             if (op.state === EchoPluginOperation.Succeeded)
-                root.page.command("closePlayback");
+                closePlayback();
         });
     }
 
@@ -278,7 +296,52 @@ Item {
     property bool hostRhythm: false
     readonly property bool hostRhythmActive: root.hostBlurActive && root.hostRhythm && root.motion
     property real hostPhase: 0
+    // 宿主播放页开合动效源：PlaybackPageMotion.hostOpacity 与宿主 chrome 同曲线。
+    // 皮肤全幅不透明，不跟随则退出过渡期间画面静止到弹层销毁，观感为无动画。
+    // 经 objectName 在场景树定位宿主 motion（backdropScene → playbackPageMotion）；
+    // 定位失败时保持不透明，仅丢失同步淡入淡出。定位成功后一并接管封面飞行
+    // （见 findPageMotion）：皮肤封面交给 motion.targetCover，宿主 enter/exit
+    // 过渡驱动飞行与淡出，时长随之切到飞行档（进 200ms / 出 220ms）。
+    property PlaybackPageMotion pageMotion: null
+    opacity: pageMotion ? pageMotion.hostOpacity : 1
+    function findByName(item, name) {
+        for (const child of item.children) {
+            if (child.objectName === name)
+                return child;
+            const found = root.findByName(child, name);
+            if (found)
+                return found;
+        }
+        return null;
+    }
+    function findPageMotion(): void {
+        let p = root.parent;
+        while (p && p.objectName !== "playbackBackdropScene")
+            p = p.parent;
+        if (!p)
+            return;
+        // motion 声明在 nativePlaybackContents 之下（皮肤加载时该项不可见但存活），
+        // 不能只扫 backdropScene 的直接子项
+        root.pageMotion = root.findByName(p, "playbackPageMotion");
+        if (!root.pageMotion)
+            return;
+        // 封面飞行复用宿主动效：enter/exit 过渡的 ScriptAction 调 motion.prepare()
+        // 并用 openingMotion/closingMotion 驱动 progress（460/360ms 贝塞尔），插件
+        // 不自绘任何东西。皮肤封面本就是 EchoCover（与播放条 coverItem 同类型，
+        // transitionArtwork/圆角占位均适用），直接作为 targetCover。motion 藏在
+        // 皮肤加载时不可见的 nativePlaybackContents 里，重挂到 backdropScene 才能
+        // 画在皮肤之上（anchors.fill 与原几何一致）；赋值断开宿主对 coverBody 的
+        // 绑定，弹层释放销毁后随下次加载重建。若入场飞行已在旧目标上起跑（皮肤
+        // 晚于 ScriptAction 加载的竞速），以当前矩形为起点调 prepare 改道皮肤封面。
+        const m = root.pageMotion;
+        if (m.parent !== p)
+            m.parent = p;
+        m.targetCover = coverItem;
+        if (m.coverFlight && m.progress < 1)
+            m.prepare(true);
+    }
     Component.onCompleted: {
+        root.findPageMotion();
         const read = root.plugin.settings.read('lyrics');
         const applyRead = () => {
             if (read.state === 2)
