@@ -39,5 +39,9 @@
   },
   "capabilities": ["localFiles", "audioSource", "lyrics", "kugouApi", "cover"],
   "contexts": ["main"],
-  "tags": ["本地", "音源", "标签", "歌词"]
+  "tags": ["本地", "音源", "标签", "歌词"],
+  "distribution": {
+    "artifact": "artifacts/local-music-1.0.0.echomod",
+    "sha256": "55e3d7a658f8110d4de7c08034a6c4c897637292e6a30f0e57df3aefaebaba0d"
+  }
 }
