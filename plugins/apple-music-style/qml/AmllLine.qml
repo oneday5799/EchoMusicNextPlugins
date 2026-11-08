@@ -41,6 +41,12 @@ Item {
     // 0..1，软边宽度系数（对应旧 AMLL 的 fadeWidth）
     property real fadeWidth: 0.5
     property bool animateWords: true
+    // 远离焦点行的模糊（AMLL blur 语义：CSS filter blur 的 px 值，焦点行 0，
+    // 其余 min(5, 1+距离) 由调用方算好经动画驱动）。经 GlyphPose.blur 落地：
+    // 宿主按档位 {0,8,16,32} 预烘三盒模糊进 effects 图集，着色器在相邻档位
+    // 间连续插值。交叉淡化剖面的可见动态范围集中在 pose 6~8（≈6 以下全锐），
+    // 折算 CSS 模糊 B px ≈ pose 6.35+0.1B（实测标定见 __sweepPoses 注释）。
+    property real blurAmount: 0
 
     readonly property real em: font.pixelSize
     readonly property real fade: Math.max(1, em * 1.2 * fadeWidth)
@@ -93,7 +99,12 @@ Item {
                 "maxWidth": Math.min(4096, Math.max(1, width)),
                 // 辉光贴图预算（合法档位 40/80/160/512/1024）：
                 // 强调词 halo 半径 min(.3, blur×.3)em，em ≤133px 时 ≤40
-                "maxHaloRadius": 40
+                "maxHaloRadius": 40,
+                // 身体模糊预算（合法档位 0/8/16/32）：AMLL 上限 5px 折算 pose
+                // 值 2.5，档位 8 足够；显式声明同时把 effects 图集 tile 的
+                // padding 从默认 32 档的 98px 收到 26px（省 ~4 倍显存）。
+                // 注意 haloSampling=canvas 模式拒收身体模糊，本皮肤用默认 static。
+                "maxBlur": 8
             }] : []
 
     function __bez(p: real, x1: real, y1: real, x2: real): real {
@@ -325,7 +336,7 @@ Item {
         return pose;
     }
 
-    function __sweepPoses(): var {
+    function __sweepPosesCore(): var {
         if (line.text.length === 0)
             return [];
         if (!line.hasWordTiming)
@@ -459,7 +470,9 @@ Item {
                         "start": start,
                         "y": y,
                         "opacity": 1,
-                        "color": line.dimColor
+                        "color": line.dimColor,
+                        // 行局部 x 中心：模糊注入时换算不透明外观需按簇位置取背景
+                        "__bgx": x - rowPrefix + advance * 0.5
                     };
                 if (ex !== 0 || ey !== 0 || escale !== 1) {
                     pose.x = ex;
@@ -544,6 +557,77 @@ Item {
                     pose.scale = escale;
                 }
                 list.push(pose);
+            }
+        }
+        // [probe-v10] 临时诊断：带端背景估计 vs 回退均色（用户要求保留至另行通知）
+        try {
+            const __now = Date.now();
+            if (!line.__sweepPoses.__lastDump || __now - line.__sweepPoses.__lastDump >= 150) {
+                line.__sweepPoses.__lastDump = __now;
+                let __bg = 'null';
+                try {
+                    const __c = line.backdropColor;
+                    __bg = __c.r.toFixed(2) + '/' + __c.g.toFixed(2) + '/' + __c.b.toFixed(2);
+                } catch (e) {}
+                let __bs = 'null';
+                try {
+                    if (line.backdropAt) {
+                        const __parts = [];
+                        const __fxs = [0.2, 0.5, 0.8];
+                        for (let __k = 0; __k < 3; ++__k) {
+                            const __s = line.backdropAt(line.width * __fxs[__k], 0);
+                            __parts.push(__s ? __s[0].toFixed(2) + ',' + __s[1].toFixed(2) + ',' + __s[2].toFixed(2) : 'null');
+                        }
+                        __bs = __parts.join(' ');
+                    }
+                } catch (e) {}
+                let __dump = '[probe-poses] t=' + (__now % 1000000) + ' edge=' + Math.round(edge) + ' w=' + Math.round(line.width) + ' blur=' + (line.blurAmount !== undefined ? Number(line.blurAmount).toFixed(2) : 'NA') + ' bg=' + __bg + ' bs=' + __bs + ' n=' + list.length;
+                for (let __i = 0; __i < Math.min(4, list.length); ++__i) {
+                    const __q = list[__i];
+                    __dump += ' | @' + __i + ' op=' + Number(__q.opacity).toFixed(2) + ' st=' + (__q.start ?? -1) + ' c=' + Math.round(__q.color.r * 255) + ',' + Math.round(__q.color.g * 255) + ',' + Math.round(__q.color.b * 255) + ' a=' + Number(__q.color.a).toFixed(2) + ' bl=' + (__q.blur !== undefined ? Number(__q.blur).toFixed(2) : '-') + ' clip=' + (__q.clip ? Math.round(__q.clip.x) + '+' + Math.round(__q.clip.width) : '-');
+                }
+                console.warn(__dump);
+            }
+        } catch (e) {}
+        return list;
+    }
+    // blurAmount>0 时给全部 pose（含 halo 层与切片层）统一注入 blur，覆盖
+    // __sweepPosesCore 的三个出口（无逐词整行/塑形过渡/逐簇扫掠）。绑定经
+    // 此读取 blurAmount，动画驱动模糊时不需额外信号。
+    // 折算：宿主 bodyBlur 是 crisp↔档位8 烘焙贴图的线性交叉淡化，但合成剖面
+    // 的 10-90% 宽随 t=pose/8 按 Φ⁻¹(1-0.1/t) 陡增——pose≈6 以下肉眼全锐，
+    // 全部动态范围挤在 6~8。Timer 轮换实测（dpr1.25，逻辑px，重复中位数）：
+    //   pose  6.0  6.2  6.4  6.6  6.8  7.0  8.0
+    //   宽   2.38 2.74 3.88 5.33 8.15 10.18 >13
+    // 对 AMLL CSS blur B（逻辑px，宽 1.28B+1 逻辑 = 1.25×(1.28B+1) 物理），
+    // 线性拟合 pose ≈ 6.35 + 0.1×B（B≤5），全段宽度误差 ≤0.5 逻辑px。
+    // bake 密度 min(dpr×.25,.5) 随 dpr 变化，此系数在其他 dpr 需重测。
+    // 起坡斜坡 min(1,B/0.3)：动画从 0 爬升时避免 pose 0→6.35 一帧跳变。
+    // 半透明墨色会令同 pose 的模糊显著加重（α 对照实验：a=0.4 的未唱行在
+    // pose 6 已达焦点行 pose 8 的溶解宽度，钉 a=1 即恢复曲线；机制未定位到
+    // 宿主管线，但结论可复现）。故模糊行一律换「暗墨叠背景」的不透明外观
+    // （与扫掠带切片同式，视觉逐像素等价），全行共用同一条标定曲线。
+    function __sweepPoses(): var {
+        const list = __sweepPosesCore();
+        const b = line.blurAmount;
+        const amount = b > 0.005 ? (6.35 + 0.1 * Math.min(5, b)) * Math.min(1, b / 0.3) : 0;
+        if (amount > 0.005) {
+            for (let i = 0; i < list.length; ++i) {
+                const pose = list[i];
+                pose.blur = Math.min(8, amount);
+                const c = pose.color;
+                // halo 层（形体透明只留辉光）与已不透明的切片不处理
+                if (c.a >= 0.999 || pose.halos)
+                    continue;
+                let bg = line.backdropColor;
+                if (line.backdropAt) {
+                    const s = line.backdropAt(pose.__bgx ?? line.width * 0.5, pose.y ?? 0);
+                    if (s)
+                        bg = { "r": s[0], "g": s[1], "b": s[2] };
+                }
+                pose.color = Qt.rgba(c.r * c.a + bg.r * (1 - c.a),
+                                     c.g * c.a + bg.g * (1 - c.a),
+                                     c.b * c.a + bg.b * (1 - c.a), 1);
             }
         }
         return list;

@@ -1,7 +1,6 @@
 pragma ComponentBehavior: Bound
 import QtQuick
 import QtQuick.Controls.Basic
-import QtQuick.Effects
 import EchoMusic.Controls
 import EchoMusic.Theme
 import EchoMusic.PluginSdk
@@ -613,7 +612,6 @@ Item {
                     opacity: lineMotion.opacity
                     scale: lineMotion.scale
                     transformOrigin: Item.Left
-                    readonly property real blurAmount: lineMotion.blur
                     AmllLineMotion {
                         id: lineMotion
                         activeLine: line.active
@@ -624,13 +622,6 @@ Item {
                         blurInactive: flow.softFocus && flow.blurEnabled && lines.following
                         inactiveBlur: Math.min(5, (1 + line.distance) * (flow.width <= 1024 ? .8 : 1))
                         targetOpacity: line.lineOpacity
-                    }
-                    layer.enabled: flow.live && line.inViewport && visual.blurAmount > .01
-                    layer.effect: MultiEffect {
-                        blurEnabled: true
-                        blurMax: 12
-                        blur: visual.blurAmount / 12
-                        autoPaddingEnabled: true
                     }
                     AmllLine {
                         id: lyric
@@ -647,6 +638,7 @@ Item {
                         timeMs: (line.active || lineMotion.highlight > .001) && line.inViewport && flow.live ? flow.renderTime - flow.offsetMs : -1
                         current: line.active || lineMotion.highlight > .001
                         highlightAmount: lineMotion.highlight
+                        blurAmount: lineMotion.blur
                         font: flow.baseFont
                         playedColor: flow.textColor
                         unplayedColor: flow.unplayedColor
