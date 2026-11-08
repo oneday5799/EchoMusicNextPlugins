@@ -52,9 +52,23 @@ Item {
     function openDetail(name: string, resourceId: string): void {
         if (!name || !resourceId)
             return;
-        root.plugin.executeCommand("open-detail", {
+        // 详情页在播放页之下：open-detail（entry 注册，经 ctx.ui.navigation 落地
+        // 宿主路由）成功后再关播放页——对齐旧 web 版先 push 后关歌词层的顺序，
+        // 避免遮罩后旧页面闪现；导航失败则保留播放页现状。
+        const op = root.plugin.executeCommand("open-detail", {
             "name": name,
-            "resourceId": resourceId
+            "resourceId": String(resourceId)
+        });
+        if (!op)
+            return;
+        if (op.finished) {
+            if (op.state === EchoPluginOperation.Succeeded)
+                root.page.command("closePlayback");
+            return;
+        }
+        op.completed.connect(() => {
+            if (op.state === EchoPluginOperation.Succeeded)
+                root.page.command("closePlayback");
         });
     }
 
