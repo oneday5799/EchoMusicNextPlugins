@@ -616,22 +616,8 @@ Item {
                                 "revision": root.player.revision
                             })
                         }
-                        AmActionButton {
-                            glyph: "message-circle"
-                            label: qsTr("查看评论")
-                            enabled: root.page.active
-                            onClicked: root.page.command("comments", {
-                                "revision": root.player.revision
-                            })
-                        }
-                        AmActionButton {
-                            glyph: "share"
-                            label: qsTr("分享")
-                            enabled: root.page.active
-                            onClicked: root.page.command("share", {
-                                "revision": root.player.revision
-                            })
-                        }
+                        // 评论/分享已由 entry 经 parts.contribute 上移到宿主右缘
+                        // 歌词工具列（qml/SideActions.qml），对齐旧 web 版布局
                         AmActionButton {
                             glyph: "list"
                             label: qsTr("更多外观")

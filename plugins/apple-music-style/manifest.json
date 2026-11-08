@@ -22,7 +22,9 @@
       "ui.navigation",
       "text.glyphs",
       "graphics.glyphRun.canvas",
-      "settings.host"
+      "settings.host",
+      "ui.parts",
+      "ui.composition"
     ]
   },
   "capabilities": ["lyricsPage", "navigation", "hostSettings"],

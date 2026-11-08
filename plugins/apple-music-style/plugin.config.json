@@ -8,6 +8,7 @@
     "qml/AmllLineMotion.qml",
     "qml/AmllSpring.qml",
     "qml/AmllInterlude.qml",
+    "qml/SideActions.qml",
     "icon.svg",
     "preview.jpg",
     "LICENSE",

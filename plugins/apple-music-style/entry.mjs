@@ -24,27 +24,35 @@ var DEFAULT_SETTINGS = {
   enhanceContrast: false,
   fontScale: 100,
   fontWeight: 850,
+  enableBlur: true,
+  enableScale: true,
+  enableSpring: true,
+  fadeWidth: 50,
   alignPosition: 48
 };
 var NUMBER_SETTINGS = {
   fontScale: [50, 200],
   fontWeight: [300, 900],
+  fadeWidth: [0, 100],
   alignPosition: [0, 100]
 };
+var BOOLEAN_SETTINGS = ["enhanceContrast", "enableBlur", "enableScale", "enableSpring"];
 function validateSettings(values) {
   if (!values || typeof values !== "object" || Array.isArray(values)) {
-    return { errors: ["皮肤设置必须是 JSON 对象"] };
+    return { errors: ["\u76AE\u80A4\u8BBE\u7F6E\u5FC5\u987B\u662F JSON \u5BF9\u8C61"] };
   }
   const errors = [];
-  if (values.enhanceContrast !== void 0 && typeof values.enhanceContrast !== "boolean") {
-    errors.push("增强对比度必须是布尔值");
+  for (const key of BOOLEAN_SETTINGS) {
+    if (values[key] !== void 0 && typeof values[key] !== "boolean") {
+      errors.push(`${key} \u5FC5\u987B\u662F\u5E03\u5C14\u503C`);
+    }
   }
   for (const key of Object.keys(NUMBER_SETTINGS)) {
     const [min, max] = NUMBER_SETTINGS[key];
     const value = values[key];
     if (value === void 0) continue;
     if (typeof value !== "number" || !Number.isFinite(value) || value < min || value > max) {
-      errors.push(`${key} 必须是 ${min}..${max} 之间的数值`);
+      errors.push(`${key} \u5FC5\u987B\u662F ${min}..${max} \u4E4B\u95F4\u7684\u6570\u503C`);
     }
   }
   return errors.length === 0 ? true : { errors };
@@ -54,8 +62,8 @@ function validateSettings(values) {
 function activate(ctx) {
   const skin = ctx.ui.lyricsPage.registerSkin({
     id: SKIN_ID,
-    title: "Apple Music 风格",
-    description: "双栏布局：左侧封面与播放控制，右侧宿主原生逐字歌词。",
+    title: "Apple Music \u98CE\u683C",
+    description: "\u53CC\u680F\u5E03\u5C40\uFF1A\u5DE6\u4FA7\u5C01\u9762\u4E0E\u64AD\u653E\u63A7\u5236\uFF0C\u53F3\u4FA7\u5BBF\u4E3B\u539F\u751F\u9010\u5B57\u6B4C\u8BCD\u3002",
     component: "qml/Skin.qml",
     titlebar: "host",
     tools: "host",
@@ -65,6 +73,17 @@ function activate(ctx) {
     validate: validateSettings
   });
   if (!skin) throw new Error(ctx.ui.lyricsPage.errorMessage);
+  const sideActions = ctx.ui.parts.contribute(
+    "side-actions",
+    { key: "lyricOffsetAction-0", surface: "playback" },
+    {
+      operation: "insert",
+      position: "after",
+      component: "qml/SideActions.qml",
+      layout: { preferredWidth: 36, preferredHeight: 80 }
+    }
+  );
+  if (!sideActions) throw new Error(ctx.ui.parts.errorMessage);
   const detailRoutes = ["album-detail", "artist-detail"];
   ctx.registerCommand("open-detail", (args) => {
     var _a, _b;
