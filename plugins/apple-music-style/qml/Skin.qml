@@ -298,9 +298,9 @@ Item {
     // 宿主播放页开合动效源：PlaybackPageMotion.hostOpacity 与宿主 chrome 同曲线。
     // 皮肤全幅不透明，不跟随则退出过渡期间画面静止到弹层销毁，观感为无动画。
     // 经 objectName 在场景树定位宿主 motion（backdropScene → playbackPageMotion）；
-    // 定位失败时保持不透明，仅丢失同步淡入淡出。定位成功后一并接管封面飞行
-    // （见 findPageMotion）：皮肤封面交给 motion.targetCover，宿主 enter/exit
-    // 过渡驱动飞行与淡出，时长随之切到飞行档（进 200ms / 出 220ms）。
+    // 定位失败时保持不透明，仅丢失同步淡入淡出。定位成功后仅接管出场封面飞行
+    // （关闭时封面飞回播放条，见 findPageMotion）；入场方向不飞行——prepare(true)
+    // 起跑的飞行一律同步掐灭退回普通 400ms 淡入（见下方 Connections）。
     property PlaybackPageMotion pageMotion: null
     opacity: pageMotion ? pageMotion.hostOpacity : 1
     function findByName(item, name) {
@@ -324,20 +324,36 @@ Item {
         root.pageMotion = root.findByName(p, "playbackPageMotion");
         if (!root.pageMotion)
             return;
-        // 封面飞行复用宿主动效：enter/exit 过渡的 ScriptAction 调 motion.prepare()
-        // 并用 openingMotion/closingMotion 驱动 progress（460/360ms 贝塞尔），插件
-        // 不自绘任何东西。皮肤封面本就是 EchoCover（与播放条 coverItem 同类型，
-        // transitionArtwork/圆角占位均适用），直接作为 targetCover。motion 藏在
-        // 皮肤加载时不可见的 nativePlaybackContents 里，重挂到 backdropScene 才能
-        // 画在皮肤之上（anchors.fill 与原几何一致）；赋值断开宿主对 coverBody 的
-        // 绑定，弹层释放销毁后随下次加载重建。若入场飞行已在旧目标上起跑（皮肤
-        // 晚于 ScriptAction 加载的竞速），以当前矩形为起点调 prepare 改道皮肤封面。
+        // 封面飞行复用宿主动效：exit 过渡的 ScriptAction 调 motion.prepare(false)
+        // 并用 closingMotion 驱动 progress（360ms 贝塞尔），插件不自绘任何东西。
+        // 皮肤封面本就是 EchoCover（与播放条 coverItem 同类型，transitionArtwork/
+        // 圆角占位均适用），直接作为 targetCover。motion 藏在皮肤加载时不可见的
+        // nativePlaybackContents 里，重挂到 backdropScene 才能画在皮肤之上
+        // （anchors.fill 与原几何一致）；赋值断开宿主对 coverBody 的绑定，弹层
+        // 释放销毁后随下次加载重建。入场方向不接管：若入场飞行已在旧目标上起跑
+        // （皮肤晚于 ScriptAction 加载的竞速），直接掐灭退回普通淡入。
         const m = root.pageMotion;
         if (m.parent !== p)
             m.parent = p;
         m.targetCover = coverItem;
-        if (m.coverFlight && m.progress < 1)
-            m.prepare(true);
+        if (m.coverFlight && m.entering)
+            m.finish();
+    }
+    // 入场不飞行：enter 过渡的 prepare(true) 置 entering 后起跑 coverFlight，
+    // 此处同步掐灭——openingMotion 各时长绑定在 start() 时读到 coverFlight=false，
+    // 自动落回 400ms 普通淡入档；关闭中途重开被 prepare(true) 改成入场方向时
+    // （coverFlight 已 true，靠 enteringChanged 捕获）同样掐灭。出场飞行
+    // （prepare(false) 先置 entering=false）不命中条件，360ms 飞回原样保留。
+    Connections {
+        target: root.pageMotion
+        function onCoverFlightChanged(): void {
+            if (root.pageMotion.coverFlight && root.pageMotion.entering)
+                root.pageMotion.finish();
+        }
+        function onEnteringChanged(): void {
+            if (root.pageMotion.coverFlight && root.pageMotion.entering)
+                root.pageMotion.finish();
+        }
     }
     Component.onCompleted: {
         root.findPageMotion();
