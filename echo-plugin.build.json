@@ -4,6 +4,7 @@
     "plugins/spectrum-visualizer",
     "plugins/auto-team-vip",
     "plugins/local-music",
-    "plugins/dynamic-themes"
+    "plugins/dynamic-themes",
+    "plugins/github-accelerate"
   ]
 }
