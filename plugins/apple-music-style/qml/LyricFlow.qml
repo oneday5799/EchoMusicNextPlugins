@@ -39,6 +39,8 @@ Item {
     readonly property bool motion: Theme.store.motionEnabled
     readonly property bool softFocus: true
     readonly property bool staggerEnabled: true
+    // 逐行边缘渐隐宽度：12% 面板高，对应旧版 mask-image 的 black 12%/88% 线性渐隐带
+    readonly property real edgeFade: height * .12
 
     readonly property var player: page.player
     readonly property var info: page.player.lyricsInfo
@@ -529,6 +531,16 @@ Item {
                 const rev = flow.revision;
                 return flow.highlightedRow(index) ? .85 : 1;
             }
+            // 宿主 PlaybackLyricViewport.edgeOpacity 同款：按行文本盒距视口上/下缘的
+            // 距离线性淡出，在 ListView 裁切线之前完成——容器级遮罩的底部渐隐段
+            // 实测不生效（行贴到裁切线仍可见），改用行内透明度复刻旧版 12%/88% 遮罩
+            readonly property real edgeOpacity: {
+                if (flow.edgeFade <= 0)
+                    return 1;
+                const top = y + headerHeight + flow.fontSize * .4 - (lines.following ? scrollY : lines.contentY);
+                const bottom = top + textRowHeight - flow.fontSize * .8;
+                return Math.max(0, Math.min(1, top / flow.edgeFade, (lines.height - bottom) / flow.edgeFade));
+            }
             readonly property string secondaryText: [flow.wantRomanization ? romanization : "", flow.wantTranslation ? translation : ""].filter(value => value.length > 0).join("\n")
             width: lines.width
             height: filtered ? 0 : textRowHeight + headerHeight
@@ -592,6 +604,7 @@ Item {
             Item {
                 objectName: "amllTextRow" + line.index
                 y: line.headerHeight
+                opacity: line.edgeOpacity
                 width: line.width
                 height: line.textRowHeight
                 transform: Translate {

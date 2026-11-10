@@ -1,7 +1,6 @@
 pragma ComponentBehavior: Bound
 import QtQuick
 import QtQuick.Controls.Basic
-import QtQuick.Effects
 import QtQuick.Layouts
 import EchoMusic.Controls
 import EchoMusic.Playback
@@ -1001,36 +1000,8 @@ Item {
             pageHeight: root.height
         }
 
-        // 上下渐隐，对应旧版 mask-image 12%/88% 边缘遮罩
-        layer.enabled: true
-        layer.effect: MultiEffect {
-            maskEnabled: true
-            maskSource: ShaderEffectSource {
-                sourceItem: Rectangle {
-                    width: Math.max(1, rightPanel.width)
-                    height: Math.max(1, rightPanel.height)
-                    gradient: Gradient {
-                        orientation: Gradient.Vertical
-                        GradientStop {
-                            position: 0
-                            color: "#00ffffff"
-                        }
-                        GradientStop {
-                            position: 0.12
-                            color: "#ffffffff"
-                        }
-                        GradientStop {
-                            position: 0.88
-                            color: "#ffffffff"
-                        }
-                        GradientStop {
-                            position: 1
-                            color: "#00ffffff"
-                        }
-                    }
-                }
-            }
-        }
+        // 上下渐隐由 LyricFlow 行内 edgeOpacity 完成（旧版 mask-image 12%/88%）：
+        // 容器级 layer 遮罩的底部渐隐段实测不生效，行贴到裁切线仍清晰可见
     }
 
     // 圆形操作按钮（收藏/评论/分享/更多），对应旧版 38px 圆形按钮
