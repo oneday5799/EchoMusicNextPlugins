@@ -36,13 +36,13 @@
       "path": "next/taskbar-lyrics"
     },
     {
-      "id": "local-music",
-      "repo": "https://github.com/oneday5799/EchoMusicNextPlugins",
-      "path": "plugins/local-music"
-    },
-    {
       "id": "dynamic-themes",
       "path": "plugins/dynamic-themes"
+    },
+    {
+      "id": "github-accelerate",
+      "repo": "https://github.com/oneday5799/EchoMusicNextPlugins",
+      "path": "plugins/github-accelerate"
     }
   ]
 }
