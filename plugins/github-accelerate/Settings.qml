@@ -284,7 +284,7 @@ ColumnLayout {
 
     Label {
         Layout.fillWidth: true
-        text: qsTr("“粘贴到设置”会复制第 1 名（若你尚未手动复制过某条地址）并直达 设置 → 网络设置，把地址粘贴进“GitHub 加速地址”后，插件市场与应用更新的 GitHub 下载即会经镜像加速，镜像失败时宿主自动回源。宿主暂未开放该设置的插件写入接口，因此需要手动粘贴一次。")
+        text: qsTr("待可用地址检测完毕后，请复制任意一条地址后点击下方「粘贴到设置」按钮，把地址粘贴到「GitHub 加速地址」输入框中。")
         font: Theme.font(12, Theme.regularWeight)
         color: Theme.floatingSecondaryText
         wrapMode: Text.Wrap
