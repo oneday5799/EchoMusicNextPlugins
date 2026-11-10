@@ -1,0 +1,37 @@
+{
+  "format": "echomod",
+  "schemaVersion": 1,
+  "id": "github-accelerate",
+  "name": "GitHub 加速",
+  "version": "1.0.0",
+  "description": "自动检测可用的 GitHub 加速镜像并测速选优；检测到最优地址后一键复制并跳转宿主网络设置。",
+  "author": "Oneday5799",
+  "license": "MIT",
+  "icon": "icon.svg",
+  "kind": "qml-js",
+  "entry": "entry.mjs",
+  "requires": {
+    "hostVersion": ">=0.1.0",
+    "sdkVersion": ">=1.0.0 <2.0.0",
+    "features": [
+      "lifecycle",
+      "operations",
+      "commands",
+      "timers",
+      "storage",
+      "ui.settings",
+      "ui.state",
+      "ui.toast",
+      "ui.navigation",
+      "net.request",
+      "clipboard.write"
+    ]
+  },
+  "capabilities": ["unrestrictedNetwork", "navigation"],
+  "contexts": ["main"],
+  "tags": ["GitHub", "加速", "网络"],
+  "distribution": {
+    "artifact": "artifacts/github-accelerate-1.0.0.echomod",
+    "sha256": "4ed0bd3524b201ec74d6a750582ddfa997698102a1ff597b3e83faddf21f304e"
+  }
+}
