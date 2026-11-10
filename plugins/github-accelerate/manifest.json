@@ -32,6 +32,6 @@
   "tags": ["GitHub", "加速", "网络"],
   "distribution": {
     "artifact": "artifacts/github-accelerate-1.0.0.echomod",
-    "sha256": "f8dd694492c7eba8ebe33f4c32c63242cfd150232814bba48ccdd85bdf8e267e"
+    "sha256": "ca10e13ff74159f54f8878be4ce23c21ddd614d9aa6a32cd35d7753f92d56533"
   }
 }

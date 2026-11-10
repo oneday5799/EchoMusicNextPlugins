@@ -227,6 +227,14 @@ ColumnLayout {
                         font: Theme.font(12, 500)
                         color: Theme.colors.success
                     }
+                    EchoButton {
+                        objectName: "githubAccelerateRowCopyButton" + rankRow.index
+                        size: EchoControlSize.Small
+                        text: qsTr("复制")
+                        colors: Theme.floating
+                        Accessible.name: qsTr("复制地址")
+                        onClicked: settingsRoot.run("accelerate.copy", { url: rankRow.modelData.url })
+                    }
                 }
             }
         }
@@ -245,18 +253,10 @@ ColumnLayout {
             onClicked: settingsRoot.run("accelerate.test", {})
         }
         EchoButton {
-            objectName: "githubAccelerateCopyButton"
-            text: qsTr("复制地址")
-            colors: Theme.floating
-            enabled: settingsRoot.selectedUrl !== "" && !settingsRoot.testing
-            Accessible.name: qsTr("复制地址")
-            onClicked: settingsRoot.run("accelerate.copy", {})
-        }
-        EchoButton {
             objectName: "githubAccelerateOpenSettingsButton"
-            text: qsTr("打开宿主设置")
+            text: qsTr("粘贴到设置")
             colors: Theme.floating
-            Accessible.name: qsTr("打开宿主设置")
+            Accessible.name: qsTr("粘贴到设置")
             onClicked: settingsRoot.run("accelerate.open", {})
         }
         Item {
@@ -275,7 +275,7 @@ ColumnLayout {
 
     Label {
         Layout.fillWidth: true
-        text: qsTr("打开本面板会自动重新检测；“复制地址”复制第 1 名。粘贴到 设置 → 网络设置 → “GitHub 加速地址” 后，插件市场与应用更新的 GitHub 下载即会经镜像加速，镜像失败时宿主自动回源。宿主暂未开放该设置的插件写入接口，因此需要手动粘贴一次。")
+        text: qsTr("打开本面板会自动重新检测；每行“复制”复制对应地址，推荐用第 1 名。“粘贴到设置”直达 设置 → 网络设置，在“GitHub 加速地址”里粘贴一次即可生效，之后插件市场与应用更新的 GitHub 下载都会经镜像加速，镜像失败时宿主自动回源。")
         font: Theme.font(12, Theme.regularWeight)
         color: Theme.floatingSecondaryText
         wrapMode: Text.Wrap

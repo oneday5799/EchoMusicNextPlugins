@@ -285,6 +285,17 @@ function createQtHost(ctx: EchoPluginContext): AccelerateHost {
   };
 }
 
+/** 解析复制目标：仅接受本轮探测过的镜像地址，其余（含未传/非法）一律回退到推荐地址。 */
+export function resolveCopyTarget(
+  args: Record<string, JsonValue> | undefined,
+  state: AccelerateState,
+): string {
+  const requested = args?.url;
+  return typeof requested === 'string' && state.latencyMap[requested] !== undefined
+    ? requested
+    : state.selectedUrl;
+}
+
 function copySelected(ctx: EchoPluginContext, selectedUrl: string): Promise<void> {
   if (!selectedUrl) {
     if (ctx.active) void ctx.toast.warning(`[${PLUGIN_NAME}] 尚未检测到可用的加速地址`);
@@ -313,8 +324,8 @@ export function activate(ctx: EchoPluginContext) {
       controller.publish();
 
       ctx.registerCommand('accelerate.test', () => controller.runTest());
-      ctx.registerCommand('accelerate.copy', () =>
-        copySelected(ctx, controller.state().selectedUrl),
+      ctx.registerCommand('accelerate.copy', (args) =>
+        copySelected(ctx, resolveCopyTarget(args, controller.state())),
       );
       ctx.registerCommand('accelerate.open', () =>
         awaitOperation(

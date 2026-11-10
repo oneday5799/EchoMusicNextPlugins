@@ -8,7 +8,11 @@ import {
   reachable,
   todayStr,
 } from '../plugins/github-accelerate/src/config.ts';
-import { createController, PROBE_CONCURRENCY } from '../plugins/github-accelerate/src/entry.ts';
+import {
+  createController,
+  PROBE_CONCURRENCY,
+  resolveCopyTarget,
+} from '../plugins/github-accelerate/src/entry.ts';
 
 // ---------- config.ts：数据规范化 ----------
 
@@ -416,4 +420,22 @@ test('a concurrent refresh does not duplicate the remote fetch', async () => {
   await new Promise((resolve) => setImmediate(resolve));
   release();
   assert.equal(await first, true);
+});
+
+test('resolveCopyTarget accepts probed mirrors and falls back to the selected one', async () => {
+  const host = mockHost({ probeStatuses: [200, 200, 200], probeDelays: [40, 10, 25] });
+  const controller = createController(host, TEST_DATA);
+  await controller.runTest();
+  const state = controller.state();
+
+  // 行内复制：url 必须是本轮探测过的镜像
+  assert.equal(resolveCopyTarget({ url: 'https://c.example' }, state), 'https://c.example');
+  // 未知/非法/未传 url 一律回退到推荐地址
+  assert.equal(resolveCopyTarget({ url: 'https://evil.example' }, state), 'https://b.example');
+  assert.equal(resolveCopyTarget({ url: 42 }, state), 'https://b.example');
+  assert.equal(resolveCopyTarget({}, state), 'https://b.example');
+  assert.equal(resolveCopyTarget(undefined, state), 'https://b.example');
+  // 未探测出结果时回退值为空串，复制动作提示尚未检测
+  const empty = createController(mockHost(), TEST_DATA);
+  assert.equal(resolveCopyTarget({ url: 'https://a.example' }, empty.state()), '');
 });
