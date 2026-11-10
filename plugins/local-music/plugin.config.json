@@ -1,0 +1,13 @@
+{
+  "entry": "src/entry.ts",
+  "assets": [
+    "BrowserPage.qml",
+    "Settings.qml",
+    "SettingsDialog.qml",
+    "SettingsSection.qml",
+    "SettingRow.qml",
+    "ClearCacheDialog.qml",
+    "icon.svg",
+    "LICENSE"
+  ]
+}

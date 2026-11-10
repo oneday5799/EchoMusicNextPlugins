@@ -1,0 +1,47 @@
+{
+  "format": "echomod",
+  "schemaVersion": 1,
+  "id": "local-music",
+  "name": "本地音乐",
+  "version": "1.0.0",
+  "description": "扫描本地文件夹中的音乐，读取标签、封面与歌词，提供歌曲与专辑浏览和播放。",
+  "author": "Oneday5799",
+  "license": "MIT",
+  "icon": "icon.svg",
+  "kind": "qml-js",
+  "entry": "entry.mjs",
+  "requires": {
+    "hostVersion": ">=0.1.0",
+    "sdkVersion": ">=1.0.0 <2.0.0",
+    "features": [
+      "lifecycle",
+      "operations",
+      "commands",
+      "storage",
+      "files.dialogs",
+      "files.references",
+      "files.io",
+      "files.media",
+      "files.audioMetadata",
+      "playback.audioSource",
+      "playback.queues",
+      "lyrics.resolvers",
+      "ui.pages",
+      "ui.sidebar",
+      "ui.settings",
+      "ui.state",
+      "ui.toast",
+      "ui.dialogs",
+      "tasks.full",
+      "kugou.api",
+      "cover.themed"
+    ]
+  },
+  "capabilities": ["localFiles", "audioSource", "lyrics", "kugouApi", "cover"],
+  "contexts": ["main"],
+  "tags": ["本地", "音源", "标签", "歌词"],
+  "distribution": {
+    "artifact": "artifacts/local-music-1.0.0.echomod",
+    "sha256": "55e3d7a658f8110d4de7c08034a6c4c897637292e6a30f0e57df3aefaebaba0d"
+  }
+}
