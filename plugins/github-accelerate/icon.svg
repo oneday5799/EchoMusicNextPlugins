@@ -1,1 +1,15 @@
-<svg t="1786098576568" class="icon" viewBox="0 0 1024 1024" version="1.1" xmlns="http://www.w3.org/2000/svg" p-id="16171" width="256" height="256"><path d="M64 512c0-247.4 200.6-448 448-448s448 200.6 448 448-200.6 448-448 448S64 759.4 64 512z" fill="#58a6ff" p-id="16172"></path><path d="M512 64c247.4 0 448 200.6 448 448 0 122.6-49.2 233.7-129 314.7L197.3 193A446.3 446.3 0 0 1 512 64z" fill="#a86dff" p-id="16173"></path><path d="M262.4 512h115.2l86.4-144v288l-86.4-144H262.4z" fill="#ffffff" p-id="16174"></path><path d="M476.8 356.8l44.8-28.8 187.2 144a25.6 25.6 0 0 1 0 40l-187.2 144-44.8-28.8 118.4-91.2H476.8v-88h118.4z" fill="#ffffff" p-id="16175"></path></svg>
+<svg viewBox="0 0 1024 1024" width="256" height="256" version="1.1" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#58a6ff"/>
+      <stop offset="1" stop-color="#a86dff"/>
+    </linearGradient>
+  </defs>
+  <rect width="1024" height="1024" rx="315" fill="url(#bg)"/>
+  <g stroke="#ffffff" stroke-width="84" stroke-linecap="round" stroke-linejoin="round" fill="none">
+    <path d="M292 408h464"/>
+    <path d="M636 296l120 112-120 112"/>
+    <path d="M732 616H268"/>
+    <path d="M388 504L268 616l120 112"/>
+  </g>
+</svg>
