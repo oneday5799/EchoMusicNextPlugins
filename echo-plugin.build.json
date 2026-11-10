@@ -3,6 +3,7 @@
   "plugins": [
     "plugins/spectrum-visualizer",
     "plugins/auto-team-vip",
-    "plugins/local-music"
+    "plugins/local-music",
+    "plugins/dynamic-themes"
   ]
 }
