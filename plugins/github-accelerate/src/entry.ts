@@ -324,14 +324,25 @@ export function activate(ctx: EchoPluginContext) {
       controller.publish();
 
       ctx.registerCommand('accelerate.test', () => controller.runTest());
-      ctx.registerCommand('accelerate.copy', (args) =>
-        copySelected(ctx, resolveCopyTarget(args, controller.state())),
-      );
-      ctx.registerCommand('accelerate.open', () =>
-        awaitOperation(
-          ctx.ui.navigation.navigate({ name: 'settings', query: { section: 'network' } }),
-        ).then(() => undefined),
-      );
+      // 用户是否已手动复制过地址（仅行内复制算数）：决定“粘贴到设置”是否兜底复制第 1 名。
+      let userCopied = false;
+      ctx.registerCommand('accelerate.copy', (args) => {
+        const target = resolveCopyTarget(args, controller.state());
+        if (target !== '' && args !== undefined && args.url === target) userCopied = true;
+        return copySelected(ctx, target);
+      });
+      ctx.registerCommand('accelerate.open', () => {
+        const fallback = userCopied
+          ? Promise.resolve()
+          : copySelected(ctx, controller.state().selectedUrl);
+        return fallback
+          .then(() =>
+            awaitOperation(
+              ctx.ui.navigation.navigate({ name: 'settings', query: { section: 'network' } }),
+            ),
+          )
+          .then(() => undefined);
+      });
       const settings = ctx.ui.registerSettings('Settings.qml');
       if (!settings) throw new Error('无法注册设置面板');
 
