@@ -633,7 +633,11 @@ Item {
                         springEnabled: flow.springEnabled && !line.freshPosition
                         shrinkInactive: flow.scaleEnabled && flow.player.playing
                         blurInactive: flow.softFocus && flow.blurEnabled && lines.following
-                        inactiveBlur: Math.min(5, (1 + line.distance) * (flow.width <= 1024 ? .8 : 1))
+                        // 旧插件 bundle 的 filter 用未钳制的原始 blur 值（min(5) 只作
+                        // 更新门槛），距离模糊不封顶；且对照旧插件截图逐行实测，其
+                        // web 渲染的实际雾化宽度略大于 AMLL CSS 等效值，乘 1.35
+                        // 增益（d1 轻微软化，d3+ 递进成雾）。pose 在 8 饱和。
+                        inactiveBlur: 1.35 * (1 + line.distance) * (flow.width <= 1024 ? .8 : 1)
                         targetOpacity: line.lineOpacity
                     }
                     AmllLine {

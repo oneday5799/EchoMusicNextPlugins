@@ -603,6 +603,10 @@ Item {
     // 线性拟合 pose ≈ 6.35 + 0.1×B（B≤5），全段宽度误差 ≤0.5 逻辑px。
     // bake 密度 min(dpr×.25,.5) 随 dpr 变化，此系数在其他 dpr 需重测。
     // 起坡斜坡 min(1,B/0.3)：动画从 0 爬升时避免 pose 0→6.35 一帧跳变。
+    // B>5 段为标定曲线的线性外推（旧插件实际渲染不封顶，见 LyricFlow
+    // inactiveBlur 注释）：B=8→pose 7.15、B=12→7.55，外推宽度与 1.28B+1
+    // 一致性递减；pose.blur 钳在 8（烘焙最大档 ≈ CSS 16px），更远行饱和为
+    // 均匀重雾，与目标观感一致。
     // 半透明墨色会令同 pose 的模糊显著加重（α 对照实验：a=0.4 的未唱行在
     // pose 6 已达焦点行 pose 8 的溶解宽度，钉 a=1 即恢复曲线；机制未定位到
     // 宿主管线，但结论可复现）。故模糊行一律换「暗墨叠背景」的不透明外观
@@ -610,7 +614,7 @@ Item {
     function __sweepPoses(): var {
         const list = __sweepPosesCore();
         const b = line.blurAmount;
-        const amount = b > 0.005 ? (6.35 + 0.1 * Math.min(5, b)) * Math.min(1, b / 0.3) : 0;
+        const amount = b > 0.005 ? (6.35 + 0.1 * b) * Math.min(1, b / 0.3) : 0;
         if (amount > 0.005) {
             for (let i = 0; i < list.length; ++i) {
                 const pose = list[i];
@@ -625,9 +629,17 @@ Item {
                     if (s)
                         bg = { "r": s[0], "g": s[1], "b": s[2] };
                 }
-                pose.color = Qt.rgba(c.r * c.a + bg.r * (1 - c.a),
-                                     c.g * c.a + bg.g * (1 - c.a),
-                                     c.b * c.a + bg.b * (1 - c.a), 1);
+                // 辉光抑制：暗墨 = 未唱色 + 背景的合成，其中未唱色的加亮成分
+                // 被大半径模糊摊开成大面积柔光（亮背景区尤甚）。将墨色偏离
+                // 背景的分量按 glowGain 缩放，压低雾的发光感；保持 a=1，
+                // 不触碰「半透明墨加重模糊宽度」的标定前提。
+                const glowGain = .45;
+                const wR = c.r * c.a + bg.r * (1 - c.a);
+                const wG = c.g * c.a + bg.g * (1 - c.a);
+                const wB = c.b * c.a + bg.b * (1 - c.a);
+                pose.color = Qt.rgba(bg.r + (wR - bg.r) * glowGain,
+                                     bg.g + (wG - bg.g) * glowGain,
+                                     bg.b + (wB - bg.b) * glowGain, 1);
             }
         }
         return list;
