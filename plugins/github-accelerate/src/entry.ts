@@ -91,9 +91,10 @@ export function createController(host: AccelerateHost, initial: MirrorData): Acc
   let ranked: RankedMirror[] = [];
   let latencyMap: Record<string, number> = {};
   let refreshing = false;
+  /** 数据代数：adopt 换代时自增；在途测速轮次携带旧代数，收尾时代数不符即丢弃。 */
+  let generation = 0;
 
   function resetResults(): void {
-    testing = false;
     tested = false;
     probeDone = 0;
     probeTotal = 0;
@@ -124,6 +125,9 @@ export function createController(host: AccelerateHost, initial: MirrorData): Acc
 
   function adopt(next: MirrorData): void {
     data = next;
+    // 换代使在途测速轮次作废：它收尾时不得覆盖新数据的干净状态。
+    generation += 1;
+    testing = false;
     resetResults();
     publish();
   }
@@ -144,6 +148,8 @@ export function createController(host: AccelerateHost, initial: MirrorData): Acc
           .fetchJson(`${REMOTE_DATA_URL}?_=${host.now()}`, DATA_TIMEOUT_MS)
           .catch(() => undefined)
           .then((remote) => {
+            // 拉取失败不标记已检查：下次激活/次日立即重试，而不是等 24 小时。
+            if (remote === undefined) return false;
             const next = normalizeMirrorData(remote);
             if (next && compareVersion(next.version, data.version) > 0) {
               return host.saveData(next).then(() => {
@@ -183,27 +189,35 @@ export function createController(host: AccelerateHost, initial: MirrorData): Acc
     const mirrors = data.mirrors.slice();
     const test = { ...data.test };
     testing = true;
+    const round = generation;
+    // 清掉上一轮的排名与耗时：重测期间面板显示进度而不是旧结果。
     probeDone = 0;
     probeTotal = mirrors.length;
+    selectedUrl = '';
+    latencyMs = -1;
+    ranked = [];
+    latencyMap = {};
     publish();
     const map: Record<string, number> = {};
     const candidates: Array<RankedMirror & { order: number }> = [];
     // 并发分片探测：64 个镜像最坏耗时从串行的数分钟压到 ceil(64/8)*超时。
     // 每个分片按 order + 并发数推进，耗时由 probe 自带（并发下共享时钟不可靠）。
     const worker = (order: number): Promise<void> => {
-      if (order >= mirrors.length) return Promise.resolve();
+      if (order >= mirrors.length || generation !== round) return Promise.resolve();
       const mirror = mirrors[order];
       return host
         .probe(mirrorProbeUrl(mirror, test, host.now()), test.timeoutMs)
         .then((outcome) => {
+          if (generation !== round) return;
           map[mirror] = Math.max(1, Math.round(outcome.elapsedMs));
           if (reachable(outcome.status))
             candidates.push({ url: mirror, latencyMs: map[mirror], order });
         })
         .catch(() => {
-          map[mirror] = -1;
+          if (generation === round) map[mirror] = -1;
         })
         .then(() => {
+          if (generation !== round) return undefined;
           probeDone += 1;
           publish();
           return worker(order + PROBE_CONCURRENCY);
@@ -213,12 +227,17 @@ export function createController(host: AccelerateHost, initial: MirrorData): Acc
     for (let w = 0; w < PROBE_CONCURRENCY && w < mirrors.length; ++w) workers.push(worker(w));
     return Promise.all(workers)
       .then(() => {
+        testing = false;
+        if (generation !== round) {
+          // 数据在测速中途换代：丢弃陈旧结果，保持 adopt 后的干净状态。
+          publish();
+          return;
+        }
         // 显式 order 决胜：排序稳定性不依赖宿主引擎实现。
         candidates.sort((a, b) => a.latencyMs - b.latencyMs || a.order - b.order);
         const top = candidates
           .slice(0, RANKED_LIMIT)
           .map(({ url, latencyMs: ms }) => ({ url, latencyMs: ms }));
-        testing = false;
         tested = true;
         selectedUrl = top.length ? top[0].url : '';
         latencyMs = top.length ? top[0].latencyMs : -1;
@@ -230,6 +249,10 @@ export function createController(host: AccelerateHost, initial: MirrorData): Acc
       })
       .catch(() => {
         testing = false;
+        if (generation !== round) {
+          publish();
+          return;
+        }
         tested = true;
         latencyMap = map;
         publish();
@@ -237,6 +260,15 @@ export function createController(host: AccelerateHost, initial: MirrorData): Acc
   }
 
   return { state, publish, ensureFresh, runTest };
+}
+
+/** 统一 toast：固定插件名前缀，插件停用后静默。 */
+function toast(
+  ctx: EchoPluginContext,
+  level: 'info' | 'success' | 'warning' | 'danger',
+  message: string,
+): void {
+  if (ctx.active) void ctx.toast[level](`[${PLUGIN_NAME}] ${message}`);
 }
 
 function createQtHost(ctx: EchoPluginContext): AccelerateHost {
@@ -278,10 +310,7 @@ function createQtHost(ctx: EchoPluginContext): AccelerateHost {
     publish: (value) => {
       if (ctx.active) ctx.ui.setState({ ...value });
     },
-    notify: (level, message) => {
-      if (!ctx.active) return;
-      void ctx.toast[level](message);
-    },
+    notify: (level, message) => toast(ctx, level, message),
   };
 }
 
@@ -296,20 +325,20 @@ export function resolveCopyTarget(
     : state.selectedUrl;
 }
 
-function copySelected(ctx: EchoPluginContext, selectedUrl: string): Promise<void> {
+/** 复制地址到剪贴板；返回是否真正复制成功（空地址或写入失败均为 false）。 */
+function copySelected(ctx: EchoPluginContext, selectedUrl: string): Promise<boolean> {
   if (!selectedUrl) {
-    if (ctx.active) void ctx.toast.warning(`[${PLUGIN_NAME}] 尚未检测到可用的加速地址`);
-    return Promise.resolve();
+    toast(ctx, 'warning', '尚未检测到可用的加速地址');
+    return Promise.resolve(false);
   }
   return awaitOperation(ctx.clipboard.write(selectedUrl))
     .then(() => {
-      if (ctx.active)
-        void ctx.toast.success(
-          `[${PLUGIN_NAME}] 已复制加速地址，请粘贴到 设置 → 网络设置 → GitHub 加速地址`,
-        );
+      toast(ctx, 'success', '已复制加速地址，请粘贴到 设置 → 网络设置 → GitHub 加速地址');
+      return true;
     })
     .catch(() => {
-      if (ctx.active) void ctx.toast.danger(`[${PLUGIN_NAME}] 复制到剪贴板失败`);
+      toast(ctx, 'danger', '复制到剪贴板失败');
+      return false;
     });
 }
 
@@ -324,12 +353,13 @@ export function activate(ctx: EchoPluginContext) {
       controller.publish();
 
       ctx.registerCommand('accelerate.test', () => controller.runTest());
-      // 用户是否已手动复制过地址（仅行内复制算数）：决定“粘贴到设置”是否兜底复制第 1 名。
+      // 用户是否已手动复制过地址（行内复制且写入成功才算）：决定“粘贴到设置”是否兜底复制第 1 名。
       let userCopied = false;
       ctx.registerCommand('accelerate.copy', (args) => {
         const target = resolveCopyTarget(args, controller.state());
-        if (target !== '' && args !== undefined && args.url === target) userCopied = true;
-        return copySelected(ctx, target);
+        return copySelected(ctx, target).then((copied) => {
+          if (copied && args !== undefined && args.url === target) userCopied = true;
+        });
       });
       ctx.registerCommand('accelerate.open', () => {
         const fallback = userCopied

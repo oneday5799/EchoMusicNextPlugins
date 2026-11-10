@@ -227,6 +227,10 @@ ColumnLayout {
                             font: Theme.font(12, rankRow.index === 0 ? 700 : 500)
                             color: rankRow.index === 0 ? Theme.colors.accent : Theme.floatingText
                         }
+                        EchoTag {
+                            text: rankRow.index === 0 ? qsTr("推荐") : qsTr("可用")
+                            tone: rankRow.index === 0 ? EchoTag.Accent : EchoTag.Neutral
+                        }
                         Label {
                             text: (typeof rankRow.modelData.latencyMs === "number" ? rankRow.modelData.latencyMs : -1) + " ms"
                             font: Theme.font(12, 500)

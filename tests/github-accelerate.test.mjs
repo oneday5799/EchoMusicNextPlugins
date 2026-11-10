@@ -339,6 +339,72 @@ test('runTest publishes a testing state first and guards re-entry', async () => 
   assert.equal(final.selectedUrl, 'https://a.example');
 });
 
+test('a re-test clears the previous round before probing', async () => {
+  // mock 按绝对下标取状态/延迟：两轮各 3 个探测，提供 6 个
+  const host = mockHost({
+    probeStatuses: [200, 200, 200, 200, 200, 200],
+    probeDelays: [40, 10, 25, 40, 10, 25],
+  });
+  const controller = createController(host, TEST_DATA);
+  await controller.runTest();
+  assert.equal(host.states.at(-1).ranked.length, 3);
+
+  const before = host.states.length;
+  await controller.runTest();
+  // 第二轮开跑即清掉上一轮排名，面板此刻只显示进度
+  const restart = host.states[before];
+  assert.equal(restart.testing, true);
+  assert.deepEqual(restart.ranked, []);
+  assert.deepEqual(restart.latencyMap, {});
+  assert.equal(restart.selectedUrl, '');
+  assert.equal(host.states.at(-1).selectedUrl, 'https://b.example');
+});
+
+test('a data adoption mid-test abandons the in-flight round', async () => {
+  const data = normalizeMirrorData({
+    test: { url: 'https://raw.example/m.json', timeout: 5000 },
+    data: Array.from({ length: 12 }, (_, i) => `https://m${i}.example`),
+  });
+  const host = mockHost({ probeStatuses: Array(12).fill(200) });
+  // 门闩 probe：首波 8 个挂起，直到显式放行
+  let releaseProbes;
+  const gate = new Promise((resolve) => {
+    releaseProbes = resolve;
+  });
+  host.probe = (url, timeoutMs) => {
+    host.probes.push({ url, timeoutMs });
+    return gate.then(() => ({ status: 200, elapsedMs: 5 }));
+  };
+
+  const controller = createController(host, data);
+  const pending = controller.runTest();
+  // 测速中途拉取到新版本数据，触发换代
+  host.setRemote({
+    version: '1.1.0',
+    test: { url: 'https://raw.example/new.json', timeout: 5000 },
+    data: ['https://new.example'],
+  });
+  const adopting = controller.ensureFresh();
+  await new Promise((resolve) => setImmediate(resolve));
+  releaseProbes();
+  await adopting;
+  assert.equal(host.storage.data.version, '1.1.0');
+
+  // 放行后旧轮次不得再发后续波次：12 个镜像只发出首波 8 个探测
+  await pending;
+  assert.equal(host.probes.length, PROBE_CONCURRENCY);
+  const final = host.states.at(-1);
+  assert.equal(final.testing, false);
+  assert.equal(final.tested, false);
+  assert.equal(final.version, '1.1.0');
+  assert.deepEqual(final.ranked, []);
+
+  // 换代后的新数据可以正常重测出结果
+  await controller.runTest();
+  assert.equal(host.states.at(-1).tested, true);
+  assert.equal(host.states.at(-1).selectedUrl, 'https://new.example');
+});
+
 test('an empty mirror list warns without probing', async () => {
   const host = mockHost();
   // 数据规范化不会产生空列表；直接构造以覆盖守卫分支
@@ -391,8 +457,8 @@ test('ensureFresh silently keeps local data when the remote fetch fails', async 
   const controller = createController(host, TEST_DATA);
   assert.equal(await controller.ensureFresh(), false);
   assert.equal(host.storage.data, undefined);
-  // 仍标记今日已检查，明天再试
-  assert.equal(host.storage.checkedDate, todayStr(host.now()));
+  // 拉取失败不标记已检查：下次激活/次日立即重试，而不是等 24 小时
+  assert.equal(host.storage.checkedDate, undefined);
 });
 
 test('ensureFresh fetches at most once per day', async () => {
