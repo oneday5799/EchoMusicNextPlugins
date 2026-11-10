@@ -1,0 +1,38 @@
+{
+  "format": "echomod",
+  "schemaVersion": 1,
+  "id": "custom-icon",
+  "name": "自定义图标",
+  "version": "1.0.0",
+  "description": "自定义托盘、窗口、桌面快捷方式和固定任务栏图标；快捷方式由宿主原生写入，无需外部工具。",
+  "author": "Oneday5799",
+  "license": "MIT",
+  "icon": "icon.svg",
+  "kind": "qml-js",
+  "entry": "entry.mjs",
+  "requires": {
+    "hostVersion": ">=0.1.0",
+    "sdkVersion": ">=1.0.0 <2.0.0",
+    "features": [
+      "lifecycle",
+      "operations",
+      "commands",
+      "storage",
+      "ui.settings",
+      "ui.state",
+      "ui.toast",
+      "app.icons",
+      "files.dialogs",
+      "files.references",
+      "files.io",
+      "files.media"
+    ]
+  },
+  "capabilities": ["appIcons", "localFiles"],
+  "contexts": ["main"],
+  "tags": ["图标", "托盘", "快捷方式"],
+  "distribution": {
+    "artifact": "artifacts/custom-icon-1.0.0.echomod",
+    "sha256": "065baf5da71cb915dbbf5868a26bb427f9ce4ba91b824a3f79b614bc8713f19e"
+  }
+}
