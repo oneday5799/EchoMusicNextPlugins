@@ -9,6 +9,7 @@ import {
   todayStr,
 } from '../plugins/github-accelerate/src/config.ts';
 import {
+  activate,
   createController,
   PROBE_CONCURRENCY,
   resolveCopyTarget,
@@ -146,7 +147,8 @@ function mockHost(overrides = {}) {
   const states = [];
   const probes = [];
   const notifications = [];
-  const storage = { data: undefined, checkedDate: undefined };
+  const saves = [];
+  const storage = { data: undefined, checkedDate: undefined, autoTakeover: undefined };
   let clock = 1_000_000;
   let inFlight = 0;
   let maxInFlight = 0;
@@ -183,12 +185,24 @@ function mockHost(overrides = {}) {
       storage.checkedDate = value;
       return Promise.resolve();
     },
+    applyMirror: (url) => {
+      saves.push(url);
+      return Promise.resolve(url);
+    },
+    // 默认手动模式（1.0.0 语义）：只排名不落盘；接管测试通过 overrides 打开。
+    autoApply: () => false,
+    loadAutoTakeover: () => Promise.resolve(storage.autoTakeover),
+    saveAutoTakeover: (value) => {
+      storage.autoTakeover = value;
+      return Promise.resolve();
+    },
     publish: (state) => states.push(state),
     notify: (level, message) => notifications.push({ level, message }),
     // 测试观察句柄
     states,
     probes,
     notifications,
+    saves,
     get maxInFlight() {
       return maxInFlight;
     },
@@ -504,4 +518,397 @@ test('resolveCopyTarget accepts probed mirrors and falls back to the selected on
   // 未探测出结果时回退值为空串，复制动作提示尚未检测
   const empty = createController(mockHost(), TEST_DATA);
   assert.equal(resolveCopyTarget({ url: 'https://a.example' }, empty.state()), '');
+});
+
+// ---------- entry.ts：托管模式的自动应用 ----------
+
+test('auto-takeover applies the fastest mirror to host settings', async () => {
+  const host = mockHost({
+    autoApply: () => true,
+    probeStatuses: [200, 200, 200],
+    probeDelays: [40, 10, 25],
+  });
+  const controller = createController(host, TEST_DATA);
+  await controller.runTest();
+
+  // 延迟最低的 b.example 被自动写入宿主设置
+  assert.deepEqual(host.saves, ['https://b.example']);
+  const final = host.states.at(-1);
+  assert.equal(final.appliedUrl, 'https://b.example');
+  assert.equal(final.applying, false);
+  assert.equal(final.applyError, '');
+});
+
+test('manual mode ranks mirrors without writing host settings', async () => {
+  const host = mockHost({ probeStatuses: [200, 200, 200], probeDelays: [40, 10, 25] });
+  const controller = createController(host, TEST_DATA);
+  await controller.runTest();
+
+  // 手动模式（autoApply false）：只排名，不调用 applyMirror，也没有落盘类通知
+  assert.deepEqual(host.saves, []);
+  const final = host.states.at(-1);
+  assert.equal(final.selectedUrl, 'https://b.example');
+  assert.equal(final.appliedUrl, '');
+  assert.equal(final.applying, false);
+  assert.deepEqual(host.notifications, []);
+
+  // 手动模式下全部探测失败：文案引导重新检测（托管模式则是“继续使用当前设置”）
+  const failing = mockHost({ probeStatuses: ['error', 'error', 'error'] });
+  const failingController = createController(failing, TEST_DATA);
+  await failingController.runTest();
+  assert.deepEqual(failing.saves, []);
+  assert.deepEqual(
+    failing.notifications.map((n) => /请检查网络后重新检测|继续使用当前设置/.exec(n.message)[0]),
+    ['请检查网络后重新检测'],
+  );
+});
+
+test('failed probes keep the host address and report keeping current settings', async () => {
+  const host = mockHost({
+    autoApply: () => true,
+    probeStatuses: ['error', 'error', 'error'],
+  });
+  const controller = createController(host, TEST_DATA);
+  await controller.runTest();
+
+  assert.deepEqual(host.saves, []);
+  const final = host.states.at(-1);
+  assert.equal(final.appliedUrl, '');
+  assert.equal(final.applying, false);
+  assert.deepEqual(
+    host.notifications.map((n) => /继续使用当前设置/.test(n.message)),
+    [true],
+  );
+});
+
+test('a failed save surfaces applyError without claiming success', async () => {
+  const host = mockHost({ autoApply: () => true });
+  host.applyMirror = (url) => {
+    host.saves.push(url);
+    return Promise.reject(new Error('disk full'));
+  };
+  const controller = createController(host, TEST_DATA);
+  await controller.runTest();
+
+  assert.deepEqual(host.saves, ['https://a.example']);
+  const final = host.states.at(-1);
+  assert.equal(final.appliedUrl, '');
+  assert.match(final.applyError, /disk full/);
+  assert.equal(final.applying, false);
+  assert.deepEqual(
+    host.notifications.map((n) => n.level),
+    ['danger'],
+  );
+});
+
+test('invalidate retires an in-flight round without applying', async () => {
+  const host = mockHost({ autoApply: () => true });
+  // 门闩 probe：所有探测共用同一放行 promise（各自独立 promise 会漏掉未持柄的探测）
+  let releaseProbes;
+  const gate = new Promise((resolve) => {
+    releaseProbes = resolve;
+  });
+  host.probe = (url, timeoutMs) => {
+    host.probes.push({ url, timeoutMs });
+    return gate.then(() => ({ status: 200, elapsedMs: 1 }));
+  };
+  const controller = createController(host, TEST_DATA);
+  const running = controller.runTest();
+  controller.invalidate();
+  releaseProbes();
+  await running;
+
+  // 中止的轮次不得把结果写进宿主设置
+  assert.deepEqual(host.saves, []);
+  const final = host.states.at(-1);
+  assert.equal(final.tested, false);
+  assert.equal(final.applying, false);
+  assert.equal(final.applyError, '');
+});
+
+// ---------- entry.ts：activate 生命周期（接管 + 自动托管开关） ----------
+
+// echo:plugin-sdk 的 awaitOperation 只接受 EchoPluginOperation 形状的对象。
+const op = (result) => ({ state: 2, result });
+const opReject = (message) => ({
+  state: 3,
+  result: undefined,
+  errorMessage: message,
+  errorCode: 'test',
+});
+
+function signal() {
+  const callbacks = [];
+  return {
+    connect: (f) => callbacks.push(f),
+    emit: () => callbacks.slice().forEach((f) => f()),
+  };
+}
+
+/** 构造完整 EchoPluginContext 假实现；denied 模拟宿主拒绝 hostSettings 授权。 */
+function context({ denied = false, autoTakeover = undefined } = {}) {
+  const timers = new Map();
+  const contributions = [];
+  const saved = [];
+  const notices = [];
+  const clipboardWrites = [];
+  const navigations = [];
+  const writes = [];
+  const commands = new Map();
+  const storage = {
+    data: TEST_DATA,
+    checkedDate: todayStr(Date.now()),
+    autoTakeover,
+  };
+  const sessionInvalidated = signal();
+  let dispose;
+  const watch = {
+    active: true,
+    activeChanged: signal(),
+    dispose() {
+      if (!this.active) return;
+      this.active = false;
+      this.activeChanged.emit();
+    },
+  };
+  const ctx = {
+    active: true,
+    sessionInvalidated,
+    io: {
+      readValue: (key) => {
+        if (key === 'data') return op(storage.data);
+        if (key === 'autoTakeover') return op(storage.autoTakeover);
+        return op(storage.checkedDate);
+      },
+      writeValue: (key, value) => {
+        writes.push([key, value]);
+        if (key === 'data') storage.data = value;
+        if (key === 'autoTakeover') storage.autoTakeover = value;
+        if (key === 'lastUpdateDate') storage.checkedDate = value;
+        return op(undefined);
+      },
+    },
+    settings: {
+      observe(id, domain, callback) {
+        if (denied) return opReject('denied');
+        watch.active = true;
+        callback({ githubProxyUrl: 'https://existing.example' });
+        return op(watch);
+      },
+      update(domain, patch) {
+        saved.push(patch.githubProxyUrl);
+        return op({ githubProxyUrl: patch.githubProxyUrl });
+      },
+    },
+    ui: {
+      state: {},
+      setState(value) {
+        this.state = value;
+      },
+      registerSettings: () => ({}),
+      navigation: {
+        navigate: (target) => {
+          navigations.push(target);
+          return op(undefined);
+        },
+      },
+      parts: {
+        contribute(id, selector, definition) {
+          const lease = {
+            id,
+            definition,
+            active: true,
+            dispose() {
+              this.active = false;
+            },
+          };
+          contributions.push(lease);
+          return lease;
+        },
+      },
+    },
+    net: {
+      request: () => op({ status: 200, data: {} }),
+    },
+    toast: Object.fromEntries(
+      ['danger', 'success', 'warning', 'info'].map((k) => [k, (message) => notices.push(message)]),
+    ),
+    registerCommand: (key, handler) => commands.set(key, handler),
+    setTimer: (id, ms, repeat, fn) => {
+      timers.set(id, fn);
+      return { id };
+    },
+    onDispose(fn) {
+      dispose = fn;
+      return {};
+    },
+    clipboard: {
+      write: (value) => {
+        clipboardWrites.push(value);
+        return op(undefined);
+      },
+    },
+  };
+  return {
+    ctx,
+    commands,
+    timers,
+    contributions,
+    saved,
+    notices,
+    clipboardWrites,
+    navigations,
+    writes,
+    watch,
+    state: () => ctx.ui.state,
+    dispose: () => {
+      ctx.active = false;
+      dispose();
+    },
+  };
+}
+
+async function drain() {
+  for (let n = 0; n < 40; ++n) await Promise.resolve();
+}
+
+test('first activation defaults to takeover when no preference is stored', async () => {
+  const f = context();
+  await activate(f.ctx);
+  // 授权/接管必须等 activation 提交后才开始：此刻没有网络与 UI 副作用
+  assert.equal(f.saved.length, 0);
+  assert.equal(f.contributions.length, 0);
+
+  f.timers.get('startup-work')();
+  await drain();
+  assert.equal(f.state().autoTakeover, true);
+  assert.equal(f.state().controlled, true);
+  assert.equal(f.contributions.filter((c) => c.active).length, 2);
+  // 接管成功后自动测速并应用最快镜像
+  assert.deepEqual(f.saved, ['https://a.example']);
+  f.dispose();
+  assert.equal(f.contributions.filter((c) => c.active).length, 0);
+});
+
+test('stored manual preference starts without takeover or probing', async () => {
+  const f = context({ autoTakeover: false });
+  await activate(f.ctx);
+  f.timers.get('startup-work')();
+  await drain();
+
+  assert.equal(f.state().autoTakeover, false);
+  assert.equal(f.state().controlled, false);
+  assert.equal(f.contributions.length, 0);
+  assert.equal(f.saved.length, 0);
+  // 手动模式启动只刷新镜像列表，不主动测速（面板打开时才测）
+  f.dispose();
+});
+
+test('denied host permission never hides the original setting or writes an address', async () => {
+  const f = context({ denied: true });
+  await activate(f.ctx);
+  f.timers.get('startup-work')();
+  await drain();
+
+  assert.equal(f.saved.length, 0);
+  assert.equal(f.contributions.length, 0);
+  assert.equal(f.state().controlled, false);
+  assert.match(f.notices[0], /无法接管网络设置/);
+  f.dispose();
+});
+
+test('revocation withdraws the hint and restores the host field', async () => {
+  const f = context();
+  await activate(f.ctx);
+  f.timers.get('startup-work')();
+  await drain();
+  assert.equal(f.state().controlled, true);
+
+  f.watch.dispose();
+  assert.equal(f.state().controlled, false);
+  assert.equal(f.contributions.filter((c) => c.active).length, 0);
+  f.dispose();
+});
+
+test('toggling auto-takeover off withdraws takeover and persists the preference', async () => {
+  const f = context();
+  await activate(f.ctx);
+  f.timers.get('startup-work')();
+  await drain();
+  assert.equal(f.contributions.filter((c) => c.active).length, 2);
+
+  await f.commands.get('accelerate.auto')({ enabled: false });
+  // 偏好落盘；接管提示撤回、宿主输入框恢复，已写入的地址保留
+  assert.deepEqual(f.writes.at(-1), ['autoTakeover', false]);
+  assert.equal(f.contributions.filter((c) => c.active).length, 0);
+  assert.equal(f.state().controlled, false);
+  assert.equal(f.state().autoTakeover, false);
+  assert.equal(f.saved.length, 1);
+  f.dispose();
+});
+
+test('manual mode re-test ranks without writing host settings', async () => {
+  const f = context({ autoTakeover: false });
+  await activate(f.ctx);
+  f.timers.get('startup-work')();
+  await drain();
+
+  await f.commands.get('accelerate.test')();
+  await drain();
+  // 手动模式：测速只排名，不写宿主设置
+  assert.equal(f.saved.length, 0);
+  assert.equal(f.state().tested, true);
+  assert.equal(f.state().ranked.length, 3);
+  f.dispose();
+});
+
+test('toggling auto-takeover back on restarts the takeover flow', async () => {
+  const f = context({ autoTakeover: false });
+  await activate(f.ctx);
+  f.timers.get('startup-work')();
+  await drain();
+  assert.equal(f.state().controlled, false);
+
+  await f.commands.get('accelerate.auto')({ enabled: true });
+  await drain();
+  assert.deepEqual(f.writes.at(-1), ['autoTakeover', true]);
+  assert.equal(f.state().controlled, true);
+  assert.equal(f.contributions.filter((c) => c.active).length, 2);
+  f.dispose();
+});
+
+test('manual mode opens host settings with a fallback copy of the top mirror', async () => {
+  const f = context({ autoTakeover: false });
+  await activate(f.ctx);
+  f.timers.get('startup-work')();
+  await drain();
+  await f.commands.get('accelerate.test')();
+  await drain();
+  const top = f.state().selectedUrl;
+  assert.notEqual(top, '');
+
+  // 未手动复制过：跳转前兜底复制推荐地址
+  await f.commands.get('accelerate.open')();
+  assert.deepEqual(f.clipboardWrites, [top]);
+  assert.deepEqual(f.navigations, [{ name: 'settings', query: { section: 'network' } }]);
+
+  // 行内复制成功后再跳转：不再重复兜底复制（剪贴板只多了显式复制那一次）
+  await f.commands.get('accelerate.copy')({ url: top });
+  await f.commands.get('accelerate.open')();
+  assert.deepEqual(f.clipboardWrites, [top, top]);
+  assert.equal(f.navigations.length, 2);
+  f.dispose();
+});
+
+test('taken-over mode navigates without touching the clipboard', async () => {
+  const f = context();
+  await activate(f.ctx);
+  f.timers.get('startup-work')();
+  await drain();
+  assert.equal(f.state().controlled, true);
+
+  await f.commands.get('accelerate.open')();
+  assert.deepEqual(f.clipboardWrites, []);
+  assert.equal(f.navigations.length, 1);
+  f.dispose();
 });
