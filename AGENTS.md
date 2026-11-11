@@ -7,7 +7,7 @@
 
 | 分支 | 角色 |
 | --- | --- |
-| `main`（默认） | 发布分支：upstream 基线 + **每个插件一个自包含提交**；安装源指向这里 |
+| `main`（默认） | 发布分支：upstream 基线 + **每个插件的每个发布版本一个自包含提交**（版本更新 = 新增提交，不重写历史）；安装源指向这里 |
 | `main2` | 完整开发历史（原 main），仅归档 |
 | `local` | 新插件开发、试验；定期 merge upstream |
 | `upstream` | `hoowhoami/EchoMusicNextPlugins` |
@@ -34,7 +34,8 @@
 
 ## 发布流程：local → main（核心）
 
-原则：**main 上每个插件一个自包含提交**；除插件目录、其构建包、`echo-plugins.json` 一条新登记外，
+原则：**main 上每个插件的每个发布版本一个自包含提交（版本更新 = 新增提交，不重写历史）**；除插件目录、
+其构建包、`echo-plugins.json` 一条新登记（仅新插件首次发布）外，
 不得改动任何上游文件（README.md、docs/、tests/、packages/、echo-plugin.build.json、其他索引条目）。
 
 1. 确认 local 已合并最新 `upstream/main`，插件版本冻结，`npm test` 全绿。
@@ -60,9 +61,11 @@
    # 均应返回 200；完整校验可跑 npm run check:published
    ```
 
-6. 若需修正已推送的插件提交（补包、改哈希、补登记）：重写该提交及其后的插件提交
+6. **插件版本更新 = 在 main 新增一个自包含提交**（不新增 `echo-plugins.json` 条目）：检出新版
+   插件目录与新构建包，并删除旧版本构建包（manifest 只指向当前版本），提交信息如
+   `feat: update <id> plugin to <version>`；**不重写该插件已有的提交**，保持线性历史。
+   仅当需要修正已推送提交本身的错误（补包、改哈希、补登记）时才重写该提交及其后的插件提交
    （local-music 类后续提交会被重放），用 `--force-with-lease` 推送；重写前先建 `backup/*` 分支。
-   更新已有插件版本同理 —— 始终修订该插件自己的提交，保持「每插件一个提交」不变。
 
 ## 与上游同步
 
