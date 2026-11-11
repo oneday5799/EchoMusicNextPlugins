@@ -595,7 +595,7 @@ Item {
                         __bs = __parts.join(' ');
                     }
                 } catch (e) {}
-                let __dump = '[probe-poses] t=' + (__now % 1000000) + ' tm=' + Math.round(line.timeMs) + ' act=' + line.active + ' hl=' + Number(line.highlightAmount).toFixed(2) + " txt='" + (line.text.length > 6 ? line.text.slice(-6) : line.text) + "' edge=" + Math.round(edge) + ' w=' + Math.round(line.width) + ' blur=' + (line.blurAmount !== undefined ? Number(line.blurAmount).toFixed(2) : 'NA') + ' bg=' + __bg + ' bs=' + __bs + ' n=' + list.length;
+                let __dump = '[probe-poses] t=' + (__now % 1000000) + ' edge=' + Math.round(edge) + ' w=' + Math.round(line.width) + ' blur=' + (line.blurAmount !== undefined ? Number(line.blurAmount).toFixed(2) : 'NA') + ' bg=' + __bg + ' bs=' + __bs + ' n=' + list.length;
                 for (let __i = 0; __i < Math.min(4, list.length); ++__i) {
                     const __q = list[__i];
                     __dump += ' | @' + __i + ' op=' + Number(__q.opacity).toFixed(2) + ' st=' + (__q.start ?? -1) + ' c=' + Math.round(__q.color.r * 255) + ',' + Math.round(__q.color.g * 255) + ',' + Math.round(__q.color.b * 255) + ' a=' + Number(__q.color.a).toFixed(2) + ' bl=' + (__q.blur !== undefined ? Number(__q.blur).toFixed(2) : '-') + ' clip=' + (__q.clip ? Math.round(__q.clip.x) + '+' + Math.round(__q.clip.width) : '-');
