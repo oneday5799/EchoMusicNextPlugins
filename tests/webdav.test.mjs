@@ -2,9 +2,11 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createServer } from 'node:http';
 import { build } from 'esbuild';
+import { fileURLToPath } from 'node:url';
 
 const bundled = await build({
-  entryPoints: [new URL('../plugins/webdav-backup/src/entry.ts', import.meta.url).pathname],
+  // URL.pathname 在 Windows 会给出 "/D:/..."，esbuild 无法解析；fileURLToPath 双平台正确
+  entryPoints: [fileURLToPath(new URL('../plugins/webdav-backup/src/entry.ts', import.meta.url))],
   bundle: true,
   write: false,
   format: 'esm',
