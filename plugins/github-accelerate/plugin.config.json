@@ -1,4 +1,4 @@
 {
   "entry": "src/entry.ts",
-  "assets": ["Settings.qml", "icon.svg", "LICENSE"]
+  "assets": ["Settings.qml", "Takeover.qml", "icon.svg", "LICENSE"]
 }

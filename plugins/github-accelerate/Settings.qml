@@ -13,7 +13,7 @@ ColumnLayout {
     required property EchoPluginContext plugin
 
     readonly property var s: plugin.ui.state
-    readonly property bool testing: settingsRoot.s.testing === true
+    readonly property bool testing: settingsRoot.s.testing === true || settingsRoot.s.applying === true
     readonly property int probeDone: typeof settingsRoot.s.probeDone === "number" ? settingsRoot.s.probeDone : 0
     readonly property int probeTotal: typeof settingsRoot.s.probeTotal === "number" ? settingsRoot.s.probeTotal : 0
     readonly property string selectedUrl: typeof settingsRoot.s.selectedUrl === "string" ? settingsRoot.s.selectedUrl : ""
@@ -22,6 +22,13 @@ ColumnLayout {
     readonly property var ranked: settingsRoot.toList(settingsRoot.s.ranked)
     readonly property string versionLabel: typeof settingsRoot.s.version === "string" && settingsRoot.s.version !== "" ? settingsRoot.s.version : ""
     readonly property int mirrorCount: typeof settingsRoot.s.mirrorCount === "number" ? settingsRoot.s.mirrorCount : 0
+    // 「自动托管」开关：未加载前视为默认开启。
+    readonly property bool autoTakeover: settingsRoot.s.autoTakeover !== false
+    readonly property bool controlled: settingsRoot.s.controlled === true
+    // 接管模式下宿主输入框被隐藏，无需手动粘贴；未接管（含手动模式/授权被拒）时保留入口。
+    readonly property bool manualPaste: !settingsRoot.controlled
+    readonly property string currentUrl: typeof settingsRoot.s.currentUrl === "string" ? settingsRoot.s.currentUrl : ""
+    readonly property string applyError: typeof settingsRoot.s.applyError === "string" ? settingsRoot.s.applyError : ""
     property EchoPluginOperation pending: null
     readonly property bool busy: pending !== null && (pending.state === 0 || pending.state === 1)
     property string lastResult: ""
@@ -54,8 +61,11 @@ ColumnLayout {
         return [];
     }
 
-    // 面板随对话框按需创建/销毁，每次打开都触发一次自动检测。
-    Component.onCompleted: settingsRoot.run("accelerate.test", {})
+    // 接管模式下打开面板仅展示后台状态；手动模式/未接管时随面板打开触发一次检测。
+    Component.onCompleted: {
+        if (!settingsRoot.manualPaste) return;
+        settingsRoot.run("accelerate.test", {});
+    }
 
     Connections {
         target: settingsRoot.pending
@@ -66,70 +76,118 @@ ColumnLayout {
         }
     }
 
-    // ── 概览：品牌 + 状态 ──
+    // ── 概览：品牌 + 状态 + 接管信息 ──
     Rectangle {
         Layout.fillWidth: true
         radius: 16
         color: Theme.floating.elevated
         border.color: Theme.floatingBorder
-        implicitHeight: overview.implicitHeight + 28
+        implicitHeight: overviewBody.implicitHeight + 28
 
-        RowLayout {
-            id: overview
+        ColumnLayout {
+            id: overviewBody
             anchors.fill: parent
             anchors.margins: 14
-            spacing: 14
+            spacing: 12
 
-            Rectangle {
-                Layout.preferredWidth: 52
-                Layout.preferredHeight: 52
-                radius: 16
-                gradient: Gradient {
-                    orientation: Gradient.Horizontal
-                    GradientStop {
-                        position: 0
-                        color: "#58a6ff"
+            RowLayout {
+                id: overviewTop
+                Layout.fillWidth: true
+                spacing: 14
+
+                Rectangle {
+                    Layout.preferredWidth: 52
+                    Layout.preferredHeight: 52
+                    radius: 16
+                    gradient: Gradient {
+                        orientation: Gradient.Horizontal
+                        GradientStop {
+                            position: 0
+                            color: "#58a6ff"
+                        }
+                        GradientStop {
+                            position: 1
+                            color: "#a86dff"
+                        }
                     }
-                    GradientStop {
-                        position: 1
-                        color: "#a86dff"
+                    Label {
+                        anchors.centerIn: parent
+                        text: "⇄"
+                        font: Theme.font(24, 700)
+                        color: "#f7ffffff"
                     }
                 }
-                Label {
-                    anchors.centerIn: parent
-                    text: "⇄"
-                    font: Theme.font(24, 700)
-                    color: "#f7ffffff"
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    spacing: 4
+                    Label {
+                        Layout.fillWidth: true
+                        text: qsTr("GitHub 加速")
+                        font: Theme.font(13, 700)
+                        color: Theme.floatingText
+                    }
+                    Label {
+                        Layout.fillWidth: true
+                        text: settingsRoot.testing ? qsTr("正在探测镜像 %1/%2，按延迟排出最优地址").arg(settingsRoot.probeDone).arg(settingsRoot.probeTotal)
+                            : settingsRoot.selectedUrl !== "" ? (settingsRoot.autoTakeover ? qsTr("已选出可用地址，自动应用到宿主网络设置") : qsTr("已选出可用地址，复制后粘贴到宿主网络设置即可生效"))
+                            : settingsRoot.s.tested === true ? qsTr("本轮未找到可用地址，可稍后重新检测")
+                            : settingsRoot.autoTakeover ? (settingsRoot.controlled ? qsTr("启动后自动检测并接管 GitHub 加速设置") : qsTr("点击「重新检测」并确认权限后自动接管宿主设置"))
+                            : qsTr("每日拉取社区镜像列表，自动开始检测")
+                        font: Theme.font(12, Theme.regularWeight)
+                        color: Theme.floatingSecondaryText
+                        wrapMode: Text.Wrap
+                    }
+                }
+                EchoTag {
+                    text: settingsRoot.testing ? qsTr("检测中")
+                        : settingsRoot.selectedUrl !== "" ? qsTr("可用")
+                        : settingsRoot.s.tested === true ? qsTr("直连")
+                        : qsTr("待检测")
+                    tone: settingsRoot.testing ? EchoTag.Neutral
+                        : settingsRoot.selectedUrl !== "" ? EchoTag.Accent
+                        : EchoTag.Neutral
                 }
             }
-            ColumnLayout {
+
+            // 接管行：托管模式下展示宿主「GitHub 加速地址」的当前值
+            EchoDivider {
                 Layout.fillWidth: true
-                spacing: 4
+                visible: settingsRoot.controlled
+                lineColor: Theme.withAlpha(Theme.floatingText, 0.12)
+            }
+            RowLayout {
+                Layout.fillWidth: true
+                Layout.minimumWidth: 0
+                visible: settingsRoot.controlled
+                spacing: 10
+
                 Label {
-                    Layout.fillWidth: true
-                    text: qsTr("GitHub 加速")
-                    font: Theme.font(13, 700)
-                    color: Theme.floatingText
-                }
-                Label {
-                    Layout.fillWidth: true
-                    text: settingsRoot.testing ? qsTr("正在探测镜像 %1/%2，按延迟排出最优地址").arg(settingsRoot.probeDone).arg(settingsRoot.probeTotal)
-                        : settingsRoot.selectedUrl !== "" ? qsTr("已选出可用地址，复制后粘贴到宿主网络设置即可生效")
-                        : settingsRoot.s.tested === true ? qsTr("本轮未找到可用地址，可稍后重新检测")
-                        : qsTr("每日拉取社区镜像列表，自动开始检测")
+                    text: qsTr("宿主设置")
                     font: Theme.font(12, Theme.regularWeight)
                     color: Theme.floatingSecondaryText
-                    wrapMode: Text.Wrap
+                }
+                Label {
+                    Layout.fillWidth: true
+                    Layout.minimumWidth: 0
+                    elide: Text.ElideMiddle
+                    text: settingsRoot.currentUrl !== "" ? settingsRoot.currentUrl : qsTr("直连（未设置代理）")
+                    textFormat: Text.PlainText
+                    font: Theme.font(12, 500)
+                    color: Theme.floatingText
+                }
+                EchoTag {
+                    text: qsTr("已接管")
+                    tone: EchoTag.Accent
                 }
             }
-            EchoTag {
-                text: settingsRoot.testing ? qsTr("检测中")
-                    : settingsRoot.selectedUrl !== "" ? qsTr("可用")
-                    : settingsRoot.s.tested === true ? qsTr("直连")
-                    : qsTr("待检测")
-                tone: settingsRoot.testing ? EchoTag.Neutral
-                    : settingsRoot.selectedUrl !== "" ? EchoTag.Accent
-                    : EchoTag.Neutral
+
+            Label {
+                Layout.fillWidth: true
+                visible: settingsRoot.applyError !== ""
+                text: settingsRoot.applyError
+                font: Theme.font(12, Theme.regularWeight)
+                color: Theme.colors.danger
+                wrapMode: Text.Wrap
             }
         }
     }
@@ -248,6 +306,48 @@ ColumnLayout {
         }
     }
 
+    // ── 偏好：自动托管 ──
+    Rectangle {
+        Layout.fillWidth: true
+        radius: 16
+        color: Theme.floating.elevated
+        border.color: Theme.floatingBorder
+        implicitHeight: prefBody.implicitHeight + 28
+
+        RowLayout {
+            id: prefBody
+            anchors.fill: parent
+            anchors.margins: 14
+            spacing: 12
+
+            ColumnLayout {
+                Layout.fillWidth: true
+                Layout.minimumWidth: 0
+                spacing: 3
+                Label {
+                    text: qsTr("自动托管")
+                    font: Theme.font(13, Theme.semiboldWeight)
+                    color: Theme.floatingText
+                }
+                Label {
+                    Layout.fillWidth: true
+                    text: settingsRoot.autoTakeover ? qsTr("开启中：最优地址自动写入宿主「GitHub 加速地址」，由插件接管该设置。")
+                        : qsTr("已关闭：仅检测与推荐地址，需手动复制粘贴到宿主「GitHub 加速地址」。")
+                    font: Theme.font(12, Theme.regularWeight)
+                    color: Theme.floatingSecondaryText
+                    wrapMode: Text.Wrap
+                }
+            }
+            EchoSwitch {
+                objectName: "githubAccelerateTakeoverSwitch"
+                enabled: !settingsRoot.busy
+                checked: settingsRoot.autoTakeover
+                Accessible.name: qsTr("自动托管")
+                onToggled: settingsRoot.run("accelerate.auto", { enabled: checked })
+            }
+        }
+    }
+
     // ── 操作与状态 ──
     RowLayout {
         Layout.fillWidth: true
@@ -263,6 +363,7 @@ ColumnLayout {
         }
         EchoButton {
             objectName: "githubAccelerateOpenSettingsButton"
+            visible: settingsRoot.manualPaste
             text: qsTr("粘贴到设置")
             colors: Theme.floating
             Accessible.name: qsTr("粘贴到设置")
@@ -278,13 +379,14 @@ ColumnLayout {
             visible: settingsRoot.busy || settingsRoot.lastResult !== ""
             text: settingsRoot.busy ? qsTr("执行中…") : settingsRoot.lastResult
             font: Theme.font(12, Theme.regularWeight)
-            color: Theme.colors.danger
+            color: settingsRoot.busy ? Theme.floatingSecondaryText : Theme.colors.danger
         }
     }
 
     Label {
         Layout.fillWidth: true
-        text: qsTr("待可用地址检测完毕后，请复制任意一条地址后点击下方「粘贴到设置」按钮，把地址粘贴到「GitHub 加速地址」输入框中。")
+        text: settingsRoot.autoTakeover ? qsTr("插件启动后自动检测并应用推荐地址；无可用镜像时保留原设置。关闭托管或停用插件后恢复宿主输入框，已保存地址继续保留。")
+            : qsTr("待可用地址检测完毕后，请复制任意一条地址后点击下方「粘贴到设置」按钮，把地址粘贴到「GitHub 加速地址」输入框中。")
         font: Theme.font(12, Theme.regularWeight)
         color: Theme.floatingSecondaryText
         wrapMode: Text.Wrap
