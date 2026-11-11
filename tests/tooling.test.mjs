@@ -73,6 +73,7 @@ test('resource and presentation bindings retain native return types and state', 
 });
 
 test('manifest compatibility, source-only index and comparator intersections', async () => {
+  // local 分支的构建清单含本地特有插件，通用计数断言与清单驱动，避免硬编码 id 列表
   const build = JSON.parse(await readFile(path.join(root, 'echo-plugin.build.json'), 'utf8'));
   assert.equal((await localPackages(root)).length, build.plugins.length);
   assert.equal(rangeContains('>=0.1.0 <1.0.0', '0.1.0'), true);

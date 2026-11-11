@@ -38,6 +38,12 @@ Item {
     // (行局部 x, 行 y)，返回 [r,g,b] 0..1；null 时回退 backdropColor 均色。
     // 背景在空间上大幅变化（封面映射+网格形变），均色无法锚定带端。
     property var backdropAt: null
+    // 行视口锚点（调用方按 4px 量化喂入）：雾色在烘焙时按行的当前屏幕位置
+    // 采样背景，而 poses 绑定的其余依赖（timeMs/blurAmount/current）在纯滚动
+    // 期间都不变——行被滚到新背景区域后雾色会停留在旧位置采的值上（手动
+    // 调整进度、滚轮滚动后非当前行颜色不对的根因）。绑定经此读取锚点，
+    // 移动超过量化步长即整体重烘焙，静止时零开销。
+    property real poseAnchor: 0
     // 0..1，软边宽度系数（对应旧 AMLL 的 fadeWidth）
     property real fadeWidth: 0.5
     property bool animateWords: true
@@ -442,7 +448,12 @@ Item {
             // 簇两端亮度：oL（左缘）≥ oR（右缘，亮度沿 x 递减）
             const oL = 0.5 + (edge - x) / fade;
             const oR = 0.5 + (edge - x - advance) / fade;
-            if (oR >= 1) {
+            // 全亮判定必须与下方切片 break 的原始比较（bandL ≥ x+advance）
+            // 同侧：扫掠终点 edge 恰停在 x+advance+fade/2 边界上，(edge-x-adv)/fade
+            // 的除法舍入可能得 0.99… 而落入 cross 路径，此时切片全部 break、
+            // dim 基底 clip 又从 bandL（已越过簇右缘）起罩——整簇无任何 pose，
+            // 末字消失直到换行。此处并列原始比较，边界态一律全亮。
+            if (oR >= 1 || edge - x - advance >= fade * 0.5) {
                 // 整簇全亮（右缘未进过渡带）：halo 垫底 + 单层 pose
                 if (halos)
                     list.push(line.__haloPose(halos, start, y, ex, ey, escale));
@@ -497,7 +508,10 @@ Item {
                         "opacity": 1,
                         "color": line.dimColor,
                         "clip": {
-                            "x": bandL - rowPrefix,
+                            // 从簇左缘起罩（而非 bandL）：slice 1 强制 τ=1 且向左
+                            // 无限延伸、不透明盖在基底之上，左侧延伸不可见；一旦
+                            // 切片因边界浮点全数 break，基底仍完整兜住整簇
+                            "x": Math.min(bandL, x) - rowPrefix,
                             "y": -100000,
                             "width": 900000,
                             "height": 200000
@@ -581,7 +595,7 @@ Item {
                         __bs = __parts.join(' ');
                     }
                 } catch (e) {}
-                let __dump = '[probe-poses] t=' + (__now % 1000000) + ' edge=' + Math.round(edge) + ' w=' + Math.round(line.width) + ' blur=' + (line.blurAmount !== undefined ? Number(line.blurAmount).toFixed(2) : 'NA') + ' bg=' + __bg + ' bs=' + __bs + ' n=' + list.length;
+                let __dump = '[probe-poses] t=' + (__now % 1000000) + ' tm=' + Math.round(line.timeMs) + ' act=' + line.active + ' hl=' + Number(line.highlightAmount).toFixed(2) + " txt='" + (line.text.length > 6 ? line.text.slice(-6) : line.text) + "' edge=" + Math.round(edge) + ' w=' + Math.round(line.width) + ' blur=' + (line.blurAmount !== undefined ? Number(line.blurAmount).toFixed(2) : 'NA') + ' bg=' + __bg + ' bs=' + __bs + ' n=' + list.length;
                 for (let __i = 0; __i < Math.min(4, list.length); ++__i) {
                     const __q = list[__i];
                     __dump += ' | @' + __i + ' op=' + Number(__q.opacity).toFixed(2) + ' st=' + (__q.start ?? -1) + ' c=' + Math.round(__q.color.r * 255) + ',' + Math.round(__q.color.g * 255) + ',' + Math.round(__q.color.b * 255) + ' a=' + Number(__q.color.a).toFixed(2) + ' bl=' + (__q.blur !== undefined ? Number(__q.blur).toFixed(2) : '-') + ' clip=' + (__q.clip ? Math.round(__q.clip.x) + '+' + Math.round(__q.clip.width) : '-');
@@ -612,6 +626,9 @@ Item {
     // 宿主管线，但结论可复现）。故模糊行一律换「暗墨叠背景」的不透明外观
     // （与扫掠带切片同式，视觉逐像素等价），全行共用同一条标定曲线。
     function __sweepPoses(): var {
+        // 经此读取 poseAnchor 注册绑定依赖：行移动时重烘焙，雾色背景采样
+        // 始终对应当前屏幕位置（见 poseAnchor 注释；与 blurAmount 同法）
+        const anchor = line.poseAnchor;
         const list = __sweepPosesCore();
         const b = line.blurAmount;
         const amount = b > 0.005 ? (6.35 + 0.1 * b) * Math.min(1, b / 0.3) : 0;

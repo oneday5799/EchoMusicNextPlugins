@@ -150,7 +150,12 @@ Item {
                         end = Number(last.start_ms) + Number(last.duration_ms) + offset;
                     }
                 }
-                bounds.push({ "row": row, "start": start, "end": end });
+                // singEnd：词级唱奏终点（修剪前值）。下方接缝修剪只压缩呈现
+                // 区间（间奏/缺口/寻址沿用 end），离场判定必须用 singEnd——
+                // 否则下一行时间戳略早于上一行末字唱完时（转写常见
+                // 100~500ms），提前离场引发的渐隐会吃掉末字剩余的扫掠，
+                // 末字永远到不了全亮（「即将换行时高亮消失」）。
+                bounds.push({ "row": row, "start": start, "end": end, "singEnd": end });
             }
         }
         bounds.sort((a, b) => a.start - b.start);
@@ -213,12 +218,16 @@ Item {
         while (s.gapCursor < __gaps.length && time >= __gaps[s.gapCursor].end)
             ++s.gapCursor;
         s.gap = s.gapCursor < __gaps.length && time >= __gaps[s.gapCursor].start ? s.gapCursor : -1;
+        let departed = false;
         for (const i of Array.from(s.playing))
-            if (bounds[i].end <= time)
+            if (bounds[i].singEnd <= time) {
                 s.playing.delete(i);
+                s.highlighted.delete(i);
+                departed = true;
+            }
         let added = false;
         while (s.cursor < bounds.length && bounds[s.cursor].start <= time) {
-            if (bounds[s.cursor].end > time) {
+            if (bounds[s.cursor].singEnd > time) {
                 s.playing.add(s.cursor);
                 added = true;
             }
@@ -238,6 +247,11 @@ Item {
         } else if (added) {
             s.highlighted = new Set(s.playing);
             s.focus = s.highlighted.size > 0 ? Math.min(...s.highlighted) : 0;
+        } else if (departed) {
+            // 离场未伴随新行激活时同步焦点（min 语义与 added 分支一致），
+            // 否则 focus 停在已唱完的行上，视图不跟随
+            if (s.highlighted.size > 0)
+                s.focus = Math.min(...s.highlighted);
         }
         if ((s.gap >= 0 && s.playing.size === 0) || (bounds.length > 0 && time >= __maxEnd))
             s.highlighted = new Set();
@@ -661,6 +675,8 @@ Item {
                         unplayedColor: flow.unplayedColor
                         backdropColor: flow.backdropColor
                         backdropAt: flow.backdropSampler ? (x, y) => flow.backdropSampler(lyric, x, y) : null
+                        // 4px 量化视口锚点：滚动/跟随移动超过步长即重烘焙雾色
+                        poseAnchor: Math.round((line.y - (lines.following ? line.scrollY : lines.contentY)) * 0.25)
                         fadeWidth: flow.wordFade
                         animateWords: flow.scaleEnabled && flow.motion
                     }
