@@ -646,7 +646,7 @@ function signal() {
 }
 
 /** 构造完整 EchoPluginContext 假实现；denied 模拟宿主拒绝 hostSettings 授权。 */
-function context({ denied = false, autoTakeover = undefined } = {}) {
+function context({ denied = false, autoTakeover = undefined, holdObserve = false } = {}) {
   const timers = new Map();
   const contributions = [];
   const saved = [];
@@ -655,6 +655,8 @@ function context({ denied = false, autoTakeover = undefined } = {}) {
   const navigations = [];
   const writes = [];
   const commands = new Map();
+  // holdObserve：observe 挂起不落地，模拟用户停在权限确认对话框
+  const heldObserve = [];
   const storage = {
     data: TEST_DATA,
     checkedDate: todayStr(Date.now()),
@@ -691,6 +693,27 @@ function context({ denied = false, autoTakeover = undefined } = {}) {
     settings: {
       observe(id, domain, callback) {
         if (denied) return opReject('denied');
+        if (holdObserve) {
+          // awaitOperation 对 state < 2 的 op 等待 completed 信号：测试显式放行。
+          // 信号需支持 disconnect（echo-plugin-sdk-stub 的等待协议）。
+          const listeners = [];
+          const pending = {
+            state: 0,
+            result: undefined,
+            errorMessage: '',
+            errorCode: '',
+            completed: {
+              connect: (f) => listeners.push(f),
+              disconnect: (f) => {
+                const at = listeners.indexOf(f);
+                if (at >= 0) listeners.splice(at, 1);
+              },
+              emit: () => listeners.slice().forEach((f) => f()),
+            },
+          };
+          heldObserve.push({ op: pending, callback });
+          return pending;
+        }
         watch.active = true;
         callback({ githubProxyUrl: 'https://existing.example' });
         return op(watch);
@@ -760,6 +783,7 @@ function context({ denied = false, autoTakeover = undefined } = {}) {
     navigations,
     writes,
     watch,
+    heldObserve,
     state: () => ctx.ui.state,
     dispose: () => {
       ctx.active = false;
@@ -874,6 +898,57 @@ test('toggling auto-takeover back on restarts the takeover flow', async () => {
   assert.deepEqual(f.writes.at(-1), ['autoTakeover', true]);
   assert.equal(f.state().controlled, true);
   assert.equal(f.contributions.filter((c) => c.active).length, 2);
+  f.dispose();
+});
+
+test('toggling off while authorization is pending retires the takeover attempt', async () => {
+  const f = context({ holdObserve: true });
+  await activate(f.ctx);
+  f.timers.get('startup-work')();
+  await drain();
+  // 授权对话框尚待用户确认：接管未生效
+  assert.equal(f.heldObserve.length, 1);
+  assert.equal(f.state().controlled, false);
+
+  // 用户此时关闭自动托管，随后才点“允许”
+  await f.commands.get('accelerate.auto')({ enabled: false });
+  const held = f.heldObserve[0];
+  held.op.state = 2;
+  held.op.result = f.watch;
+  held.op.completed.emit();
+  await drain();
+
+  // 迟到的授权不得复活接管：watch 被丢弃，无 UI 注入、无写盘
+  assert.equal(f.watch.active, false);
+  assert.equal(f.contributions.length, 0);
+  assert.equal(f.state().controlled, false);
+  assert.equal(f.state().autoTakeover, false);
+  assert.equal(f.saved.length, 0);
+  f.dispose();
+});
+
+test('a re-test clears the copied marker so the next open re-applies the fallback copy', async () => {
+  const f = context({ autoTakeover: false });
+  await activate(f.ctx);
+  f.timers.get('startup-work')();
+  await drain();
+  await f.commands.get('accelerate.test')();
+  await drain();
+  const top = f.state().selectedUrl;
+  const second = f.state().ranked[1].url;
+  assert.notEqual(second, top);
+
+  // 兜底复制第 1 名 → 行内复制第 2 名 → 再跳转不再覆盖
+  await f.commands.get('accelerate.open')();
+  await f.commands.get('accelerate.copy')({ url: second });
+  await f.commands.get('accelerate.open')();
+  assert.deepEqual(f.clipboardWrites, [top, second]);
+
+  // 重新检测后旧标记作废：跳转重新兜底复制新的第 1 名
+  await f.commands.get('accelerate.test')();
+  await drain();
+  await f.commands.get('accelerate.open')();
+  assert.deepEqual(f.clipboardWrites, [top, second, top]);
   f.dispose();
 });
 

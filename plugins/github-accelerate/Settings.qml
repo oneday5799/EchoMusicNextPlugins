@@ -379,7 +379,7 @@ ColumnLayout {
             visible: settingsRoot.busy || settingsRoot.lastResult !== ""
             text: settingsRoot.busy ? qsTr("执行中…") : settingsRoot.lastResult
             font: Theme.font(12, Theme.regularWeight)
-            color: Theme.colors.danger
+            color: settingsRoot.busy ? Theme.floatingSecondaryText : Theme.colors.danger
         }
     }
 

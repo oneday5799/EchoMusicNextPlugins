@@ -443,7 +443,9 @@ export function activate(ctx: EchoPluginContext) {
         return host.saveAutoTakeover(enabled).then(
           () => {
             if (!enabled) {
-              // 关闭托管：撤回接管提示与隐藏，恢复宿主输入框；已写入的地址保留不动。
+              // 关闭托管：退役会话使在途的授权/接管链作废（否则用户确认权限后接管会复活），
+              // 撤回提示并恢复宿主输入框；已写入宿主的地址保留不动。
+              session += 1;
               withdraw();
               return undefined;
             }
@@ -451,7 +453,9 @@ export function activate(ctx: EchoPluginContext) {
               controller.publish();
               return undefined;
             }
-            return start();
+            // 不等待整轮测速（最坏可达数十秒）：命令立即返回，失败由 start 内部 toast。
+            void start();
+            return undefined;
           },
           (error: unknown) => {
             // 存盘失败回滚开关，面板下一次发布时会恢复原位。
@@ -462,6 +466,8 @@ export function activate(ctx: EchoPluginContext) {
         );
       });
       ctx.registerCommand('accelerate.test', () => {
+        // 新一轮检测作废旧轮的“已复制”标记：重测后「粘贴到设置」重新兜底复制新的第 1 名。
+        userCopied = false;
         if (controlled) return controller.runTest();
         return takeoverEnabled ? start() : controller.runTest();
       });
@@ -505,7 +511,9 @@ export function activate(ctx: EchoPluginContext) {
         return awaitOperation(
           ctx.settings.observe('network-takeover', 'network', (value) => {
             if (round !== session || !ctx.active) return;
-            currentUrl = value.githubProxyUrl;
+            // 宿主可能以 null/缺字段回调：缺失按“直连”展示，避免抛错打断监听链。
+            currentUrl =
+              value && typeof value.githubProxyUrl === 'string' ? value.githubProxyUrl : '';
             controller.publish();
           }),
         )
