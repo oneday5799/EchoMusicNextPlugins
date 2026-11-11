@@ -38,6 +38,10 @@
       "id": "github-accelerate",
       "repo": "https://github.com/oneday5799/EchoMusicNextPlugins",
       "path": "plugins/github-accelerate"
+    },
+    {
+      "id": "webdav-backup",
+      "path": "plugins/webdav-backup"
     }
   ]
 }
