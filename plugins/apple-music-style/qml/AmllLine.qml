@@ -5,19 +5,26 @@ import EchoMusic.PluginSdk
 // AMLL 风格逐词歌词行。移植宿主 LyricLine / AMLL core 的呈现语义：
 // 一条连续亮度前沿按词时长推进（时值间隙停留），软边宽度 fadeWidth × em × 1.2；
 // 播放中的词上浮 em × 5%；未逐词的行激活时整行点亮。
-// 渲染对照宿主的单层逐像素渐变：pose 颜色整簇均匀，改用 16 段互斥
-// 亮度切片（pose.clip 以 run 局部坐标逐像素 fwidth 抗锯齿裁剪）铺满
-// 软边段，每像素恰好一层 —— 叠层会复利字形抗锯齿边缘（变粗、偏亮）；
+// 渲染对照宿主的单层逐像素渐变：pose 颜色整簇均匀，改用 1px 互斥
+// 亮度切片（pose.clip 以 run 局部坐标裁剪，右缘外伸 1.5 footprint 压住
+// 宿主 clip 软边窗，窗内 = 满覆盖左色 × 递减右色的精确线性插值）铺满
+// 软边段；暗墨基底只从带右缘起罩、不进带内 —— 任何叠层都会复利字形
+// 抗锯齿边缘（变粗、偏亮），带内每像素至多一次满覆盖字形 + 一次递减形；
 // 未唱样（暗：未唱色 alpha ×（1 + 高亮量），当前行 0.2 → 0.4 提亮）
 // 与已唱样（亮：未唱色 lerp 播放色，随高亮量渐入）。上浮随所属词。
-// 强调词（时长 ≥1s 且全 CJK 或 2–7 字符）按 AMLL emphasize：
+// 强调词（时长 ≥1s 且全 CJK 或 2–7 字符）按宿主 LyricLine::pose：
 // 逐字交错 rise(.2,.4,.58,1)/fall(.3,0,.58,1) 包络，缩放 1+.1×amount、
-// 推移 −em×.03×amount×(字数/2−序)×scale、常幅正弦浮动（随字起浮，
-// 叠加在 −em×.05 基础上浮之上，落点保持在抬起态）、
-// 白色辉光 halo（半径 min(.3, blur×.3)em，透明度 blur×包络×高亮量）；
+// 推移 −em×.03×amount×(字数/2−序)×scale；lift 整体替换为
+// −em×(.05×sin×高亮量 + .025×amount×scale)（floatPhase 带 400ms 提前量）、
+// 白色辉光 halo（半径 em×strength×.15，透明度 strength×包络×高亮量×亮色α）；
 // 缩放围绕簇盒中心（锚点在基线上，需 (1−scale)×中心距补偿）。
-// 不做亮/暗双层叠放：双层在词上浮时错位会露出下层形成重影，
-// 也不经过 layer/ShaderEffect（GlyphRun 的自定义节点经 layer 抓取会丢内容）。
+// 不做亮/暗双层叠放：双层在词上浮时错位会露出下层形成重影。
+// 活动行经 layer 离屏合成（见 layer.enabled 注释）：Qt 对非分层子树的
+// item opacity 逐 draw 相乘，切片「前片外伸 + 本片」叠画在 ρ<1 时底层
+// 亮墨以 (1−ρ) 泄漏（带比平台亮 +20~28、亮端窗口 +17 斑，实测 dpr1.25）；
+// 抵消用的 pose.opacity=1/ρ 又被宿主 finiteRange(opacity,0,1) 拒收。
+// layer 内满 α 合成、ρ 在合成出口只乘一次，切片恢复单层逐像素语义。
+// 实测 GlyphRun 自定义节点经 layer 抓取内容完好（旧注释「会丢内容」已过时）。
 Item {
     id: line
 
@@ -46,6 +53,19 @@ Item {
     property real poseAnchor: 0
     // 0..1，软边宽度系数（对应旧 AMLL 的 fadeWidth）
     property real fadeWidth: 0.5
+    // 活动行离屏合成：Qt 对非分层子树的 item opacity 逐 draw 相乘，扫掠带
+    // 「前片外伸 + 本片」叠画在 ρ<1 时底层亮墨以 (1−ρ) 泄漏（带比平台亮
+    // +20~28、亮端窗口 +17 斑）；抵消用的 pose.opacity=1/ρ 被宿主
+    // finiteRange(opacity,0,1) 拒收（整行 poses 丢弃 → 高亮消失，已实测）。
+    // layer 让整个字形子树在层内满 α 精确合成（切片窗口恢复线性插值、halo
+    // 不再抬亮已唱墨），ρ 在合成出口只乘一次——带与平台同基准。非活动行
+    // 不开层：单 pose 绘制无叠画问题，且避免缩放动画时纹理重采样发虚。
+    // 实测 GlyphRun 自定义节点经 layer 抓取内容完好（旧结论「会丢内容」
+    // 已过时）。注意不可外扩层源矩形垫越界绘制：外扩区域会被缩放映射回
+    // item 矩形（行被压扁、右移，2026-11-12 实测），lift/halo 的越界裁剪
+    // 由字体行盒的 ascent/descent 余量吸收。
+    layer.enabled: current && animateWords && hasWordTiming
+    layer.smooth: true
     property bool animateWords: true
     // 远离焦点行的模糊（AMLL blur 语义：CSS filter blur 的 px 值，焦点行 0，
     // 其余 min(5, 1+距离) 由调用方算好经动画驱动）。经 GlyphPose.blur 落地：
@@ -55,7 +75,8 @@ Item {
     property real blurAmount: 0
 
     readonly property real em: font.pixelSize
-    readonly property real fade: Math.max(1, em * 1.2 * fadeWidth)
+    // 宿主 setFadeWidth 钳制 [0.05, 1]（LyricLine.cpp）
+    readonly property real fade: Math.max(1, em * 1.2 * Math.min(1, Math.max(0.05, fadeWidth)))
     readonly property bool hasWordTiming: words.some(w => Number(w.t1) !== Number(w.t0))
     // 宿主 LyricLine 的颜色模型：亮色随高亮量从未唱色渐入，
     // 暗色随高亮量提亮（当前行未唱部分 0.2 → 0.4），静止行保持未唱色
@@ -104,7 +125,8 @@ Item {
                 "text": text,
                 "maxWidth": Math.min(4096, Math.max(1, width)),
                 // 辉光贴图预算（合法档位 40/80/160/512/1024）：
-                // 强调词 halo 半径 min(.3, blur×.3)em，em ≤133px 时 ≤40
+                // 强调词 halo 半径 em×strength×.15（strength≤.8 → ≤.12em），
+                // em ≤333px 时 ≤40
                 "maxHaloRadius": 40,
                 // 身体模糊预算（合法档位 0/8/16/32）：AMLL 上限 5px 折算 pose
                 // 值 2.5，档位 8 足够；显式声明同时把 effects 图集 tile 的
@@ -171,7 +193,9 @@ Item {
     function refreshLifts(): void {
         const count = line.wordSpans.length;
         const list = new Array(count).fill(0);
-        if (current && animateWords && timeMs >= 0 && hasWordTiming && highlightAmount > 0) {
+        // 宿主 lift 只乘 highlightAmount、无 current 门槛：离场渐隐（current 已
+        // 假、高亮量衰减中）期间上浮保持并随高亮量回落，不瞬间塌落
+        if (animateWords && timeMs >= 0 && hasWordTiming && highlightAmount > 0) {
             for (let i = 0; i < count; ++i) {
                 const word = line.wordSpans[i];
                 const duration = Math.max(1000, word.t1 - word.t0);
@@ -321,6 +345,18 @@ Item {
     // 与切片数无关；亚像素切片间距还会与像素网格混叠成宽条纹）。
     // 切片 rgb 取基底渲染值↔亮预乘的外观插值、a=1：与半透明渲染逐像素同值
     // （背景项由 Skin 的 backdropColor 估计）。强调变换所有层共享。
+    // 行链不透明度（诊断用）：Qt 对非分层子树的 item opacity 逐 draw 相乘。
+    // 扫掠带「前片外伸 + 本片」双重绘制因此在 ρ<1 时打不穿单层等价——底层
+    // 亮墨以 (1−ρ) 泄漏（带比平台亮 +20~28、亮端窗口 +17 斑）；而抵消用的
+    // pose.opacity=1/ρ 又被宿主 finiteRange(opacity, 0, 1) 拒收。两难待解：
+    // 要么宿主放宽校验，要么 GlyphRun 支持 layer 抓取（现注释称会丢内容）。
+    // 从本项向上累乘全部祖先 opacity，供诊断与未来方案使用。
+    function __inheritedOpacity(): real {
+        let o = 1;
+        for (let it = parent; it; it = it.parent)
+            o *= it.opacity;
+        return o;
+    }
     // 强调辉光独立层（形体透明只留 halo），垫在所有字迹层之下——canvas
     // shadowBlur 语义（辉光在字后）。挂在不透明字迹之上会把 228 墨色抬向
     // 255，形成渐变带亮端比已唱平台亮 +18 的竖向亮带。
@@ -365,38 +401,41 @@ Item {
         const seen = new Set();
         const edge = line.edge, fade = line.fade;
         const em = line.em;
-        const empActive = line.current && line.animateWords && line.highlightAmount > 0;
+        // 宿主强调变换无 current 门槛，量值乘 highlightAmount：渐隐期间随高亮衰减
+        const empActive = line.animateWords && line.highlightAmount > 0;
         // GlyphRun 缩放围绕簇锚点（中点 x、基线 y），
         // AMLL 围绕字盒中心：需 (1−scale)×(盒中心−基线) 补偿
         const centerDy = m.height / 2 - m.baseline;
-        // 渐变分区几何：不透明外观切片（色含背景项、a=1）+ 暗基底，pitch = F。
-        // 宿主 clip 为软边缘（以裁剪边为中心、宽 = footprint 的渐变）：每片右缘
-        // 多伸 F，ramp-down 尾恰好整个落在下级内部、ramp-up 窗恰好整个落在上级
-        // 内部——满覆盖处中间层不透明，遮住邻片残尾，任意点只显现单层外观，
-        // 带内梯度 = 逐格常色 + 1px 线性过渡，台阶 Δ ≈ (bright−dim 外观)·F/fade
-        // ≈ 3/255（旧方案 pitch≥2F 时 Δ≈13，即用户所见条纹）。
-        // 切片色 = 基底渲染值 U 与亮预乘的插值（U = dimPr + bg(1−dimA)，bg 取
-        // Skin 的背景均色估计）：不透明层渲染 lerp(U, brightPr, τ)，与"半透明
-        // 亮墨 τ 叠暗基底"逐像素同值，带两端与已唱/未唱平台精确锚定，无明暗
-        // 边界；bg 估计残差只表现为中心段 ≤ ±8/255 的平滑倾斜（无周期结构）。
-        // 半透明分解（α=τ 亮切片叠基底）虽天然含背景项，但相邻切片软窗重叠
-        // 过合成 / 互补窗欠覆盖（±26~38），条纹不可接受，不可取。
-        // F 为设计 footprint 上限（dpr ≥ 1、强调 scale ≥ 1 → 实际 ≤ 1）。
-        const F = 1.0;
+        // 渐变分区几何：不透明外观切片（色含背景项、a=1）+ 带右暗基底。
+        // 宿主 clip 软边 = 以裁剪边为中心、宽 1 footprint（fp = 1/dpr 逻辑px，
+        // glyph-run.frag 的 fwidth 渐变）的线性渐变。相邻切片共享边界 b 时，
+        // 窗口 [b−fp/2, b+fp/2] 内要得到精确线性插值（满覆盖左色 × 递减右色），
+        // 左片必须以满覆盖压住整个窗口 ⟹ 右缘外伸 X ≥ fp，取 1.5fp 容差。
+        // X 不足：左片在窗口内已递减，底层从二次混合项泄漏 α(1−α)(C−底层)，
+        // 带内出现暗釉/接缝（F=1、pitch≈fp 时实测核心 −10~−17）；X 过大：两片
+        // 同时满覆盖的区域变宽，同形字形边缘 coverage 复利 1−(1−g)^N，扫掠字
+        // 变粗（F=4 时带内每像素 ~5 层叠画）。暗基底只从带右缘 g1 起罩：带内
+        // 若垫暗墨底层，字形边缘像素额外叠 dimA·g 的墨（≈+13/255），整条带
+        // 像浮在歌词上的一层——底层一律不进带；带左半由 slice 1 向左无限延伸
+        // 兜底，带右半由末片外伸 + 暗基底衔接。
+        // 切片色 = 暗端与亮端两个背景合成值的插值（暗端 dimPr+bg(1−dimA)、
+        // 亮端 brightPr+bg(1−brightA)，bg 逐片取样）：宿主像素 = mix(dim,bright,p)
+        // 以逐像素 alpha 合成到真实背景，两端锚定后带内与宿主逐像素同值
+        // （unplayed/played 同 rgb 时精确相等）；bg 估计残差只表现为中心段
+        // ≤ ±8/255 的平滑倾斜（无周期结构）。
+        const dpr = (line.Window && line.Window.window && line.Window.window.devicePixelRatio) || 1;
+        const PITCH = 1.0;
+        const F = 1.5 / dpr;
         const g0 = edge - fade * 0.5, g1 = edge + fade * 0.5;
-        const K = Math.max(1, Math.ceil(fade / F));
+        const K = Math.max(1, Math.ceil(fade / PITCH));
         const pitch = fade / K;
         const dimA = line.dimColor.a, brightA = line.brightColor.a;
         const dc = line.dimColor, bc = line.brightColor;
         const dimPr = [dc.r * dimA, dc.g * dimA, dc.b * dimA];
         const brightPr = [bc.r * brightA, bc.g * brightA, bc.b * brightA];
-        // 基底渲染值（含背景项）：暗墨叠背景 = 已唱/未唱平台间的暗端锚点。
-        // v9 有逐位置估计器时切片各自取样（背景空间变化大，均色锚不住带端），
-        // 此均值仅作估计器未就绪时的回退。
+        // 切片背景项：v9 有逐位置估计器时切片各自取样（背景空间变化大，均色
+        // 锚不住带端），此均色仅作估计器未就绪时的回退。
         const bgc = line.backdropColor;
-        const baseApp = [dimPr[0] + bgc.r * (1 - dimA),
-                         dimPr[1] + bgc.g * (1 - dimA),
-                         dimPr[2] + bgc.b * (1 - dimA)];
         for (let i = 0; i < graphemes.length; ++i) {
             const g = graphemes[i];
             const start = Number(g.clusterStart) || 0;
@@ -426,20 +465,22 @@ Item {
                             env * line.highlightAmount;
                     escale = 1 + 0.1 * amount;
                     ex = -em * 0.03 * amount * (span.ec / 2 - charIndex) * escale;
-                    // AMLL emphasize float：常幅正弦叠加在基础上浮之上（复合而非替代），
-                    // 落点保持在抬起态；随字自身交错时刻起浮，无提前量
-                    const floatPhase = Math.min(1, Math.max(0, (t - stagger) / (length * 1.4 - 400)));
-                    ey = -em * 0.05
-                                * line.__ease(Math.min(1, Math.max(0, t / Math.max(1000, rawDu))))
-                                * line.highlightAmount
-                            - em * 0.05 * Math.sin(floatPhase * Math.PI)
+                    // 宿主强调字的 lift 整体替换基础上浮（非叠加）：正弦浮动随字
+                    // 交错时刻起浮、带 400ms 提前量（(t−stagger+400)/(length×1.4)），
+                    // 另加 .025×amount×scale 的包络推抬；随高亮量衰减
+                    const floatPhase = Math.min(1, Math.max(0, (t - stagger + 400) / (length * 1.4)));
+                    ey = -em * (0.05 * Math.sin(floatPhase * Math.PI) * line.highlightAmount
+                                + 0.025 * amount * escale)
                             + (1 - escale) * centerDy;
                     const blurBase = Math.min(
                                 0.8, line.__intensity(rawDu / 3000) * 0.5 * (span.last ? 1.5 : 1));
-                    const haloOpacity = blurBase * env * line.highlightAmount;
+                    // 宿主 shader 合成把 halo 乘 bright.a：辉光随亮色 alpha 渐入渐出
+                    const haloOpacity = blurBase * env * line.highlightAmount * line.brightColor.a;
                     if (haloOpacity > 0.01)
                         halos = [{
-                                "radius": Math.min(0.3, blurBase * 0.3) * em,
+                                // 宿主 mask 烘焙半径 max(1, ceil(em·dpr·strength·.15))：
+                                // dpr 抵消后逻辑半径 = em×strength×.15（≤.12em）
+                                "radius": Math.max(1, Math.ceil(line.em * blurBase * 0.15)),
                                 "opacity": haloOpacity,
                                 "color": Qt.rgba(1, 1, 1, 1)
                             }];
@@ -450,9 +491,10 @@ Item {
             const oR = 0.5 + (edge - x - advance) / fade;
             // 全亮判定必须与下方切片 break 的原始比较（bandL ≥ x+advance）
             // 同侧：扫掠终点 edge 恰停在 x+advance+fade/2 边界上，(edge-x-adv)/fade
-            // 的除法舍入可能得 0.99… 而落入 cross 路径，此时切片全部 break、
-            // dim 基底 clip 又从 bandL（已越过簇右缘）起罩——整簇无任何 pose，
-            // 末字消失直到换行。此处并列原始比较，边界态一律全亮。
+            // 的除法舍入可能得 0.99… 而落入 cross 路径，此时切片对簇内各列全部
+            // break（li ≥ x+advance）、暗基底又只从带右缘 g1（已越过簇右缘）起
+            // 罩——整簇无任何 pose，末字消失直到换行。此处并列原始比较，边界态
+            // 一律全亮。
             if (oR >= 1 || edge - x - advance >= fade * 0.5) {
                 // 整簇全亮（右缘未进过渡带）：halo 垫底 + 单层 pose
                 if (halos)
@@ -508,10 +550,11 @@ Item {
                         "opacity": 1,
                         "color": line.dimColor,
                         "clip": {
-                            // 从簇左缘起罩（而非 bandL）：slice 1 强制 τ=1 且向左
-                            // 无限延伸、不透明盖在基底之上，左侧延伸不可见；一旦
-                            // 切片因边界浮点全数 break，基底仍完整兜住整簇
-                            "x": Math.min(bandL, x) - rowPrefix,
+                            // 只从带右缘 g1 起罩：带内不能垫暗墨底层（字形边缘
+                            // 会复利一层 dimA·g 的墨 ≈ +13/255，形成浮层）。
+                            // 带左半由 slice 1 向左无限延伸兜底；末片外伸越过
+                            // g1 后由本基底衔接，浮点边界态不再有裸露区
+                            "x": g1 - rowPrefix,
                             "y": -100000,
                             "width": 900000,
                             "height": 200000
@@ -538,26 +581,37 @@ Item {
                     break;      // 余下切片与暗基底同观感
                 // 每片自己的背景项：切片中心行局部 x（= clip 坐标系）取样；
                 // 带端与未唱字衔接的是该片所在位置的背景，而非整行均值
-                let b0 = baseApp[0], b1 = baseApp[1], b2 = baseApp[2];
+                let bgR = bgc.r, bgG = bgc.g, bgB = bgc.b;
                 if (line.backdropAt) {
                     const bgS = line.backdropAt(li - rowPrefix + pitch * 0.5, y);
                     if (bgS) {
-                        b0 = dimPr[0] + bgS[0] * (1 - dimA);
-                        b1 = dimPr[1] + bgS[1] * (1 - dimA);
-                        b2 = dimPr[2] + bgS[2] * (1 - dimA);
+                        bgR = bgS[0];
+                        bgG = bgS[1];
+                        bgB = bgS[2];
                     }
                 }
-                // 不透明外观：外观目标 P(τ) = lerp(baseApp, brightPr, τ)（a=1 时
-                // 直色 = 预乘色），与半透明亮墨叠暗基底逐像素同值
+                // 不透明外观：两端都锚定背景合成值——暗端 = 暗墨叠背景，亮端 =
+                // 亮墨叠背景（含 bg(1−brightA) 项）。宿主像素 = mix(dim,bright,p)
+                // 以逐像素 alpha 合成到真实背景；亮端缺背景项时高亮渐入/渐出
+                // （brightA<1）期间已唱平台偏暗。unplayed/played 同 rgb 时与宿主
+                // 逐像素同值，异色时差异为二阶小量
+                const d0 = dimPr[0] + bgR * (1 - dimA),
+                      d1 = dimPr[1] + bgG * (1 - dimA),
+                      d2 = dimPr[2] + bgB * (1 - dimA);
+                const e0 = brightPr[0] + bgR * (1 - brightA),
+                      e1 = brightPr[1] + bgG * (1 - brightA),
+                      e2 = brightPr[2] + bgB * (1 - brightA);
                 const pose = {
                         "key": "line",
                         "start": start,
                         "instance": "s" + s,
                         "y": y,
+                        // 宿主校验 opacity ∈ [0,1]（GlyphRun.cpp finiteRange），
+                        // >1 整体拒收 → 行渲染退化为无 poses——不得在此抵消 ρ
                         "opacity": 1,
-                        "color": Qt.rgba(b0 + (brightPr[0] - b0) * tau,
-                                         b1 + (brightPr[1] - b1) * tau,
-                                         b2 + (brightPr[2] - b2) * tau, 1),
+                        "color": Qt.rgba(d0 + (e0 - d0) * tau,
+                                         d1 + (e1 - d1) * tau,
+                                         d2 + (e2 - d2) * tau, 1),
                         "clip": {
                             "x": s === 1 ? -100000 : li - rowPrefix,
                             "y": -100000,
@@ -595,7 +649,7 @@ Item {
                         __bs = __parts.join(' ');
                     }
                 } catch (e) {}
-                let __dump = '[probe-poses] t=' + (__now % 1000000) + ' edge=' + Math.round(edge) + ' w=' + Math.round(line.width) + ' blur=' + (line.blurAmount !== undefined ? Number(line.blurAmount).toFixed(2) : 'NA') + ' bg=' + __bg + ' bs=' + __bs + ' n=' + list.length;
+                let __dump = '[probe-poses] t=' + (__now % 1000000) + ' edge=' + Math.round(edge) + ' w=' + Math.round(line.width) + ' blur=' + (line.blurAmount !== undefined ? Number(line.blurAmount).toFixed(2) : 'NA') + ' bg=' + __bg + ' bs=' + __bs + ' rho=' + Number(line.__inheritedOpacity()).toFixed(3) + ' n=' + list.length;
                 for (let __i = 0; __i < Math.min(4, list.length); ++__i) {
                     const __q = list[__i];
                     __dump += ' | @' + __i + ' op=' + Number(__q.opacity).toFixed(2) + ' st=' + (__q.start ?? -1) + ' c=' + Math.round(__q.color.r * 255) + ',' + Math.round(__q.color.g * 255) + ',' + Math.round(__q.color.b * 255) + ' a=' + Number(__q.color.a).toFixed(2) + ' bl=' + (__q.blur !== undefined ? Number(__q.blur).toFixed(2) : '-') + ' clip=' + (__q.clip ? Math.round(__q.clip.x) + '+' + Math.round(__q.clip.width) : '-');

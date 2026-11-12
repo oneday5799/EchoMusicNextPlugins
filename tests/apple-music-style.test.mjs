@@ -143,7 +143,13 @@ test('AMLL renderer wiring keeps the old plugin behavior in the skin', async () 
   assert.ok(flow.includes('EchoWheelScroll'));
   assert.ok(line.includes('hasWordTiming'));
   // 逐词行走宿主 GlyphRun 原生塑形：整行连字/字距与内建歌词页一致，
-  // 单层按词元簇颜色/透明度插值呈现 AMLL 软边前沿（GlyphRun 经 layer 抓取会丢内容）
+  // 单层按词元簇颜色/透明度插值呈现 AMLL 软边前沿。
+  // 活动行必须经 layer 离屏合成：Qt 对非分层子树的 item opacity 逐 draw
+  // 相乘，扫掠带「前片外伸 + 本片」叠画在 ρ<1 时底层亮墨以 (1−ρ) 泄漏
+  // （带比平台亮 +20~28、亮端窗口 +17 斑，2026-11-12 dpr1.25 实测）；
+  // 抵消用的 pose.opacity=1/ρ 被宿主 finiteRange(opacity,0,1) 拒收（整行
+  // poses 丢弃 → 高亮消失）。layer 内满 α 合成、ρ 只在出口乘一次。
+  // 2026-11-12 实测 GlyphRun 经 layer 抓取内容完好（旧「丢内容」结论已过时）。
   assert.ok(line.includes('import EchoMusic.PluginSdk'), 'AmllLine 必须使用宿主 GlyphRun');
   assert.ok(line.includes('GlyphRun {'));
   assert.ok(line.includes('clusterStart'));
@@ -151,8 +157,15 @@ test('AMLL renderer wiring keeps the old plugin behavior in the skin', async () 
   assert.ok(line.includes('__sweepPoses'), '扫掠必须按词元簇求值');
   assert.ok(line.includes('0.5 + (edge - x) / fade'), '簇透明度必须由前沿与软边求值');
   assert.ok(line.includes('dimColor'), '未唱样必须随高亮量提亮（宿主 0.2 → 0.4）');
-  assert.ok(line.includes('brightColor'), '已唱样必须随高亮量从未唱色渐入');
-  assert.ok(!line.includes('layer.enabled'), 'GlyphRun 不得进入 layer 抓取');
+  assert.ok(line.includes('brightColor'), '已唱样必须从未唱色渐入');
+  assert.ok(
+    line.includes('layer.enabled: current && animateWords && hasWordTiming'),
+    '活动行必须离屏合成（逐 draw 行链 ρ 使切片叠画泄漏）',
+  );
+  assert.ok(
+    !line.includes('layer.sourceRect'),
+    '禁用 sourceRect 外扩：外扩区域会被缩放映射回 item 矩形（行压扁、右移，2026-11-12 实测）',
+  );
   assert.ok(skin.includes('Qt.rgba(1, 1, 1, 0.2)'), '未唱色必须用宿主默认 20% 白');
   for (const feature of ['text.glyphs', 'graphics.glyphRun.canvas', 'settings.host'])
     assert.ok(manifest.requires.features.includes(feature), `manifest missing ${feature}`);
