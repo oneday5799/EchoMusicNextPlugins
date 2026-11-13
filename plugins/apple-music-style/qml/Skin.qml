@@ -141,7 +141,7 @@ Item {
         }
     }
     readonly property bool hostBlurActive: root.visible && root.coverUrl.toString().length > 0 && !root.hostFrosted && root.hostMaterialOpacity > 0
-    // ===== 背景均色估计（渐变带切片色的背景项注入，见 AmllLine.__sweepPoses）=====
+    // ===== 背景均色估计（渐变带切片色的背景项注入，见 AmlLineView.__sweepPoses）=====
     // 不透明外观切片要与半透明未唱字无缝衔接，切片色须含背景贡献。复刻宿主
     // 合成链的均值：封面 → background-preprocess（对比 .4 → 饱和 ×3 →
     // 对比 1.7 → 亮度 .75，8bit 钳制）→ 8 次盒模糊（均值保持）→ lyric-fluid
@@ -286,7 +286,7 @@ Item {
                 (lut[o00 + 1] * (1 - ax) + lut[o10 + 1] * ax) * (1 - ay) + (lut[o01 + 1] * (1 - ax) + lut[o11 + 1] * ax) * ay,
                 (lut[o00 + 2] * (1 - ax) + lut[o10 + 2] * ax) * (1 - ay) + (lut[o01 + 2] * (1 - ax) + lut[o11 + 2] * ax) * ay];
     }
-    // LyricFlow→AmllLine 的每片背景项入口：条目坐标 → 皮肤分数 → LUT 采样
+    // LyricFlow→AmlLineView 的每片背景项入口：条目坐标 → 皮肤分数 → LUT 采样
     function backdropSample(item, x, y) {
         const p = item.mapToItem(root, x, y);
         return root.__sampleBg(p.x / Math.max(1, root.width), p.y / Math.max(1, root.height));
@@ -1003,7 +1003,7 @@ Item {
             unplayedColor: Qt.rgba(1, 1, 1, 0.2)
             // 背景均色估计：渐变带切片色注入背景项（消除带端明暗边界）
             backdropColor: root.backdropColor
-            // v9 逐像素背景估计器（null 时 AmllLine 回退 backdropColor 均色）
+            // v9 逐像素背景估计器（null 时 AmlLineView 回退 backdropColor 均色）
             backdropSampler: root.backdropSample
             focusPosition: root.s.alignPosition / 100
             wordFade: root.s.fadeWidth / 100
@@ -1016,8 +1016,7 @@ Item {
             pageHeight: root.height
         }
 
-        // 上下渐隐由 LyricFlow 行内 edgeOpacity 完成（旧版 mask-image 12%/88%）：
-        // 容器级 layer 遮罩的底部渐隐段实测不生效，行贴到裁切线仍清晰可见
+        // 上下边缘不做渐隐（AMLL 无边缘遮罩；远行由模糊 + 视口剔除自然消隐）
     }
 
     // 圆形操作按钮（收藏/评论/分享/更多），对应旧版 38px 圆形按钮

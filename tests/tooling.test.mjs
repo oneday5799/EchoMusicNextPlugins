@@ -267,8 +267,19 @@ export function activate(ctx: EchoPluginContext) { ctx.player.volume = 9; }
 test('validator rejects incompatible syntax, missing activation and native QML plugins', async (t) => {
   const { source, output } = await author(t);
   const built = await buildPackage(source, output);
+  // QML V4 引擎不支持的语法（qml.exe 实测）逐一拒绝
   await writeFile(path.join(built, 'entry.mjs'), 'export async function activate(ctx) {}');
-  await assert.rejects(validatePackage(built), /Unexpected token/);
+  await assert.rejects(validatePackage(built), /async function/);
+  await writeFile(
+    path.join(built, 'entry.mjs'),
+    'class A { field = 1 }\nexport function activate(ctx) { return A; }',
+  );
+  await assert.rejects(validatePackage(built), /class field/);
+  await writeFile(
+    path.join(built, 'entry.mjs'),
+    'export function activate(ctx) { return { ...ctx, a: 1 }; }',
+  );
+  await assert.rejects(validatePackage(built), /object spread/);
   await writeFile(path.join(built, 'entry.mjs'), 'export function deactivate(ctx) {}');
   await assert.rejects(validatePackage(built), /export activate/);
   await writeFile(path.join(built, 'entry.mjs'), 'export function activate(ctx) {}');

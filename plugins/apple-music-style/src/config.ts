@@ -19,7 +19,7 @@ export const DEFAULT_SETTINGS: SkinSettings = {
   enableScale: true,
   enableSpring: true,
   fadeWidth: 50,
-  alignPosition: 48,
+  alignPosition: 35,
 };
 
 const NUMBER_SETTINGS: Record<string, [number, number]> = {

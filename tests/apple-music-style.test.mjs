@@ -12,7 +12,7 @@ import {
   validateSettings,
 } from '../plugins/apple-music-style/src/config.ts';
 
-test('skin settings defaults mirror the ported plugin', () => {
+test('skin settings defaults mirror the AMLL alignment default', () => {
   assert.equal(SKIN_ID, 'apple-music');
   assert.deepEqual(DEFAULT_SETTINGS, {
     enhanceContrast: false,
@@ -22,7 +22,7 @@ test('skin settings defaults mirror the ported plugin', () => {
     enableScale: true,
     enableSpring: true,
     fadeWidth: 50,
-    alignPosition: 48,
+    alignPosition: 35,
   });
 });
 
@@ -103,13 +103,46 @@ test('quality badges mirror host quality keys and cloud sources', () => {
   assert.equal(qualityLabel('unknown', false), '');
 });
 
-test('AMLL renderer wiring keeps the old plugin behavior in the skin', async () => {
+test('AMLL base modules are dependency-free ES modules consumable from QML and Node', async () => {
+  const pluginRoot = fileURLToPath(new URL('../plugins/apple-music-style/', import.meta.url));
+  const config = JSON.parse(await readFile(pluginRoot + 'plugin.config.json', 'utf8'));
+
+  // base 模块全部入包（QML .mjs 导入 + 结构保留）
+  for (const mod of [
+    'consts',
+    'easing',
+    'focus',
+    'index',
+    'interlude',
+    'is-cjk',
+    'layout',
+    'line-group',
+    'player',
+    'scroll',
+    'seek-detector',
+    'spring',
+    'timeline',
+  ])
+    assert.ok(
+      config.assets.includes(`qml/amll/base/${mod}.mjs`),
+      `plugin.config.json 缺少 base 模块 ${mod}.mjs`,
+    );
+  // base 出口是零依赖 ES module（可直接被 QML 引擎与 Node 消费）
+  const player = await readFile(pluginRoot + 'qml/amll/base/player.mjs', 'utf8');
+  assert.ok(player.includes('export class LyricPlayerCore'));
+  assert.ok(player.includes('import {'), 'base 模块按 ES module 相对导入');
+  assert.ok(!/from ['"]node:[^'"]+['"]/.test(player), '产物不得依赖 Node 内建模块');
+  assert.ok(!/require\(/.test(player), '产物不得使用 CommonJS');
+});
+
+test('AMLL refactor wiring drives the lyric page through the base core', async () => {
   const pluginRoot = fileURLToPath(new URL('../plugins/apple-music-style/', import.meta.url));
   const skin = await readFile(pluginRoot + 'qml/Skin.qml', 'utf8');
   const flow = await readFile(pluginRoot + 'qml/LyricFlow.qml', 'utf8');
-  const line = await readFile(pluginRoot + 'qml/AmllLine.qml', 'utf8');
-  const spring = await readFile(pluginRoot + 'qml/AmllSpring.qml', 'utf8');
-  const interlude = await readFile(pluginRoot + 'qml/AmllInterlude.qml', 'utf8');
+  const view = await readFile(pluginRoot + 'qml/amll/AmlLyricView.qml', 'utf8');
+  const group = await readFile(pluginRoot + 'qml/amll/AmlGroupView.qml', 'utf8');
+  const line = await readFile(pluginRoot + 'qml/amll/AmlLineView.qml', 'utf8');
+  const dots = await readFile(pluginRoot + 'qml/amll/AmlInterludeDots.qml', 'utf8');
   const config = JSON.parse(await readFile(pluginRoot + 'plugin.config.json', 'utf8'));
   const manifest = JSON.parse(await readFile(pluginRoot + 'manifest.json', 'utf8'));
 
@@ -135,22 +168,52 @@ test('AMLL renderer wiring keeps the old plugin behavior in the skin', async () 
   assert.ok(skin.includes('PlaybackBlurredBackground'), '背景必须复用宿主模糊封面渲染器');
   assert.ok(skin.includes('lyricBackground'), '底色必须走宿主 lyricBackground(封面主色)');
   assert.ok(!skin.includes('blurMax: 64'), '不再手搓封面模糊');
+  assert.ok(skin.includes('Qt.rgba(1, 1, 1, 0.2)'), '未唱色必须用宿主默认 20% 白');
+  // 背景律动跟随宿主 backgroundRhythm：read/observe 同步 + 30fps 相位推进
+  assert.ok(skin.includes("settings.read('lyrics')"));
+  assert.ok(skin.includes('settings.observe('));
+  assert.ok(skin.includes('backgroundRhythm'));
+  assert.ok(skin.includes('hostPhase'));
 
-  // 时间轴/弹簧/间奏/逐词扫掠移植完整存在
-  assert.ok(flow.includes('function rebuild()'));
-  assert.ok(flow.includes('AmllInterlude'));
-  assert.ok(flow.includes('scrollMotion.retarget'));
-  assert.ok(flow.includes('EchoWheelScroll'));
-  assert.ok(line.includes('hasWordTiming'));
-  // 逐词行走宿主 GlyphRun 原生塑形：整行连字/字距与内建歌词页一致，
-  // 单层按词元簇颜色/透明度插值呈现 AMLL 软边前沿。
+  // LyricFlow 瘦身为宿主适配器：核心创建/时间推送/歌词数据/跳转
+  assert.ok(flow.includes('import "amll/base/player.mjs" as AmlPlayer'));
+  assert.ok(flow.includes('new AmlPlayer.LyricPlayerCore'));
+  assert.ok(flow.includes('core.setCurrentTime'), '媒体时间必须推送进编排核心');
+  assert.ok(flow.includes('core.setLyricLines'), '歌词数据必须进编排核心');
+  assert.ok(flow.includes('setAlignPosition(focusPosition)'));
+  assert.ok(flow.includes('setWordFadeWidth(wordFade)'));
+  assert.ok(flow.includes('setLinePosYSpringParams'), 'posY 弹簧参数 m0.9/d15/k90');
+  assert.ok(flow.includes('seekToGroup'));
+  assert.ok(!flow.includes('ListView'), '排版与滚动交由 base 核心（无 ListView）');
+  assert.ok(!flow.includes('EchoWheelScroll'));
+  assert.ok(!flow.includes('AmllLineMotion'), '旧组件已删除');
+  assert.ok(!flow.includes('AmllInterlude'));
+
+  // AmlLyricView：帧循环推进核心 + 滚动引擎输入
+  assert.ok(view.includes('FrameAnimation'));
+  assert.ok(view.includes('c.update(frameTime * 1000)'), '帧循环必须推进编排核心');
+  assert.ok(view.includes('lyricView.commitFrame()'));
+  assert.ok(view.includes('scrollEngine.wheel('));
+  assert.ok(view.includes('scrollEngine.beginTouch('));
+  assert.ok(view.includes('notifyGroupsChanged'));
+
+  // AmlGroupView：弹簧落盘 + AMLL 过渡时长 + 测量上报
+  assert.ok(group.includes('g.posY.getCurrentPosition()'), '组 y 由 posY 弹簧逐帧落盘');
+  assert.ok(group.includes('setGroupMeasured'), '自然高度必须上报布局计算器');
+  assert.ok(group.includes('duration: 400'), 'wrapper 透明度/模糊 0.4s（AMLL CSS）');
+  assert.ok(group.includes('? 300 : 450'), '亮层点亮 0.3s / 熄灭 0.45s（AMLL 亮度层）');
+
+  // AmlInterludeDots：快照消费 + 测量上报
+  assert.ok(dots.includes('getSnapshot()'));
+  assert.ok(dots.includes('setInterludeMeasured'));
+
+  // AmlLineView 扫掠内核（宿主 GlyphRun 原生塑形 + 1px 切片）
   // 活动行必须经 layer 离屏合成：Qt 对非分层子树的 item opacity 逐 draw
   // 相乘，扫掠带「前片外伸 + 本片」叠画在 ρ<1 时底层亮墨以 (1−ρ) 泄漏
   // （带比平台亮 +20~28、亮端窗口 +17 斑，2026-11-12 dpr1.25 实测）；
   // 抵消用的 pose.opacity=1/ρ 被宿主 finiteRange(opacity,0,1) 拒收（整行
   // poses 丢弃 → 高亮消失）。layer 内满 α 合成、ρ 只在出口乘一次。
-  // 2026-11-12 实测 GlyphRun 经 layer 抓取内容完好（旧「丢内容」结论已过时）。
-  assert.ok(line.includes('import EchoMusic.PluginSdk'), 'AmllLine 必须使用宿主 GlyphRun');
+  assert.ok(line.includes('import EchoMusic.PluginSdk'), 'AmlLineView 必须使用宿主 GlyphRun');
   assert.ok(line.includes('GlyphRun {'));
   assert.ok(line.includes('clusterStart'));
   assert.ok(line.includes('maxWidth'));
@@ -159,33 +222,41 @@ test('AMLL renderer wiring keeps the old plugin behavior in the skin', async () 
   assert.ok(line.includes('dimColor'), '未唱样必须随高亮量提亮（宿主 0.2 → 0.4）');
   assert.ok(line.includes('brightColor'), '已唱样必须从未唱色渐入');
   assert.ok(
-    line.includes('layer.enabled: current && animateWords && hasWordTiming'),
+    line.includes('layer.enabled: current && hasWordTiming'),
     '活动行必须离屏合成（逐 draw 行链 ρ 使切片叠画泄漏）',
   );
   assert.ok(
     !line.includes('layer.sourceRect'),
     '禁用 sourceRect 外扩：外扩区域会被缩放映射回 item 矩形（行压扁、右移，2026-11-12 实测）',
   );
-  assert.ok(skin.includes('Qt.rgba(1, 1, 1, 0.2)'), '未唱色必须用宿主默认 20% 白');
-  for (const feature of ['text.glyphs', 'graphics.glyphRun.canvas', 'settings.host'])
-    assert.ok(manifest.requires.features.includes(feature), `manifest missing ${feature}`);
+  // AMLL fade 语义：软边 = 单行行盒高 × fadeWidth（下限 0.0001），
+  // 移除宿主的 em×1.2 与 [0.05, 1] 钳制
   assert.ok(
-    manifest.capabilities.includes('hostSettings'),
-    '读取宿主歌词设置需声明 hostSettings capability',
+    line.includes('rowHeight * Math.max(0.0001, fadeWidth)'),
+    '软边宽度必须按 AMLL word.height × wordFadeWidth',
   );
-  // 背景律动跟随宿主 backgroundRhythm：read/observe 同步 + 30fps 相位推进
-  assert.ok(skin.includes("settings.read('lyrics')"));
-  assert.ok(skin.includes('settings.observe('));
-  assert.ok(skin.includes('backgroundRhythm'));
-  assert.ok(skin.includes('hostPhase'));
   assert.ok(
-    spring.includes('Math.pow((800 - Math.min(800, Math.max(100, intervalMs))) / 700, 0.2)'),
+    !line.includes('em * 1.2 * Math.min(1, Math.max(0.05'),
+    'AMLL fade 不得保留宿主 [0.05,1] 钳制',
   );
-  assert.ok(interlude.includes('__breath'));
 
-  // 包配置：不带着色器（扫掠由词元簇 pose 完成）
-  assert.ok(config.assets.includes('qml/LyricFlow.qml'));
-  assert.ok(!config.shaders?.length, '扫掠不再依赖着色器');
+  // 包配置：新视图 + base 模块入包，旧组件出包，不带着色器
+  for (const asset of [
+    'qml/LyricFlow.qml',
+    'qml/amll/AmlLyricView.qml',
+    'qml/amll/AmlGroupView.qml',
+    'qml/amll/AmlLineView.qml',
+    'qml/amll/AmlInterludeDots.qml',
+  ])
+    assert.ok(config.assets.includes(asset), `plugin.config.json 缺少 ${asset}`);
+  for (const removed of [
+    'qml/AmllLine.qml',
+    'qml/AmllLineMotion.qml',
+    'qml/AmllSpring.qml',
+    'qml/AmllInterlude.qml',
+  ])
+    assert.ok(!config.assets.includes(removed), `旧组件须移出包配置：${removed}`);
+  assert.ok(!config.shaders?.length, '扫掠不依赖着色器');
   assert.ok(!config.assets.some((asset) => asset.startsWith('shaders/')));
   // 播放控制与播放顺序按钮样式对照旧插件：旧版内联 SVG 资产 + .amms-ctrl-btn 尺寸/配色
   assert.ok(skin.includes('AmCtrlButton'), '播放控制按钮必须使用旧版样式组件');
@@ -197,4 +268,12 @@ test('AMLL renderer wiring keeps the old plugin behavior in the skin', async () 
   assert.ok(skin.includes('alpha: root.playMode === 2 ? 1 : 0.5'), '随机激活态全白、非激活 0.5 白');
   for (const icon of ['shuffle', 'skip', 'play', 'pause', 'loop'])
     assert.ok(config.assets.includes(`qml/icons/${icon}.svg`), `缺少旧版图标资产 ${icon}.svg`);
+
+  // 宿主能力声明不变
+  for (const feature of ['text.glyphs', 'graphics.glyphRun.canvas', 'settings.host'])
+    assert.ok(manifest.requires.features.includes(feature), `manifest missing ${feature}`);
+  assert.ok(
+    manifest.capabilities.includes('hostSettings'),
+    '读取宿主歌词设置需声明 hostSettings capability',
+  );
 });

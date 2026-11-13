@@ -2,16 +2,22 @@ pragma ComponentBehavior: Bound
 import QtQuick
 import EchoMusic.PluginSdk
 
-// AMLL 风格逐词歌词行。移植宿主 LyricLine / AMLL core 的呈现语义：
-// 一条连续亮度前沿按词时长推进（时值间隙停留），软边宽度 fadeWidth × em × 1.2；
-// 播放中的词上浮 em × 5%；未逐词的行激活时整行点亮。
+// AMLL 风格逐词歌词行（参照 AMLL 完全重构后的渲染层，由 AmllLine.qml 演化）。
+// 扫掠语义对齐 AMLL WebMaskAnimator：一条连续亮度前沿按词时长推进（时值间隙
+// 停留），软边宽度 = 行盒高度 × fadeWidth（AMLL word.height × wordFadeWidth，
+// 无上下钳制，下限 0.0001；实测换行时按检测行数折算单行高）；行程首词
+// +1.5×fade、末词 +0.5×fade（revealDistance 与 AMLL 关键帧一致）。
 // 渲染对照宿主的单层逐像素渐变：pose 颜色整簇均匀，改用 1px 互斥
 // 亮度切片（pose.clip 以 run 局部坐标裁剪，右缘外伸 1.5 footprint 压住
 // 宿主 clip 软边窗，窗内 = 满覆盖左色 × 递减右色的精确线性插值）铺满
 // 软边段；暗墨基底只从带右缘起罩、不进带内 —— 任何叠层都会复利字形
-// 抗锯齿边缘（变粗、偏亮），带内每像素至多一次满覆盖字形 + 一次递减形；
-// 未唱样（暗：未唱色 alpha ×（1 + 高亮量），当前行 0.2 → 0.4 提亮）
-// 与已唱样（亮：未唱色 lerp 播放色，随高亮量渐入）。上浮随所属词。
+// 抗锯齿边缘（变粗、偏亮），带内每像素至多一次满覆盖字形 + 一次递减形。
+// 亮暗色模型对齐 AMLL 亮度层（亮 1/暗 0.4，随高亮量交叉淡化 300ms 入 /
+// 450ms 出，由 AmlGroupView 的 Behavior 驱动）：未唱样（暗：未唱色 alpha ×
+// （1 + 高亮量），当前行 0.2 → 0.4 提亮）与已唱样（亮：未唱色 lerp 播放色，
+// 随高亮量渐入）。全局逐行歌词（isNonDynamic）对齐 AMLL 无遮罩形态：
+// 整行全 alpha，0.2/0.85 由组透明度承担。
+// 播放中的词上浮 em × 5%；未逐词的行激活时整行点亮。
 // 强调词（时长 ≥1s 且全 CJK 或 2–7 字符）按宿主 LyricLine::pose：
 // 逐字交错 rise(.2,.4,.58,1)/fall(.3,0,.58,1) 包络，缩放 1+.1×amount、
 // 推移 −em×.03×amount×(字数/2−序)×scale；lift 整体替换为
@@ -34,6 +40,9 @@ Item {
     property real timeMs: -1
     property bool current: false
     property real highlightAmount: 1
+    // 全局逐行歌词（宿主编排核心 isNonDynamic）：对齐 AMLL 无遮罩形态，
+    // 静息/过渡态使用全 alpha 播放色，明暗交给组透明度（0.2/0.85）
+    property bool nonDynamicLyric: false
     property font font
     property color playedColor: "#ffffff"
     property color unplayedColor: Qt.rgba(1, 1, 1, 0.2)
@@ -41,7 +50,7 @@ Item {
     // 外观层，颜色须含背景贡献才与半透明未唱字无缝衔接（否则带尾暗端
     // 相对未唱字有 −bg(1−dimA) 的明暗边界）。
     property color backdropColor: "#000000"
-    // v9 逐位置背景估计（Skin.backdropSample 复刻整条背景渲染链）：入参
+    // v10 逐位置背景估计（Skin.backdropSample 复刻整条背景渲染链）：入参
     // (行局部 x, 行 y)，返回 [r,g,b] 0..1；null 时回退 backdropColor 均色。
     // 背景在空间上大幅变化（封面映射+网格形变），均色无法锚定带端。
     property var backdropAt: null
@@ -51,7 +60,7 @@ Item {
     // 调整进度、滚轮滚动后非当前行颜色不对的根因）。绑定经此读取锚点，
     // 移动超过量化步长即整体重烘焙，静止时零开销。
     property real poseAnchor: 0
-    // 0..1，软边宽度系数（对应旧 AMLL 的 fadeWidth）
+    // 0..1，软边宽度系数（AMLL wordFadeWidth，无钳制，下限 0.0001）
     property real fadeWidth: 0.5
     // 活动行离屏合成：Qt 对非分层子树的 item opacity 逐 draw 相乘，扫掠带
     // 「前片外伸 + 本片」叠画在 ρ<1 时底层亮墨以 (1−ρ) 泄漏（带比平台亮
@@ -64,19 +73,24 @@ Item {
     // 已过时）。注意不可外扩层源矩形垫越界绘制：外扩区域会被缩放映射回
     // item 矩形（行被压扁、右移，2026-11-12 实测），lift/halo 的越界裁剪
     // 由字体行盒的 ascent/descent 余量吸收。
-    layer.enabled: current && animateWords && hasWordTiming
+    layer.enabled: current && hasWordTiming
     layer.smooth: true
     property bool animateWords: true
     // 远离焦点行的模糊（AMLL blur 语义：CSS filter blur 的 px 值，焦点行 0，
-    // 其余 min(5, 1+距离) 由调用方算好经动画驱动）。经 GlyphPose.blur 落地：
-    // 宿主按档位 {0,8,16,32} 预烘三盒模糊进 effects 图集，着色器在相邻档位
-    // 间连续插值。交叉淡化剖面的可见动态范围集中在 pose 6~8（≈6 以下全锐），
-    // 折算 CSS 模糊 B px ≈ pose 6.35+0.1B（实测标定见 __sweepPoses 注释）。
+    // 其余 min(5, 1+距离)（窄视口 ×0.8）由编排核心算好经动画驱动）。经
+    // GlyphPose.blur 落地：宿主按档位 {0,8,16,32} 预烘三盒模糊进 effects
+    // 图集，着色器在相邻档位间连续插值。交叉淡化剖面的可见动态范围集中在
+    // pose 6~8（≈6 以下全锐），折算 CSS 模糊 B px ≈ pose 6.35+0.1B（实测
+    // 标定见 __sweepPoses 注释）。
     property real blurAmount: 0
 
     readonly property real em: font.pixelSize
-    // 宿主 setFadeWidth 钳制 [0.05, 1]（LyricLine.cpp）
-    readonly property real fade: Math.max(1, em * 1.2 * Math.min(1, Math.max(0.05, fadeWidth)))
+    // AMLL WebMaskAnimator：fadeWidth = word.height × wordFadeWidth。
+    // word.height ≈ 单行行盒高度；换行时按检测行数折算（metrics.height 为
+    // 总高），未测量前回退 em × 1.2
+    readonly property real fade: Math.max(0.0001, rowHeight * Math.max(0.0001, fadeWidth))
+    // 单行行盒高度（__refreshGeometry 时随行数折算更新）
+    property real rowHeight: em * 1.2
     readonly property bool hasWordTiming: words.some(w => Number(w.t1) !== Number(w.t0))
     // 宿主 LyricLine 的颜色模型：亮色随高亮量从未唱色渐入，
     // 暗色随高亮量提亮（当前行未唱部分 0.2 → 0.4），静止行保持未唱色
@@ -86,6 +100,9 @@ Item {
         unplayedColor.g + (playedColor.g - unplayedColor.g) * highlightAmount,
         unplayedColor.b + (playedColor.b - unplayedColor.b) * highlightAmount,
         unplayedColor.a + (playedColor.a - unplayedColor.a) * highlightAmount)
+    // 逐行歌词的全 alpha 形态：AMLL 无 mask 文本（wrapper 0.2/0.85 承担明暗）
+    readonly property color solidDimColor: nonDynamicLyric ? Qt.rgba(playedColor.r, playedColor.g, playedColor.b, 1) : dimColor
+    readonly property color solidBrightColor: nonDynamicLyric ? Qt.rgba(playedColor.r, playedColor.g, playedColor.b, 1) : brightColor
     readonly property real textWidth: width
     readonly property real textHeight: height
     // 整行塑形指标同步可用；空行没有 run
@@ -165,7 +182,7 @@ Item {
         return x < 1 ? x * x * x : Math.sqrt(x)
     }
     function __emphasized(content: string, duration: real): bool {
-        // 宿主 LyricLine 强调判定：时长 ≥1s 且（全 CJK（≥0x2e80）或去空白 2–7 字符）
+        // 宿主 LyricLine 强调判定（AMLL shouldEmphasize）：时长 ≥1s 且（全 CJK（≥0x2e80）或去空白 2–7 字符）
         // V4 引擎没有 codePointAt：手写代理对展开
         if (duration < 1000)
             return false
@@ -245,6 +262,12 @@ Item {
                     "baseline": rowBaseline,
                     "end": prefix + rowEnd
                 });
+        // AMLL fadeWidth 基准 = 单行行盒高度：换行时用相邻行基线距，否则用
+        // 整个 run 的高度（单行时两者一致）
+        if (rows.length >= 2)
+            rowHeight = Math.max(1, rows[1].baseline - rows[0].baseline);
+        else if (m && m.height > 0)
+            rowHeight = m.height;
         const spans = [];
         const list = line.words;
         let offset = 0;
@@ -320,11 +343,12 @@ Item {
     function __flatPoses(): var {
         if (line.text.length === 0)
             return [];
-        // 未逐词的行整行同色：激活行点亮，静止行未唱色
+        // 未逐词的行整行同色：激活行点亮，静止行未唱色；
+        // 全局逐行歌词用全 alpha 播放色（明暗由组透明度承担）
         return [{
                 "key": "line",
-                "opacity": line.brightColor.a,
-                "color": line.brightColor
+                "opacity": line.solidBrightColor.a,
+                "color": line.solidBrightColor
             }];
     }
     function __transitionalPoses(): var {
@@ -332,8 +356,8 @@ Item {
         // 若仍按旧簇序号逐簇发 pose，会被提供方整体拒收并回退默认全亮一帧
         return [{
                 "key": "line",
-                "opacity": line.dimColor.a,
-                "color": line.dimColor
+                "opacity": line.solidDimColor.a,
+                "color": line.solidDimColor
             }];
     }
     // 逐簇 pose 复现宿主/AMLL 的逐像素渐变前沿：o(x) = 0.5 + (前沿 − x)/软边宽。
@@ -433,7 +457,7 @@ Item {
         const dc = line.dimColor, bc = line.brightColor;
         const dimPr = [dc.r * dimA, dc.g * dimA, dc.b * dimA];
         const brightPr = [bc.r * brightA, bc.g * brightA, bc.b * brightA];
-        // 切片背景项：v9 有逐位置估计器时切片各自取样（背景空间变化大，均色
+        // 切片背景项：v10 有逐位置估计器时切片各自取样（背景空间变化大，均色
         // 锚不住带端），此均色仅作估计器未就绪时的回退。
         const bgc = line.backdropColor;
         for (let i = 0; i < graphemes.length; ++i) {
@@ -671,8 +695,8 @@ Item {
     // 线性拟合 pose ≈ 6.35 + 0.1×B（B≤5），全段宽度误差 ≤0.5 逻辑px。
     // bake 密度 min(dpr×.25,.5) 随 dpr 变化，此系数在其他 dpr 需重测。
     // 起坡斜坡 min(1,B/0.3)：动画从 0 爬升时避免 pose 0→6.35 一帧跳变。
-    // B>5 段为标定曲线的线性外推（旧插件实际渲染不封顶，见 LyricFlow
-    // inactiveBlur 注释）：B=8→pose 7.15、B=12→7.55，外推宽度与 1.28B+1
+    // B>5 段为标定曲线的线性外推（AMLL CSS blur 渲染上限 5px，核心已钳制；
+    // 外推段仅为防御）：B=8→pose 7.15、B=12→7.55，外推宽度与 1.28B+1
     // 一致性递减；pose.blur 钳在 8（烘焙最大档 ≈ CSS 16px），更远行饱和为
     // 均匀重雾，与目标观感一致。
     // 半透明墨色会令同 pose 的模糊显著加重（α 对照实验：a=0.4 的未唱行在
@@ -717,7 +741,7 @@ Item {
     }
 
     onWordsChanged: __refreshGeometry()
-    // 塑形结果异步晚于 words 到达（delegate 复用/换行/宽度变化都会触发重排）：
+    // 塑形结果异步晚于 words 到达（换行/宽度变化都会触发重排）：
     // metrics 落地时必须重建几何，否则 clusterBases/wordSpans 永远停在旧文本上
     onRunMetricsChanged: __refreshGeometry()
     onCurrentChanged: refreshLifts()
@@ -730,7 +754,7 @@ Item {
         id: run
         font: line.font
         runs: line.runDefinition
-        poses: line.__sweepPoses()
+        poses: line.visible ? line.__sweepPoses() : []
         width: line.width
         height: line.textHeight
         onLayoutChanged: line.__refreshGeometry()
