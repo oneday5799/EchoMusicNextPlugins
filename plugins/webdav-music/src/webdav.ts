@@ -232,3 +232,43 @@ export function readRangeRequest(
     maxResponseBytes: Math.max(endInclusive - start + 1, 0) + 64 * 1024,
   });
 }
+
+// ── Per-session Range-support memo ─────────────────────────────────────────
+//
+// The host network layer fails (never truncates) a response that exceeds
+// maxResponseBytes. A server that ignores Range headers answers every
+// ranged GET with the whole file, so a tag head or cover probe on a large
+// file burns a full download per request and always ends in
+// ResponseTooLarge. Remember such servers for the session and skip further
+// ranged reads against them — metadata then degrades to filename parsing
+// plus online completion instead of paying a full-file transfer per track.
+
+const rangeUnsupportedServers = new Set<string>();
+
+/** Records that a server ignores Range headers (observed via ResponseTooLarge). */
+export function markRangeUnsupported(serverUrl: string): void {
+  const normalized = normalizeServerUrl(serverUrl);
+  if (normalized) rangeUnsupportedServers.add(normalized);
+}
+
+/** True when earlier reads proved this server ignores Range headers. */
+export function isRangeUnsupported(serverUrl: string): boolean {
+  return rangeUnsupportedServers.has(normalizeServerUrl(serverUrl));
+}
+
+/** True when the error is the host's response-size abort — the signature of
+ * a Range-ignoring server on a file larger than the read budget. */
+export function isResponseTooLarge(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  const candidate = error as { code?: unknown; message?: unknown };
+  if (candidate.code === 'ResponseTooLarge') return true;
+  return (
+    typeof candidate.message === 'string' &&
+    /ResponseTooLarge|maxResponseBytes/i.test(candidate.message)
+  );
+}
+
+/** Test/deactivation hook: forget the per-session Range-support memo. */
+export function resetRangeSupportMemo(): void {
+  rangeUnsupportedServers.clear();
+}

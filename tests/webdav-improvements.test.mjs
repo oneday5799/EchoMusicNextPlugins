@@ -17,7 +17,19 @@ import {
   readFlatCache,
   writeFlatCache,
 } from '../plugins/webdav-music/src/scan.ts';
-import { parseSourceId } from '../plugins/webdav-music/src/library.ts';
+import {
+  compactSong,
+  expandCompactSong,
+  parentFolderName,
+  parseSourceId,
+  songFromEntry,
+} from '../plugins/webdav-music/src/library.ts';
+import {
+  isRangeUnsupported,
+  isResponseTooLarge,
+  markRangeUnsupported,
+  resetRangeSupportMemo,
+} from '../plugins/webdav-music/src/webdav.ts';
 
 class FakeOperation {
   constructor() {
@@ -140,6 +152,75 @@ function id3WithCover(title, coverBytes) {
   return tag;
 }
 
+// APIC frame payload (latin-1 mime, front cover, empty description).
+function apicPayload(coverBytes) {
+  const mime = [...'image/jpeg'].map((ch) => ch.charCodeAt(0));
+  const payload = new Uint8Array(1 + mime.length + 1 + 1 + 1 + coverBytes.length);
+  let at = 0;
+  payload[at++] = 0; // latin-1
+  for (const byte of mime) payload[at++] = byte;
+  payload[at++] = 0; // mime terminator
+  payload[at++] = 3; // front cover
+  payload[at++] = 0; // empty description terminator
+  payload.set(coverBytes, at);
+  return payload;
+}
+
+// Generic text frame payload: encoding byte + the text.
+function id3Text(encoding, text) {
+  if (encoding === 1) {
+    const payload = new Uint8Array(3 + text.length * 2);
+    payload[0] = 1;
+    payload[1] = 0xff;
+    payload[2] = 0xfe;
+    for (let i = 0; i < text.length; i++) {
+      payload[3 + i * 2] = text.charCodeAt(i) & 0xff;
+      payload[4 + i * 2] = text.charCodeAt(i) >> 8;
+    }
+    return payload;
+  }
+  const payload = new Uint8Array(1 + text.length);
+  payload[0] = encoding;
+  for (let i = 0; i < text.length; i++) payload[1 + i] = text.charCodeAt(i);
+  return payload;
+}
+
+// ID3v2.3 tag built from [frameId, payload] pairs.
+function id3Tag(frames) {
+  const frame = (id, payload) => {
+    const bytes = new Uint8Array(10 + payload.length);
+    for (let i = 0; i < 4; i++) bytes[i] = id.charCodeAt(i);
+    bytes[4] = (payload.length >>> 24) & 0xff;
+    bytes[5] = (payload.length >>> 16) & 0xff;
+    bytes[6] = (payload.length >>> 8) & 0xff;
+    bytes[7] = payload.length & 0xff;
+    bytes.set(payload, 10);
+    return bytes;
+  };
+  const built = frames.map(([id, payload]) => frame(id, payload));
+  const total = built.reduce((sum, f) => sum + f.length, 0);
+  const tag = new Uint8Array(10 + total);
+  tag.set([0x49, 0x44, 0x33, 0x03, 0x00, 0x00], 0);
+  tag[6] = (total >>> 21) & 0x7f;
+  tag[7] = (total >>> 14) & 0x7f;
+  tag[8] = (total >>> 7) & 0x7f;
+  tag[9] = total & 0x7f;
+  let at = 10;
+  for (const builtFrame of built) {
+    tag.set(builtFrame, at);
+    at += builtFrame.length;
+  }
+  return tag;
+}
+
+// Simulates a fresh session for the enrichment store: the persisted records
+// are gone but the in-memory enricher caches stay as they are.
+function dropEnrichRecords(store) {
+  for (const key of [...store.keys()]) {
+    if (key.startsWith('enrich:') || key === 'enrichIndex') store.delete(key);
+  }
+}
+
 const LIB_XML = `<?xml version="1.0" encoding="utf-8"?>
 <d:multistatus xmlns:d="DAV:">
  <d:response><d:href>/</d:href><d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>
@@ -155,6 +236,7 @@ const ALBUM_XML = `<?xml version="1.0" encoding="utf-8"?>
 
 async function setup(options = {}) {
   const {
+    coverLyricSource,
     settingsValue = {
       libraries: [
         {
@@ -168,12 +250,13 @@ async function setup(options = {}) {
         },
       ],
       activeLibraryId: 'lib1',
-      coverLyricSource: 'embedded',
+      coverLyricSource: coverLyricSource ?? 'embedded',
     },
     queueMode = 'context',
     propfind = (path) => (path === '/' ? LIB_XML : ALBUM_XML),
     get = null,
     kugou = null,
+    propfindLimit = Infinity,
   } = options;
 
   const { activate, deactivate } = await import('../plugins/webdav-music/src/entry.ts');
@@ -182,6 +265,7 @@ async function setup(options = {}) {
   const store = new Map();
   const published = [];
   const netCalls = [];
+  let propfindCount = 0;
   const kugouCalls = [];
   const replaces = [];
   const appends = [];
@@ -214,11 +298,21 @@ async function setup(options = {}) {
         const op = new FakeOperation();
         netCalls.push(request);
         if (request.method === 'PROPFIND') {
-          const xml = propfind
+          // Thrown synchronously so a directory-cycle regression fails the
+          // test instead of hanging it.
+          propfindCount += 1;
+          if (propfindCount > propfindLimit) {
+            throw new Error('PROPFIND budget exceeded');
+          }
+          const value = propfind
             ? propfind(decodeURIComponent(request.url.replace(/^https?:\/\/[^/]+/, '')))
             : LIB_XML;
-          if (xml === null) return op; // stay in flight
-          op.resolve({ status: 207, data: xml });
+          if (value === null) return op; // stay in flight
+          if (value && typeof value === 'object' && typeof value.status === 'number') {
+            op.resolve({ status: value.status, data: value.data ?? '' });
+            return op;
+          }
+          op.resolve({ status: 207, data: value });
           return op;
         }
         if (request.method === 'GET') {
@@ -229,6 +323,13 @@ async function setup(options = {}) {
             );
             if (response === null) {
               stuckOperation = op;
+              return op;
+            }
+            if (response && typeof response === 'object' && response.rejectCode) {
+              // Mirrors the host: the operation fails with an error code the
+              // sdk's awaitOperation re-throws as error.code.
+              op.errorCode = response.rejectCode;
+              op.reject(response.rejectMessage || response.rejectCode);
               return op;
             }
             op.resolve(response);
@@ -363,6 +464,7 @@ async function setup(options = {}) {
     store,
     published,
     netCalls,
+    netPropfindCount: () => propfindCount,
     kugouCalls,
     replaces,
     appends,
@@ -798,3 +900,287 @@ function makeStableSongId(libraryId, path) {
   }
   return `webdav-${(hash >>> 0).toString(36)}`;
 }
+
+// ── Round 2 parity fixes ───────────────────────────────────────────────────
+
+test('子目录读取失败被跳过继续扫描，根目录失败才整体失败', async () => {
+  // Skip-on-error: a 500 on the sub-directory does not fail the walk.
+  const env2 = await setup({
+    propfind: (path) => {
+      if (path === '/') {
+        return `${LIB_XML}
+ <d:response><d:href>/x/</d:href><d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>`;
+      }
+      return { status: 500, data: '' };
+    },
+  });
+  try {
+    let skipped = 0;
+    const songs = await collectSongsUnder(
+      env2.ctx,
+      { serverUrl: 'http://webdav.local', username: 'user', password: 'pass', rootPath: '/' },
+      'lib1',
+      '/',
+      {
+        onDirectorySkipped: () => {
+          skipped += 1;
+        },
+      },
+    );
+    assert.equal(songs.length, 2, '根目录歌曲照常收集');
+    assert.equal(skipped, 1, '失败子目录被跳过一次');
+
+    // Root failure still fails the scan with the real error.
+    await assert.rejects(
+      () =>
+        collectSongsUnder(
+          env2.ctx,
+          {
+            serverUrl: 'http://webdav.local',
+            username: 'user',
+            password: 'pass',
+            rootPath: '/nope',
+          },
+          'lib1',
+          '/nope',
+          {},
+        ),
+      /HTTP 500/,
+    );
+  } finally {
+    await env2.deactivate();
+  }
+});
+
+test('目录环被 visited 记忆阻断，扫描在有限请求内完成', async () => {
+  const env = await setup({
+    propfind: (path) => {
+      if (path === '/') {
+        return `${LIB_XML}
+ <d:response><d:href>/x/</d:href><d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>`;
+      }
+      if (path === '/x') {
+        return `<?xml version="1.0" encoding="utf-8"?>
+<d:multistatus xmlns:d="DAV:">
+ <d:response><d:href>/y/</d:href><d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>
+ <d:response><d:href>/x/song-x.mp3</d:href><d:propstat><d:prop><d:resourcetype/><d:getcontentlength>10</d:getcontentlength></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>
+</d:multistatus>`;
+      }
+      return `<?xml version="1.0" encoding="utf-8"?>
+<d:multistatus xmlns:d="DAV:">
+ <d:response><d:href>/x/</d:href><d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>
+ <d:response><d:href>/y/song-y.mp3</d:href><d:propstat><d:prop><d:resourcetype/><d:getcontentlength>20</d:getcontentlength></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>
+</d:multistatus>`;
+    },
+    propfindLimit: 12,
+  });
+  try {
+    const songs = await collectSongsUnder(
+      env.ctx,
+      { serverUrl: 'http://webdav.local', username: 'user', password: 'pass', rootPath: '/' },
+      'lib1',
+      '/',
+      {},
+    );
+    assert.equal(songs.length, 4, '根目录两首加环内两首都被收集');
+    assert.equal(env.netPropfindCount(), 3, '根目录与两个子目录各请求一次');
+  } finally {
+    await env.deactivate();
+  }
+});
+
+test('歌曲携带父文件夹作为默认专辑，compact 行兼容 6 字段旧格式', () => {
+  assert.equal(parentFolderName('/music/专辑/song.mp3'), '专辑');
+  assert.equal(parentFolderName('/song.mp3'), '');
+  const song = songFromEntry({
+    libraryId: 'lib1',
+    path: '/专辑/song.mp3',
+    name: 'song.mp3',
+    size: 10,
+  });
+  assert.equal(song.album, '专辑');
+  const row = compactSong(song);
+  assert.equal(row.length, 7, 'compact 行含专辑字段');
+  const expanded = expandCompactSong(row);
+  assert.equal(expanded.album, '专辑');
+  const legacy = expandCompactSong(row.slice(0, 6));
+  assert.ok(legacy, '6 字段旧行仍可展开');
+  assert.equal(legacy.album, '', '旧行专辑为空');
+  assert.equal(legacy.title, song.title);
+  assert.equal(legacy.size, song.size);
+});
+
+test('播放队列的专辑默认取歌曲父文件夹名', async () => {
+  const env = await setup();
+  try {
+    await env.commands.get('play')({ libraryId: 'lib1', paths: ['/专辑/song.mp3'], mode: 'now' });
+    assert.equal(env.replaces.length, 1);
+    assert.equal(env.replaces[0].tracks[0].album, '专辑', '父文件夹名写入队列专辑');
+  } finally {
+    await env.deactivate();
+  }
+});
+
+test('标签读取失败不缓存 null，下一次播放重试', async () => {
+  const env = await setup({
+    get: () => ({ status: 500, data: '' }),
+  });
+  try {
+    await env.commands.get('play')({ libraryId: 'lib1', paths: ['/a.mp3'], mode: 'now' });
+    const getAfterFirst = env.netCalls.filter((call) => call.method === 'GET').length;
+    assert.equal(getAfterFirst, 1, '第一次播放读取了标签');
+
+    dropEnrichRecords(env.store);
+    await env.commands.get('play')({ libraryId: 'lib1', paths: ['/a.mp3'], mode: 'now' });
+    const getAfterSecond = env.netCalls.filter((call) => call.method === 'GET').length;
+    assert.equal(getAfterSecond, getAfterFirst + 1, '失败读取未被缓存，第二次播放重试');
+  } finally {
+    await env.deactivate();
+  }
+});
+
+test('内嵌标签完整时跳过酷狗搜索', async () => {
+  const cover = new Uint8Array(2000).fill(3);
+  const env = await setup({
+    get: () => ({
+      status: 206,
+      data: id3Tag([
+        ['TIT2', id3Text(1, '标签歌')],
+        ['TPE1', id3Text(1, '标签歌手')],
+        ['TALB', id3Text(1, '标签专辑')],
+        ['TLEN', id3Text(0, '123000')],
+        ['APIC', apicPayload(cover)],
+      ]),
+    }),
+  });
+  try {
+    await env.commands.get('play')({ libraryId: 'lib1', paths: ['/a.mp3'], mode: 'now' });
+    assert.equal(env.replaces.length, 1);
+    assert.equal(env.kugouCalls.length, 0, '完整标签下没有酷狗搜索');
+    const track = env.replaces[0].tracks[0];
+    assert.equal(track.title, '标签歌');
+    assert.equal(track.album, '标签专辑');
+    assert.equal(track.artist, '标签歌手');
+    assert.equal(track.durationMs, 123000);
+    assert.equal((track.cover || '').startsWith('data:image/jpeg;base64,'), true);
+  } finally {
+    await env.deactivate();
+  }
+});
+
+test('酷狗优先模式：在线资料覆盖内嵌标签', async () => {
+  const cover = new Uint8Array(2000).fill(3);
+  const env = await setup({
+    coverLyricSource: 'kugou',
+    get: () => ({
+      status: 206,
+      data: id3Tag([
+        ['TIT2', id3Text(1, '标签歌')],
+        ['TPE1', id3Text(1, '标签歌手')],
+        ['TALB', id3Text(1, '标签专辑')],
+        ['TLEN', id3Text(0, '123000')],
+        ['APIC', apicPayload(cover)],
+      ]),
+    }),
+    kugou: (kind) => {
+      if (kind === 'search') {
+        return {
+          kind: 'songs',
+          page: {
+            items: [
+              {
+                album_title: '酷狗专辑',
+                artists: [{ name: '酷狗歌手' }],
+                duration_ms: 99999,
+                cover_url: 'https://img.kugou.com/cover.jpg',
+              },
+            ],
+          },
+        };
+      }
+      return null;
+    },
+  });
+  try {
+    await env.commands.get('play')({ libraryId: 'lib1', paths: ['/a.mp3'], mode: 'now' });
+    assert.equal(env.kugouCalls.length > 0, true, '酷狗优先模式下仍执行在线搜索');
+    const track = env.replaces[0].tracks[0];
+    assert.equal(track.album, '酷狗专辑', '专辑被在线资料覆盖');
+    assert.equal(track.artist, '酷狗歌手', '歌手被在线资料覆盖');
+    assert.equal(track.durationMs, 99999, '时长被在线资料覆盖');
+    assert.equal(track.cover, 'https://img.kugou.com/cover.jpg', '封面被在线资料覆盖');
+  } finally {
+    await env.deactivate();
+  }
+});
+
+test('忽略 Range 的服务器被记忆：响应超限后跳过后续标签读取', async () => {
+  const env = await setup({
+    get: () => ({
+      rejectCode: 'ResponseTooLarge',
+      rejectMessage: 'HTTP response exceeds maxResponseBytes',
+    }),
+  });
+  try {
+    await env.commands.get('play')({ libraryId: 'lib1', paths: ['/a.mp3'], mode: 'now' });
+    const getAfterFirst = env.netCalls.filter((call) => call.method === 'GET').length;
+    assert.equal(getAfterFirst, 1, '第一次播放尝试读取标签并收到响应超限');
+    assert.equal(isRangeUnsupported('http://webdav.local'), true, '服务器被标记为不支持 Range');
+
+    dropEnrichRecords(env.store);
+    await env.commands.get('play')({ libraryId: 'lib1', paths: ['/a.mp3'], mode: 'now' });
+    const getAfterSecond = env.netCalls.filter((call) => call.method === 'GET').length;
+    assert.equal(getAfterSecond, getAfterFirst, '后续播放不再向该服务器发起 range 读取');
+  } finally {
+    await env.deactivate();
+  }
+});
+
+test('isResponseTooLarge 识别宿主响应超限错误', () => {
+  resetRangeSupportMemo();
+  const coded = new Error('HTTP response exceeds maxResponseBytes');
+  coded.code = 'ResponseTooLarge';
+  assert.equal(isResponseTooLarge(coded), true);
+  assert.equal(isResponseTooLarge(new Error('boom')), false);
+  assert.equal(isResponseTooLarge(null), false);
+
+  try {
+    markRangeUnsupported('http://webdav.local/');
+    assert.equal(isRangeUnsupported('http://webdav.local'), true, '归一化后命中同一服务器');
+  } finally {
+    resetRangeSupportMemo();
+    assert.equal(isRangeUnsupported('http://webdav.local'), false, 'memo 可重置');
+  }
+});
+
+test('deactivate 打断在途 enrichment 不复活持久缓存', async () => {
+  const cover = new Uint8Array(500).fill(4);
+  const env = await setup({
+    get: () => null,
+  });
+  try {
+    const playPromise = env.commands.get('play')({
+      libraryId: 'lib1',
+      paths: ['/a.mp3'],
+      mode: 'now',
+    });
+    playPromise.catch(() => {});
+    await waitFor(() => env.stuckRef() !== null);
+    await env.deactivate();
+    env.stuckRef().resolve({
+      status: 206,
+      data: id3Tag([
+        ['TIT2', id3Text(0, '迟到标签')],
+        ['APIC', apicPayload(cover)],
+      ]),
+    });
+    await tick();
+    assert.equal(
+      [...env.store.keys()].some((key) => key.startsWith('enrich:')),
+      false,
+      'deactivate 后在飞回调不写入 enrichment 缓存',
+    );
+  } finally {
+    // deactivate already ran inside the test body.
+  }
+});

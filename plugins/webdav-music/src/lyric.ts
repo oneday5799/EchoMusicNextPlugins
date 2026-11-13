@@ -18,7 +18,14 @@ import { asArrayBuffer, coerceJsonArray, utf8Decode } from './codec.ts';
 import { buildLrcFromKugou, pickLyricCandidate } from './lrc.ts';
 import { parseSourceId, stripExtension } from './library.ts';
 import type { AudioTags } from './tags.ts';
-import { baseName, readRangeRequest, type WebdavEndpoint } from './webdav.ts';
+import {
+  baseName,
+  isRangeUnsupported,
+  isResponseTooLarge,
+  markRangeUnsupported,
+  readRangeRequest,
+  type WebdavEndpoint,
+} from './webdav.ts';
 
 const RESOLVER_DEADLINE_MS = 2300;
 const STEP_BUDGET_MS = 900;
@@ -250,6 +257,9 @@ async function probeSidecar(
   const directory = dirCut > 0 ? target.path.slice(0, dirCut) : '';
   const base = stripExtension(baseName(target.path));
   if (!base) return '';
+  // A Range-ignoring server turns each probe into a full-file download the
+  // host aborts; skip the probes rather than pay that per play.
+  if (isRangeUnsupported(endpoint.serverUrl)) return '';
   for (const extension of ['lrc', 'txt']) {
     if (Date.now() > deadline) return '';
     const path = `${directory ? `${directory}/` : ''}${base}.${extension}`;
@@ -263,11 +273,19 @@ async function probeSidecar(
     );
     const remaining = deadline - Date.now();
     if (remaining <= 50) return '';
-    const response = await raceTimeout(
-      context,
-      awaitOperation(operation),
-      Math.max(250, Math.min(remaining, SIDECAR_TIMEOUT_MS)),
-    );
+    let response;
+    try {
+      response = await raceTimeout(
+        context,
+        awaitOperation(operation),
+        Math.max(250, Math.min(remaining, SIDECAR_TIMEOUT_MS)),
+      );
+    } catch (error) {
+      // One unreadable candidate must not abort the whole probe; a
+      // whole-file body means the server ignores Range headers.
+      if (isResponseTooLarge(error)) markRangeUnsupported(endpoint.serverUrl);
+      continue;
+    }
     if (!response) continue;
     if (response.status !== 200 && response.status !== 206) continue;
     const buffer = asArrayBuffer(response.data);

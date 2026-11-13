@@ -172,6 +172,8 @@ export interface FlatScanCallbacks {
   shouldAbort?: () => boolean;
   /** Receives each in-flight request so callers can cancel it on abort. */
   onOperation?: (operation: { cancel(): void }) => void;
+  /** Counts directories whose PROPFIND failed and were skipped. */
+  onDirectorySkipped?: () => void;
 }
 
 /** Non-zero caps the walk (play folder, and the flat scan's song ceiling);
@@ -194,7 +196,10 @@ export class FlatScanAborted extends Error {
 /**
  * Breadth-first walk of every directory under `root`. Directories are probed
  * sequentially — one PROPFIND at a time keeps WebDAV servers that throttle
- * concurrent requests responsive, mirroring the legacy plugin.
+ * concurrent requests responsive, mirroring the legacy plugin. A directory
+ * whose listing fails (403, timeout, redirect loop) is skipped and counted;
+ * only a failure on the root itself fails the walk, and visited dirs are
+ * remembered so server-side mount cycles can never loop the walk.
  */
 export async function collectSongsUnder(
   context: EchoPluginContext,
@@ -204,7 +209,9 @@ export async function collectSongsUnder(
   options: CollectOptions = {},
 ): Promise<SongInit[]> {
   const cap = options.cap && options.cap > 0 ? options.cap : 0;
-  const queue: string[] = [normalizeDir(root)];
+  const startDir = normalizeDir(root);
+  const queue: string[] = [startDir];
+  const visited = new Set<string>([startDir]);
   const songs: SongInit[] = [];
   let scanned = 0;
   let truncated = false;
@@ -214,7 +221,7 @@ export async function collectSongsUnder(
       truncated = true;
       break;
     }
-    const directory = queue.shift() ?? root;
+    const directory = queue.shift() ?? startDir;
     const operation = propfindRequest(context.net, endpoint, directory, SCAN_TIMEOUT_MS);
     if (options.onOperation) options.onOperation(operation);
     const disarm = cancelOperationAfter(context, operation, SCAN_TIMEOUT_MS + 500);
@@ -229,7 +236,13 @@ export async function collectSongsUnder(
       // A cancel lands here as a generic error; report it as an abort with
       // everything collected so far.
       if (options.shouldAbort && options.shouldAbort()) throw new FlatScanAborted(songs);
-      throw error;
+      // The root failing means nothing on the server can be listed — surface
+      // the real error instead of reporting an empty "success".
+      if (directory === startDir) throw error;
+      // One unreadable sub-directory must not fail the whole walk: the
+      // legacy plugin skipped it and kept scanning.
+      if (options.onDirectorySkipped) options.onDirectorySkipped();
+      continue;
     } finally {
       disarm();
     }
@@ -237,7 +250,10 @@ export async function collectSongsUnder(
     for (const entry of entries) {
       if (entry.path === directory) continue;
       if (entry.isCollection) {
-        queue.push(entry.path);
+        if (!visited.has(entry.path)) {
+          visited.add(entry.path);
+          queue.push(entry.path);
+        }
       } else if (isAudioFile(entry.name)) {
         songs.push(
           songFromEntry({

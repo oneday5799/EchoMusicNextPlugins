@@ -62,14 +62,27 @@ Item {
     // browse.load requests and the slower (older) reply must not overwrite
     // the newer directory's rows (legacy v1.4.5 fix).
     property int browseToken: 0
+    // Same token contract for flat paging: rapid page flips / keyword edits
+    // must not let an older flat.page reply overwrite the newer page.
+    property int flatPageToken: 0
     // Pending row to scroll to after the locate page arrives.
     property int pendingLocate: -1
     property bool locateLoading: false
+    // State changes that arrived while the page was backgrounded are picked
+    // up on the next activation instead of reloading the hidden page.
+    property bool pendingLibraryRefresh: false
 
     readonly property bool working: busy > 0
     readonly property string currentTrackId: {
         const snapshot = plugin.player.snapshot;
-        return snapshot && snapshot.hasTrack ? snapshot.track.id : "";
+        return snapshot && snapshot.hasTrack ? songIdOf(snapshot.track.id) : "";
+    }
+    // Host queue ingestion rewrites track ids to "plugin:<plugin-id>:<id>"
+    // (EchoPluginPlaylist::parse) and the player snapshot hands that
+    // rewritten id back; rows carry the bare song id, so strip the
+    // namespace before any comparison (row highlight, locate).
+    function songIdOf(trackId) {
+        return String(trackId || "").replace(/^plugin:[^:]+:/, "");
     }
     readonly property var pathSegments: {
         const path = browse.path || "/";
@@ -183,6 +196,10 @@ Item {
                 const message = operation.errorMessage || "操作失败";
                 errorMessage = message;
                 plugin.toast.danger(message);
+                // A failed command must settle the caller too, or loading
+                // flags like flatLoading stay stranded forever.
+                if (callback)
+                    callback(null);
             }
         };
         operation.completed.connect(handler);
@@ -336,6 +353,10 @@ Item {
     function flatPageLoad(offset) {
         if (!currentLibrary)
             return;
+        // Rapid paging / keyword edits fire overlapping flat.page requests;
+        // the slower (older) reply must not overwrite the newer page, same
+        // token contract as browseLoad.
+        const token = ++flatPageToken;
         flatLoading = true;
         run("flat.page", {
             libraryId: activeLibraryId,
@@ -343,6 +364,8 @@ Item {
             limit: flatPageSize,
             keyword: keyword.trim()
         }, function (result) {
+            if (token !== flatPageToken)
+                return;
             flatLoading = false;
             if (!result || !result.ready) {
                 flatSongs = [];
@@ -505,8 +528,14 @@ Item {
     onActiveLibraryIdChanged: reloadCurrent()
     onFlatModeChanged: reloadCurrent()
 
-    onPageActiveChanged: if (pageActive && libraries.length === 0)
-        refreshSettings(true)
+    onPageActiveChanged: {
+        if (!pageActive)
+            return;
+        if (libraries.length === 0 || pendingLibraryRefresh) {
+            pendingLibraryRefresh = false;
+            refreshSettings(true);
+        }
+    }
 
     Component.onCompleted: {
         const state = plugin.ui.state;
@@ -518,16 +547,42 @@ Item {
 
     property int lastSettingsRevision: -1
 
+    function scanStateEquals(a, b) {
+        if (a === b)
+            return true;
+        if (!a || !b)
+            return false;
+        const keys = Object.keys(a);
+        if (keys.length !== Object.keys(b).length)
+            return false;
+        for (let i = 0; i < keys.length; i++) {
+            if (a[keys[i]] !== b[keys[i]])
+                return false;
+        }
+        return true;
+    }
+
     Connections {
         target: root.plugin.ui
         function onStateChanged() {
             const state = root.plugin.ui.state;
-            root.scanState = state && state.flatScan ? state.flatScan : {};
+            const nextScan = state && state.flatScan ? state.flatScan : {};
+            if (!scanStateEquals(root.scanState, nextScan)) {
+                root.scanState = nextScan;
+                // Scan publishes drive heavy re-renders; a page sitting in
+                // the background skips the work and reloads on activation.
+                if (!root.pageActive)
+                    root.pendingLibraryRefresh = true;
+            }
             const revision = state && typeof state.settingsRevision === "number" ? state.settingsRevision : -1;
             if (revision >= 0 && revision !== root.lastSettingsRevision) {
                 root.lastSettingsRevision = revision;
-                root.refreshSettings(true);
-            } else if (root.scanDone && root.flatMode && !root.flatReady) {
+                if (root.pageActive) {
+                    root.refreshSettings(true);
+                } else {
+                    root.pendingLibraryRefresh = true;
+                }
+            } else if (root.pageActive && root.scanDone && root.flatMode && !root.flatReady) {
                 root.flatReload();
             }
         }
@@ -674,6 +729,9 @@ Item {
                 }
                 onCleared: {
                     root.keyword = "";
+                    // A pending debounce would fire right after the clear
+                    // and re-run the query with the now-empty keyword.
+                    searchDebounce.stop();
                     if (root.flatMode)
                         root.flatPageLoad(0);
                 }

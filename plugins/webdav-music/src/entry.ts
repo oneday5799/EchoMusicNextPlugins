@@ -39,12 +39,16 @@ import {
   buildAuthUrl,
   COVER_NAMES,
   endpointOf,
+  isRangeUnsupported,
+  isResponseTooLarge,
+  markRangeUnsupported,
   normalizeDir,
   normalizeServerUrl,
   parsePropfind,
   propfindRequest,
   propfindStatusOk,
   readRangeRequest,
+  resetRangeSupportMemo,
   type WebdavEndpoint,
 } from './webdav.ts';
 import { clearLyricCache, createLyricEngine, clearLyricStore, type LyricEngine } from './lyric.ts';
@@ -211,6 +215,10 @@ function queuePersistEnrichment(
 ): void {
   if (!songId) return;
   queueEnrichStoreTask(async () => {
+    // The plugin may have deactivated while the enrichment was in flight;
+    // writing through the drained context would only resurrect state the
+    // host already considers gone.
+    if (context !== ctx) return;
     await awaitOperation(ctx.io.writeValue(enrichStoreKey(songId), enrichRecordOf(enrichment)));
     const indexValue = (await awaitOperation(ctx.io.readValue(ENRICH_INDEX_KEY))) as JsonValue;
     const index: string[] = [];
@@ -340,6 +348,9 @@ async function fetchCoverDataUrl(
   endpoint: WebdavEndpoint,
   candidates: string[],
 ): Promise<string> {
+  // A Range-ignoring server turns every cover probe into a full-file
+  // download that the host then aborts; skip the probes entirely.
+  if (isRangeUnsupported(endpoint.serverUrl)) return '';
   for (const candidate of candidates) {
     const operation = readRangeRequest(
       ctx.net,
@@ -357,7 +368,9 @@ async function fetchCoverDataUrl(
         return `data:${guessImageMime(candidate)};base64,${bytesToBase64(new Uint8Array(buffer))}`;
       }
     } catch (error) {
-      // Try the next cover candidate.
+      // A whole-file body means the server ignored the Range header —
+      // remember it so tag/lyric reads stop paying full transfers too.
+      if (isResponseTooLarge(error)) markRangeUnsupported(endpoint.serverUrl);
     } finally {
       disarm();
     }
@@ -526,6 +539,7 @@ async function runScanJob(
     }
   };
   let truncated = false;
+  let skippedDirs = 0;
   try {
     const songs = await collectSongsUnder(
       ctx,
@@ -541,9 +555,13 @@ async function runScanJob(
         onTruncated: () => {
           truncated = true;
         },
+        onDirectorySkipped: () => {
+          skippedDirs += 1;
+        },
         onProgress: (found, scanned) => {
           if (job.aborted || epoch !== scanEpoch) return;
-          const label = `已扫描 ${scanned} 个目录，找到 ${found} 首`;
+          const skippedNote = skippedDirs > 0 ? `，跳过 ${skippedDirs} 个目录` : '';
+          const label = `已扫描 ${scanned} 个目录，找到 ${found} 首${skippedNote}`;
           reportProgress(
             { libraryId: job.libraryId, running: true, label, found, scanned },
             { done: scanned, total: 0, label },
@@ -551,6 +569,11 @@ async function runScanJob(
         },
       },
     );
+    // Every directory unreadable and nothing found is a connection/auth
+    // problem, not an empty library — report it as a failure.
+    if (songs.length === 0 && skippedDirs > 0) {
+      throw new Error(`无法读取服务器目录（${skippedDirs} 个目录失败），请检查地址、账号或权限`);
+    }
     // A failed cache write must not fail the scan itself: the in-memory list
     // stays valid for this session and the next scan retries the write.
     try {
@@ -562,7 +585,8 @@ async function runScanJob(
     if (truncated) truncatedIds.add(library.id);
     else truncatedIds.delete(library.id);
     flushProgress();
-    finishTask('completed', `扫描完成，共 ${songs.length} 首`);
+    const skippedNote = skippedDirs > 0 ? `，${skippedDirs} 个目录无法读取` : '';
+    finishTask('completed', `扫描完成，共 ${songs.length} 首${skippedNote}`);
     publishScan({
       libraryId: job.libraryId,
       running: false,
@@ -790,16 +814,20 @@ async function enrichSong(
   library: WebdavLibraryConfig,
   song: SongInit,
 ): Promise<TrackEnrichment | null> {
-  if (!enricher) return null;
+  const instance = enricher;
+  if (!instance) return null;
   // A previous play already resolved this song: answer from the store and
   // skip the tag range read plus the Kugou round trip entirely.
   const persisted = await readPersistedEnrichment(ctx, song.id);
   if (persisted) return persisted;
   const enrichment = await raceTimeout(
     ctx,
-    enricher.enrichTrack(endpointOf(library), song, { title: '', artist: '' }),
+    instance.enrichTrack(endpointOf(library), song, { title: '', artist: '' }),
     ENRICH_BUDGET_MS,
   );
+  // The enricher was disposed (deactivate) while this was in flight: drop
+  // the result instead of persisting into the cleared session.
+  if (enricher !== instance) return null;
   if (enrichment) queuePersistEnrichment(ctx, song.id, enrichment);
   return enrichment;
 }
@@ -1198,6 +1226,9 @@ export async function deactivate(): Promise<void> {
   }
   lyricEngine = null;
   clearLyricCache();
+  // The Range-support memo is session state like the caches above; a fresh
+  // activation re-probes servers instead of trusting the old verdict.
+  resetRangeSupportMemo();
   flatSongs = new Map();
   truncatedIds = new Set();
   dirCovers = new Map();

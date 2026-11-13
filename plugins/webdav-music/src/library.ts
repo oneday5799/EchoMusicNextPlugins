@@ -109,7 +109,21 @@ export interface SongInit {
   libraryId: string;
   title: string;
   artist: string;
+  /** Immediate parent folder name ('' at the library root); the legacy
+   * plugin used it as the album for scanned songs. */
+  album: string;
   size: number;
+}
+
+/** Immediate parent folder of a server path; '' when the file sits at the
+ * root, where there is no folder name to speak of. */
+export function parentFolderName(path: string): string {
+  const normalized = (path ?? '').replace(/\\/g, '/');
+  const cut = normalized.lastIndexOf('/');
+  if (cut <= 0) return '';
+  const dir = normalized.slice(0, cut);
+  const dirCut = dir.lastIndexOf('/');
+  return dirCut >= 0 ? dir.slice(dirCut + 1) : dir;
 }
 
 export function songFromEntry(input: {
@@ -127,6 +141,7 @@ export function songFromEntry(input: {
     libraryId: input.libraryId,
     title: parsed.title || input.name,
     artist: parsed.artist,
+    album: parentFolderName(input.path),
     size: input.size,
   };
 }
@@ -145,6 +160,14 @@ export interface QueueTrackExtras {
  * it and failing the whole call. */
 export const QUEUE_COVER_LIMIT = 16000;
 
+/** Same validator caps title/artist/album at 1024 chars each — a longer
+ * string silently fails the whole replace call, so they are clamped. */
+export const QUEUE_TEXT_LIMIT = 1024;
+
+function clampQueueText(value: string): string {
+  return value.length > QUEUE_TEXT_LIMIT ? value.slice(0, QUEUE_TEXT_LIMIT) : value;
+}
+
 export function buildQueueTrack(song: SongInit, extras?: QueueTrackExtras | null): QueueTrack {
   const track: {
     id: string;
@@ -161,32 +184,39 @@ export function buildQueueTrack(song: SongInit, extras?: QueueTrackExtras | null
     data: { p: song.path, l: song.libraryId, s: song.size },
   };
   if (extras) {
-    if (extras.title) track.title = extras.title;
-    if (extras.artist) track.artist = extras.artist;
-    if (extras.album) track.album = extras.album;
+    if (extras.title) track.title = clampQueueText(extras.title);
+    if (extras.artist) track.artist = clampQueueText(extras.artist);
+    if (extras.album) track.album = clampQueueText(extras.album);
     if (extras.cover) track.cover = extras.cover;
     if (extras.durationMs && extras.durationMs > 0)
       track.durationMs = Math.round(extras.durationMs);
   }
-  if (!track.title) track.title = song.title;
-  if (!track.artist) track.artist = song.artist;
+  if (!track.title) track.title = clampQueueText(song.title);
+  if (!track.artist) track.artist = clampQueueText(song.artist);
+  // Scanned songs carry their parent folder as a default album; explicit
+  // extras (enrichment or folder play) always win.
+  if (!track.album && song.album) track.album = clampQueueText(song.album);
   return track;
 }
 
-const COMPACT_LENGTH = 6;
+// v2 compact rows carried six fields; the album (parent folder name) was
+// added as an optional seventh so existing caches keep loading without a
+// forced rescan — expandCompactSong simply reads it when present.
+const COMPACT_MIN_LENGTH = 5;
 
 export function compactSong(song: SongInit): JsonValue[] {
-  return [song.id, song.sourceId, song.path, song.title, song.artist, song.size];
+  return [song.id, song.sourceId, song.path, song.title, song.artist, song.size, song.album];
 }
 
 export function expandCompactSong(value: JsonValue): SongInit | null {
-  if (!Array.isArray(value) || value.length < COMPACT_LENGTH - 1) return null;
+  if (!Array.isArray(value) || value.length < COMPACT_MIN_LENGTH) return null;
   const id = value[0];
   const sourceId = value[1];
   const path = value[2];
   const title = value[3];
   const artist = value[4];
   const size = value[5];
+  const album = value.length > 6 ? value[6] : undefined;
   if (typeof id !== 'string' || typeof sourceId !== 'string' || typeof path !== 'string')
     return null;
   const parsed = parseSourceId(sourceId);
@@ -197,6 +227,7 @@ export function expandCompactSong(value: JsonValue): SongInit | null {
     libraryId: parsed ? parsed.libraryId : '',
     title: typeof title === 'string' ? title : '',
     artist: typeof artist === 'string' ? artist : '',
+    album: typeof album === 'string' ? album : '',
     size: typeof size === 'number' && isFinite(size) && size >= 0 ? size : 0,
   };
 }

@@ -9,7 +9,12 @@ import { asArrayBuffer } from './codec.ts';
 import { parseTitleArtist } from './library.ts';
 import { coverDataUrl, parseAudioTags, type AudioTags } from './tags.ts';
 import type { WebdavEndpoint } from './webdav.ts';
-import { readRangeRequest } from './webdav.ts';
+import {
+  isRangeUnsupported,
+  isResponseTooLarge,
+  markRangeUnsupported,
+  readRangeRequest,
+} from './webdav.ts';
 
 const HEAD_READ_LIMIT = 256 * 1024;
 const HEAD_TIMEOUT_MS = 8000;
@@ -45,6 +50,11 @@ export function createEnricher(context: EchoPluginContext, mode: EnrichmentModeS
   const tagsInFlight = new Map<string, Promise<AudioTags | null>>();
   const coverCache = new Map<string, string>();
   const kugouCache = new Map<string, TrackEnrichment | null>();
+  // Session algebra: dispose() bumps the epoch, and every continuation that
+  // settles after a dispose checks it — otherwise an in-flight read would
+  // write back into the cleared caches and "resurrect" state the host
+  // already considers gone (the legacy plugin's stateEpoch fix).
+  let epoch = 0;
 
   function bound<T>(cache: Map<string, T>, limit: number, key: string, value: T): void {
     if (cache.has(key)) cache.delete(key);
@@ -63,8 +73,10 @@ export function createEnricher(context: EchoPluginContext, mode: EnrichmentModeS
   ): Promise<AudioTags | null> {
     const key = `${libraryId}|${path}`;
     if (tagsCache.has(key)) return tagsCache.get(key) ?? null;
+    if (isRangeUnsupported(endpoint.serverUrl)) return null;
     const existing = tagsInFlight.get(key);
     if (existing) return existing;
+    const session = epoch;
     const promise = (async () => {
       try {
         const operation = readRangeRequest(
@@ -76,20 +88,22 @@ export function createEnricher(context: EchoPluginContext, mode: EnrichmentModeS
           HEAD_TIMEOUT_MS,
         );
         const response = await awaitOperation(operation);
-        if (response.status !== 200 && response.status !== 206) {
-          bound(tagsCache, TAG_CACHE_LIMIT, key, null);
-          return null;
-        }
+        if (epoch !== session) return null;
+        if (response.status !== 200 && response.status !== 206) return null;
         const buffer = asArrayBuffer(response.data);
-        if (!buffer) {
-          bound(tagsCache, TAG_CACHE_LIMIT, key, null);
-          return null;
-        }
+        if (!buffer) return null;
         const tags = parseAudioTags(new Uint8Array(buffer));
+        if (epoch !== session) return null;
+        // Only a genuine parse result is cached: a failed or empty read can
+        // be transient (server hiccup, auth race), and caching null would
+        // pin it for the whole session (local-music's rule).
         bound(tagsCache, TAG_CACHE_LIMIT, key, tags);
         return tags;
       } catch (error) {
-        bound(tagsCache, TAG_CACHE_LIMIT, key, null);
+        // A whole-file body means the server ignored the Range header; the
+        // host aborts those transfers before delivering anything, so skip
+        // every future read against this server.
+        if (isResponseTooLarge(error)) markRangeUnsupported(endpoint.serverUrl);
         return null;
       } finally {
         tagsInFlight.delete(key);
@@ -113,6 +127,7 @@ export function createEnricher(context: EchoPluginContext, mode: EnrichmentModeS
     if (!keyword) return null;
     const key = keyword.toLowerCase();
     if (kugouCache.has(key)) return kugouCache.get(key) ?? null;
+    const session = epoch;
     try {
       const operation = context.kugou.request('search', {
         kind: 'song',
@@ -127,6 +142,7 @@ export function createEnricher(context: EchoPluginContext, mode: EnrichmentModeS
       } finally {
         disarm();
       }
+      if (epoch !== session) return null;
       let match = null;
       if (response && response.kind === 'songs') {
         const items =
@@ -166,7 +182,13 @@ export function createEnricher(context: EchoPluginContext, mode: EnrichmentModeS
     let album = '';
     let cover = '';
     let durationMs = 0;
+    const session = epoch;
     const tags = await readTags(song.libraryId, endpoint, song.path);
+    if (epoch !== session) {
+      // Disposed while the tag read was in flight; the caches were cleared
+      // on purpose, so hand back nothing instead of a half-resolved record.
+      return { title: '', artist: '', album: '', cover: '', durationMs: 0 };
+    }
     if (tags) {
       if (tags.title) title = tags.title;
       if (tags.artist) artist = tags.artist;
@@ -185,13 +207,21 @@ export function createEnricher(context: EchoPluginContext, mode: EnrichmentModeS
     if (!title) title = fallback.title || parsed.title || song.title;
     if (!artist) artist = fallback.artist || parsed.artist || song.artist;
     const preferKugou = mode.coverLyricSource() === 'kugou';
-    const kugou = await kugouEnrich(title || song.title, artist);
+    // The legacy v1.0.5 optimization: when the embedded tags already carry
+    // everything the enrichment needs, the online search is skipped —
+    // except in kugou-priority mode, which is explicitly opted in.
+    const tagsComplete =
+      !!tags && !!tags.coverData && !!album && !!artist && !!title && durationMs > 0;
+    const kugou =
+      tagsComplete && !preferKugou ? null : await kugouEnrich(title || song.title, artist);
     if (kugou) {
       if (preferKugou) {
+        // 酷狗资料优先: the online match drives the metadata wherever it has
+        // one; embedded tags only fill the gaps the match left open.
         if (kugou.cover) cover = kugou.cover;
-        if (kugou.album && !album) album = kugou.album;
-        if (kugou.artist && !artist) artist = kugou.artist;
-        if (kugou.durationMs > 0 && !durationMs) durationMs = kugou.durationMs;
+        if (kugou.album) album = kugou.album;
+        if (kugou.artist) artist = kugou.artist;
+        if (kugou.durationMs > 0) durationMs = kugou.durationMs;
       } else {
         if (!cover && kugou.cover) cover = kugou.cover;
         if (!album && kugou.album) album = kugou.album;
@@ -206,6 +236,7 @@ export function createEnricher(context: EchoPluginContext, mode: EnrichmentModeS
     readTags,
     enrichTrack,
     dispose() {
+      epoch += 1;
       tagsCache.clear();
       tagsInFlight.clear();
       coverCache.clear();

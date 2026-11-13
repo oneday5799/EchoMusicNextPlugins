@@ -3,7 +3,7 @@
   "schemaVersion": 1,
   "id": "webdav-music",
   "name": "WebDAV 音乐",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "连接 WebDAV 服务器，浏览、搜索并播放网盘中的音乐文件，支持内嵌与酷狗歌词封面。",
   "author": "Oneday5799",
   "license": "MIT",
