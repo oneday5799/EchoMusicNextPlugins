@@ -40,8 +40,13 @@ export function makeSourceId(libraryId: string, songId: string): string {
 }
 
 export function parseSourceId(sourceId: JsonValue): { libraryId: string; songId: string } | null {
-  if (typeof sourceId !== 'string' || sourceId.indexOf(SOURCE_ID_PREFIX) !== 0) return null;
-  const rest = sourceId.slice(SOURCE_ID_PREFIX.length);
+  if (typeof sourceId !== 'string') return null;
+  // The host stores queue tracks' plugin_source with a "<plugin-id>/" prefix
+  // and hands that rewritten id back to resolvers; strip the prefix so the
+  // sourceId matches the persisted form.
+  const value = sourceId.replace(/^(?:[^/:]+\/)?(?=webdav:)/, '');
+  if (value.indexOf(SOURCE_ID_PREFIX) !== 0) return null;
+  const rest = value.slice(SOURCE_ID_PREFIX.length);
   const cut = rest.indexOf(':');
   if (cut <= 0) return null;
   const libraryId = rest.slice(0, cut);
@@ -133,6 +138,12 @@ export interface QueueTrackExtras {
   cover?: string;
   durationMs?: number;
 }
+
+/** The host queue validator caps a track's cover string at 16384 chars
+ * (EchoPluginPlaylist::parse) and stays silent beyond that, so oversized
+ * embedded art must be withheld from queue payloads instead of submitting
+ * it and failing the whole call. */
+export const QUEUE_COVER_LIMIT = 16000;
 
 export function buildQueueTrack(song: SongInit, extras?: QueueTrackExtras | null): QueueTrack {
   const track: {

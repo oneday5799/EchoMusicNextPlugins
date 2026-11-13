@@ -2,6 +2,8 @@
 // lacks Node Buffer, so base64, UTF-8/16 and XML entity decoding are all
 // implemented locally in small, allocation-conscious helpers.
 
+import type { JsonValue } from 'echo:plugin-sdk';
+
 const BASE64_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
 const FLUSH_SIZE = 32768;
 
@@ -211,6 +213,55 @@ export function formatBytes(size: number): string {
 /** Numeric-aware, accent-insensitive text comparison for file listings. */
 export function compareText(a: string, b: string): number {
   return String(a).localeCompare(String(b), undefined, { numeric: true, sensitivity: 'base' });
+}
+
+/** Host-delivered JSON arrays can cross the FFI without the JS Array
+ * prototype (Array.isArray false, .map missing), so index updates recover
+ * result arrays explicitly instead of trusting the type check. */
+export function coerceJsonArray(value: JsonValue | undefined): JsonValue[] {
+  if (Array.isArray(value)) return value;
+  if (!value || typeof value !== 'object') return [];
+  const source = value as object;
+  try {
+    if (Symbol.iterator in source) {
+      return Array.from(value as unknown as Iterable<JsonValue>);
+    }
+  } catch (error) {
+    // Fall through to the numeric-key recovery below.
+  }
+  const record = value as { [key: string]: JsonValue };
+  const lengthValue = (record as { length?: JsonValue }).length;
+  if (
+    typeof lengthValue === 'number' &&
+    Number.isInteger(lengthValue) &&
+    lengthValue >= 0 &&
+    lengthValue < 1000000
+  ) {
+    const items: JsonValue[] = new Array(lengthValue);
+    let filled = 0;
+    for (let index = 0; index < lengthValue; index += 1) {
+      const item = (record as { [key: number]: JsonValue })[index];
+      // Assigning undefined explicitly turns format holes into real entries,
+      // so the array equals what a native parse would have produced.
+      items[index] = item;
+      if (item !== undefined) {
+        filled += 1;
+      }
+    }
+    if (filled > 0 || lengthValue === 0) return items;
+  }
+  const indexes = Object.keys(record)
+    .filter((key) => /^(0|[1-9]\d*)$/.test(key))
+    .map(Number)
+    .sort((a, b) => a - b);
+  if (indexes.length === 0 || indexes[indexes.length - 1] !== indexes.length - 1) {
+    return [];
+  }
+  const items: JsonValue[] = new Array(indexes.length);
+  for (let index = 0; index < indexes.length; index += 1) {
+    items[index] = (record as { [key: number]: JsonValue })[indexes[index]];
+  }
+  return items;
 }
 
 export function asArrayBuffer(value: unknown): ArrayBuffer | null {

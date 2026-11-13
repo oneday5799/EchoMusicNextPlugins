@@ -50,11 +50,21 @@ Item {
     readonly property string scanError: root.scanState && typeof root.scanState.error === "string" ? root.scanState.error : ""
     readonly property string scanLabel: root.scanState && typeof root.scanState.label === "string" ? root.scanState.label : ""
     readonly property int scanCount: root.scanState && typeof root.scanState.count === "number" ? root.scanState.count : 0
+    readonly property bool scanTruncated: !!root.scanState && root.scanState.truncated === true
+    readonly property bool flatTruncated: scanTruncated || flatTruncatedFlag
+    property bool flatTruncatedFlag: false
     property string sortKey: "name"
     property bool selectionMode: false
     property var selectedPaths: ({})
     property int busy: 0
     property string errorMessage: ""
+    // Guards against a stale browse response: rapid navigation fires two
+    // browse.load requests and the slower (older) reply must not overwrite
+    // the newer directory's rows (legacy v1.4.5 fix).
+    property int browseToken: 0
+    // Pending row to scroll to after the locate page arrives.
+    property int pendingLocate: -1
+    property bool locateLoading: false
 
     readonly property bool working: busy > 0
     readonly property string currentTrackId: {
@@ -155,8 +165,13 @@ Item {
 
     function run(name, args, callback) {
         const operation = plugin.executeCommand(name, args || {});
-        if (!operation)
+        if (!operation) {
+            // A null operation (usually deactivation) must still settle the
+            // request, same contract as Settings' run().
+            if (callback)
+                callback(null);
             return;
+        }
         busy += 1;
         const handler = function () {
             operation.completed.disconnect(handler);
@@ -171,6 +186,31 @@ Item {
             }
         };
         operation.completed.connect(handler);
+    }
+
+    /** Host-delivered JSON arrays can cross the FFI without the JS Array
+     * prototype (Array.isArray false, .map missing), so recover result
+     * arrays explicitly instead of trusting the type check. */
+    function asArray(value) {
+        if (Array.isArray(value))
+            return value;
+        if (!value || typeof value !== "object")
+            return [];
+        if (typeof value.length === "number") {
+            const rows = [];
+            for (let i = 0; i < value.length; i++)
+                rows.push(value[i]);
+            return rows;
+        }
+        const keys = Object.keys(value).filter(function (key) {
+            return /^(0|[1-9]\d*)$/.test(key);
+        }).map(Number).sort(function (a, b) {
+            return a - b;
+        });
+        const rows = [];
+        for (let j = 0; j < keys.length; j++)
+            rows.push(value[keys[j]]);
+        return rows;
     }
 
     function openSettings() {
@@ -199,7 +239,7 @@ Item {
 
     function refreshSettings(reload) {
         run("settings.get", {}, function (result) {
-            const nextLibraries = result && Array.isArray(result.libraries) ? result.libraries : [];
+            const nextLibraries = result ? asArray(result.libraries) : [];
             libraries = nextLibraries;
             coverLyricSource = result && result.coverLyricSource === "kugou" ? "kugou" : "embedded";
             let nextId = activeLibraryId;
@@ -226,6 +266,7 @@ Item {
     function browseLoad(path) {
         if (!currentLibrary)
             return;
+        const token = ++browseToken;
         browse = {
             loading: true,
             error: "",
@@ -239,6 +280,10 @@ Item {
             libraryId: activeLibraryId,
             path: path
         }, function (result) {
+            // A stale reply (a slower request for a directory the user has
+            // already left) must not overwrite the current rows.
+            if (token !== browseToken)
+                return;
             if (!result || result.error) {
                 browse = {
                     loading: false,
@@ -256,8 +301,8 @@ Item {
                 error: "",
                 path: result.path || path,
                 root: result.root || "/",
-                dirs: result.dirs || [],
-                files: result.files || [],
+                dirs: asArray(result.dirs),
+                files: asArray(result.files),
                 cover: result.cover || ""
             };
         });
@@ -277,6 +322,7 @@ Item {
             if (result.ready) {
                 flatReady = true;
                 flatLoading = false;
+                flatTruncatedFlag = result.truncated === true;
                 flatPageLoad(0);
             } else if (result.started) {
                 flatReady = false;
@@ -306,11 +352,61 @@ Item {
             flatReady = true;
             flatTotal = result.total || 0;
             flatOffset = result.offset || offset;
-            flatSongs = result.songs || [];
+            flatTruncatedFlag = result.truncated === true;
+            flatSongs = asArray(result.songs);
+            if (root.pendingLocate >= 0 && root.pendingLocate < flatSongs.length) {
+                const target = root.pendingLocate;
+                root.pendingLocate = -1;
+                Qt.callLater(function () {
+                    listView.positionViewAtIndex(target, ListView.Center);
+                });
+            }
         });
     }
 
-    function playRows(mode, paths, flatIndex) {
+    /** Scrolls the flat list to the playing row, loading its page first when
+     * pagination has not reached it yet (legacy v1.2.0 定位当前播放). */
+    function locateCurrent() {
+        if (!flatMode || locateLoading || flatLoading)
+            return;
+        if (keyword.trim().length > 0) {
+            plugin.toast.info("定位前请先清空搜索关键词");
+            return;
+        }
+        if (currentTrackId.length === 0) {
+            plugin.toast.info("当前没有播放 WebDAV 歌曲");
+            return;
+        }
+        for (let i = 0; i < flatSongs.length; i++) {
+            if (flatSongs[i].id === currentTrackId) {
+                listView.positionViewAtIndex(i, ListView.Center);
+                return;
+            }
+        }
+        locateLoading = true;
+        run("flat.locate", {
+            libraryId: activeLibraryId,
+            id: currentTrackId
+        }, function (result) {
+            locateLoading = false;
+            if (!result)
+                return;
+            const index = typeof result.index === "number" ? result.index : -1;
+            if (index < 0) {
+                plugin.toast.info("当前播放的歌曲不在平铺列表中");
+                return;
+            }
+            const pageStart = Math.floor(index / flatPageSize) * flatPageSize;
+            if (pageStart === flatOffset && flatSongs.length > index - pageStart) {
+                listView.positionViewAtIndex(index - pageStart, ListView.Center);
+                return;
+            }
+            pendingLocate = index - pageStart;
+            flatPageLoad(pageStart);
+        });
+    }
+
+    function playRows(mode, paths, flatIndex, playAll) {
         if (!currentLibrary)
             return;
         const args = {
@@ -326,6 +422,8 @@ Item {
             args.dir = browse.path;
             args.index = 0;
         }
+        if (playAll === true)
+            args.all = true;
         run("play", args, function (result) {
             if (result && result.ok && mode !== "now")
                 plugin.toast.success(`已将 ${result.count || 0} 首加入${mode === "next" ? "播放列表" : "队列"}`);
@@ -352,8 +450,10 @@ Item {
     }
 
     function rowPlayAllFromCurrentView() {
+        // all:true marks this as 播放全部 — the whole view plays in both
+        // host queue modes (single mode only affects double-click).
         if (flatMode) {
-            playRows("now", null, 0);
+            playRows("now", null, 0, true);
             return;
         }
         if (!browse.path)
@@ -362,7 +462,8 @@ Item {
             libraryId: activeLibraryId,
             dir: browse.path,
             mode: "now",
-            index: 0
+            index: 0,
+            all: true
         }, null);
     }
 
@@ -484,6 +585,13 @@ Item {
                 onClicked: root.rowPlayAllFromCurrentView()
             }
             EchoIconButton {
+                visible: root.flatMode
+                glyph: "current-location"
+                tooltipText: "定位当前播放"
+                enabled: root.flatReady
+                onClicked: root.locateCurrent()
+            }
+            EchoIconButton {
                 glyph: "arrows-sort"
                 tooltipText: "排序方式"
                 onClicked: sortMenu.popup()
@@ -524,12 +632,16 @@ Item {
                 Layout.preferredWidth: 220
                 visible: root.libraries.length > 0
                 placeholder: "选择 WebDAV 库"
-                options: root.libraries.map(function (library) {
-                    return {
-                        value: library.id,
-                        label: library.name
-                    };
-                })
+                options: {
+                    const rows = root.asArray(root.libraries);
+                    const items = [];
+                    for (let i = 0; i < rows.length; i++)
+                        items.push({
+                            value: rows[i].id,
+                            label: rows[i].name
+                        });
+                    return items;
+                }
                 value: root.activeLibraryId
                 onValueEdited: function (nextValue) {
                     root.activeLibraryId = typeof nextValue === "string" ? nextValue : "";
@@ -570,7 +682,7 @@ Item {
 
         Rectangle {
             Layout.fillWidth: true
-            visible: root.scanRunning || root.scanError.length > 0 || root.scanDone || root.scanAborted
+            visible: root.scanRunning || root.scanError.length > 0 || root.scanDone || root.scanAborted || root.flatTruncated
             radius: 10
             color: Theme.rowHover
             border.color: Theme.subtleBorder
@@ -592,9 +704,13 @@ Item {
                         if (root.scanError.length > 0)
                             return `扫描失败：${root.scanError}`;
                         if (root.scanDone)
-                            return `扫描完成，共 ${root.scanCount} 首`;
+                            return `扫描完成，共 ${root.scanCount} 首${root.scanTruncated ? "（已达 20000 首上限，结果不完整）" : ""}`;
                         if (root.scanAborted)
                             return `扫描已中止，已保留 ${root.scanCount} 首`;
+                        if (root.scanRunning)
+                            return root.scanLabel || "正在扫描…";
+                        if (root.flatTruncated)
+                            return "列表已达 20000 首上限，结果不完整";
                         return root.scanLabel || "正在扫描…";
                     }
                     font: Theme.font(12, Theme.regularWeight)

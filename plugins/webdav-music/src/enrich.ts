@@ -157,30 +157,33 @@ export function createEnricher(context: EchoPluginContext, mode: EnrichmentModeS
     song: { libraryId: string; path: string; title: string; artist: string },
     fallback: { title?: string; artist?: string },
   ): Promise<TrackEnrichment> {
+    // Embedded tags win over the filename parse, mirroring the legacy
+    // plugin ("以嵌入标签为准覆盖文件名解析结果") and local-music's
+    // metadata pass; the filename parse only fills what the tags lack.
     const parsed = parseTitleArtist(song.path.substring(song.path.lastIndexOf('/') + 1));
-    let title = fallback.title || parsed.title || song.title;
-    let artist = fallback.artist || parsed.artist || song.artist;
+    let title = '';
+    let artist = '';
     let album = '';
     let cover = '';
     let durationMs = 0;
     const tags = await readTags(song.libraryId, endpoint, song.path);
-    const applyTags = (value: AudioTags | null) => {
-      if (!value) return;
-      if (value.title && !title) title = value.title;
-      if (value.artist && !artist) artist = value.artist;
-      if (value.album && !album) album = value.album;
-      if (value.durationMs > 0 && !durationMs) durationMs = value.durationMs;
-      if (value.coverData && !cover) {
+    if (tags) {
+      if (tags.title) title = tags.title;
+      if (tags.artist) artist = tags.artist;
+      if (tags.album) album = tags.album;
+      if (tags.durationMs > 0) durationMs = tags.durationMs;
+      if (tags.coverData) {
         const key = `${song.libraryId}|${song.path}`;
         if (coverCache.has(key)) {
           cover = coverCache.get(key) ?? '';
         } else {
-          cover = coverDataUrl(value);
+          cover = coverDataUrl(tags);
           bound(coverCache, COVER_CACHE_LIMIT, key, cover);
         }
       }
-    };
-    applyTags(tags);
+    }
+    if (!title) title = fallback.title || parsed.title || song.title;
+    if (!artist) artist = fallback.artist || parsed.artist || song.artist;
     const preferKugou = mode.coverLyricSource() === 'kugou';
     const kugou = await kugouEnrich(title || song.title, artist);
     if (kugou) {

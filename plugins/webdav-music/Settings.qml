@@ -14,6 +14,10 @@ ColumnLayout {
 
     required property EchoPluginContext plugin
     property var draft: null
+    /** A settings.get reply has landed; the save button stays disabled
+     * before that so a failed or in-flight load can never be saved over
+     * the stored settings with an empty draft. */
+    property bool loaded: false
     property int busy: 0
     property string errorMessage: ""
     readonly property bool saving: busy > 0
@@ -24,13 +28,21 @@ ColumnLayout {
     property var libraryIds: []
     /** Library id -> expanded, mirroring the legacy plugin's collapsible groups. */
     property var expandedLibraries: ({})
+    /** Cached scan list count (flat.info of the active library), shown in
+     * the cache-management section. */
+    property string cachedCountLabel: ""
 
     spacing: 14
 
     function run(name, args, callback) {
         const operation = plugin.executeCommand(name, args || {});
-        if (!operation)
+        if (!operation) {
+            // A null operation (usually deactivation) must still settle the
+            // request, same contract as BrowserPage's run().
+            if (callback)
+                callback(null);
             return;
+        }
         busy += 1;
         const handler = function () {
             operation.completed.disconnect(handler);
@@ -40,9 +52,35 @@ ColumnLayout {
                     callback(operation.result);
             } else if (operation.state === 3) {
                 errorMessage = operation.errorMessage || "操作失败";
+                plugin.toast.danger(errorMessage);
             }
         };
         operation.completed.connect(handler);
+    }
+
+    /** Host-delivered JSON arrays can cross the FFI without the JS Array
+     * prototype (Array.isArray false, .map missing), so recover result
+     * arrays explicitly instead of trusting the type check. */
+    function asArray(value) {
+        if (Array.isArray(value))
+            return value;
+        if (!value || typeof value !== "object")
+            return [];
+        if (typeof value.length === "number") {
+            const rows = [];
+            for (let i = 0; i < value.length; i++)
+                rows.push(value[i]);
+            return rows;
+        }
+        const keys = Object.keys(value).filter(function (key) {
+            return /^(0|[1-9]\d*)$/.test(key);
+        }).map(Number).sort(function (a, b) {
+            return a - b;
+        });
+        const rows = [];
+        for (let j = 0; j < keys.length; j++)
+            rows.push(value[keys[j]]);
+        return rows;
     }
 
     function loadDraft() {
@@ -52,7 +90,23 @@ ColumnLayout {
                 activeLibraryId: null,
                 coverLyricSource: "embedded"
             };
+            if (draft && draft.libraries)
+                draft.libraries = asArray(draft.libraries);
+            loaded = true;
             syncLibraryIds();
+            refreshCacheInfo();
+        });
+    }
+
+    /** Cached-list summary for the cache-management section: the backend
+     * answers for the active library, which is what the browser page shows. */
+    function refreshCacheInfo() {
+        run("flat.info", {}, function (result) {
+            if (!result || typeof result.count !== "number" || result.count <= 0) {
+                cachedCountLabel = "";
+                return;
+            }
+            cachedCountLabel = `当前库已缓存 ${result.count} 首的平铺列表${result.truncated === true ? "（不完整）" : ""}`;
         });
     }
 
@@ -121,8 +175,11 @@ ColumnLayout {
     }
 
     function addLibrary() {
-        if (!draft)
+        if (!draft) {
+            plugin.toast.warning("设置尚未加载完成，请稍后再试");
+            loadDraft();
             return;
+        }
         const libraries = Array.isArray(draft.libraries) ? draft.libraries.slice() : [];
         const id = `lib-${Date.now().toString(36)}-${Math.floor(Math.random() * 0xffff).toString(36)}`;
         libraries.push({
@@ -169,10 +226,47 @@ ColumnLayout {
 
     function save() {
         errorMessage = "";
-        run("settings.patch", draft, function () {
+        if (!loaded || !draft) {
+            errorMessage = "设置尚未加载完成，无法保存";
+            plugin.toast.warning(errorMessage);
+            return;
+        }
+        const libraries = asArray(draft.libraries);
+        for (let i = 0; i < libraries.length; i++) {
+            const library = libraries[i] || {};
+            const label = library.name && library.name.length > 0 ? `「${library.name}」` : `第 ${i + 1} 个库`;
+            if (!library.serverUrl || String(library.serverUrl).trim().length === 0) {
+                errorMessage = `${label}还没有填写服务器地址，请补全后再保存`;
+                plugin.toast.warning(errorMessage);
+                return;
+            }
+        }
+        run("settings.patch", draft, function (result) {
+            if (!result || result.ok !== true) {
+                errorMessage = (result && result.message) || "保存失败，请重试";
+                return;
+            }
             plugin.toast.success("WebDAV 设置已保存");
             loadDraft();
         });
+    }
+
+    /** Host-style destructive action: the danger button opens a confirmation
+     * dialog; the dialog body runs the clear command itself. */
+    function confirmClearCache() {
+        const operation = plugin.ui.showDialog({
+            component: "ClearCacheDialog.qml",
+            width: 460,
+            title: "确认清除插件缓存？"
+        });
+        if (!operation)
+            return;
+        const handler = function () {
+            operation.completed.disconnect(handler);
+            if (operation.state === 3)
+                plugin.toast.danger(operation.errorMessage || "无法打开确认对话框");
+        };
+        operation.completed.connect(handler);
     }
 
     Component.onCompleted: loadDraft()
@@ -464,6 +558,43 @@ ColumnLayout {
         }
     }
 
+    SettingsSection {
+        Layout.fillWidth: true
+        heading: "缓存"
+        subtitle: "平铺列表、播放时读取的歌曲资料与在线歌词都会缓存到本机，加速下次访问"
+
+        body: Component {
+            ColumnLayout {
+                spacing: 12
+
+                Label {
+                    Layout.fillWidth: true
+                    visible: settingsRoot.cachedCountLabel.length > 0
+                    text: settingsRoot.cachedCountLabel
+                    font: Theme.font(12, Theme.regularWeight)
+                    color: Theme.floatingSecondaryText
+                    wrapMode: Text.Wrap
+                }
+
+                SettingRow {
+                    Layout.fillWidth: true
+                    title: "清除插件缓存"
+                    hint: "移除平铺扫描列表、播放时持久化的歌曲资料与在线歌词；库配置不受影响"
+
+                    switchRow: false
+                    editor: Component {
+                        EchoButton {
+                            text: "立即清除"
+                            accent: false
+                            enabled: !settingsRoot.saving
+                            onClicked: settingsRoot.confirmClearCache()
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     RowLayout {
         Layout.fillWidth: true
         spacing: 12
@@ -478,6 +609,7 @@ ColumnLayout {
         EchoButton {
             text: "重置"
             accent: false
+            enabled: settingsRoot.loaded && !settingsRoot.saving
             onClicked: settingsRoot.run("settings.reset", {}, function () {
                 settingsRoot.plugin.toast.success("已恢复默认设置");
                 settingsRoot.loadDraft();
@@ -488,6 +620,7 @@ ColumnLayout {
             glyph: "check"
             accent: true
             loading: settingsRoot.saving
+            enabled: settingsRoot.loaded && !settingsRoot.saving
             onClicked: settingsRoot.save()
         }
     }

@@ -25,7 +25,7 @@ import {
 
 const SCAN_TIMEOUT_MS = 15000;
 const CHUNK_SIZE = 400;
-export const FLAT_CACHE_VERSION = 1;
+export const FLAT_CACHE_VERSION = 2;
 
 export interface FlatCacheMeta extends Record<string, JsonValue> {
   version: number;
@@ -33,6 +33,7 @@ export interface FlatCacheMeta extends Record<string, JsonValue> {
   chunks: number;
   serverUrl: string;
   rootPath: string;
+  truncated: boolean;
 }
 
 export function flatMetaKey(libraryId: string): string {
@@ -47,6 +48,7 @@ export function buildFlatMeta(
   library: WebdavLibraryConfig,
   count: number,
   chunks: number,
+  truncated: boolean,
 ): FlatCacheMeta {
   return {
     version: FLAT_CACHE_VERSION,
@@ -54,6 +56,7 @@ export function buildFlatMeta(
     chunks,
     serverUrl: normalizeServerUrl(library.serverUrl),
     rootPath: normalizeDir(library.rootPath || '/'),
+    truncated,
   };
 }
 
@@ -71,6 +74,7 @@ function parseFlatMeta(value: JsonValue | undefined): FlatCacheMeta | null {
     chunks: Math.max(0, Math.floor(chunks)),
     serverUrl: typeof record.serverUrl === 'string' ? record.serverUrl : '',
     rootPath: typeof record.rootPath === 'string' ? record.rootPath : '/',
+    truncated: record.truncated === true,
   };
 }
 
@@ -100,6 +104,7 @@ export async function writeFlatCache(
   context: EchoPluginContext,
   library: WebdavLibraryConfig,
   songs: SongInit[],
+  truncated: boolean,
 ): Promise<void> {
   const chunks = chunkSongs(songs);
   const previousMeta = parseFlatMeta(
@@ -111,7 +116,7 @@ export async function writeFlatCache(
   await awaitOperation(
     context.io.writeValue(
       flatMetaKey(library.id),
-      buildFlatMeta(library, songs.length, chunks.length),
+      buildFlatMeta(library, songs.length, chunks.length, truncated),
     ),
   );
   if (previousMeta && previousMeta.chunks > chunks.length) {
@@ -128,7 +133,7 @@ export async function writeFlatCache(
 export async function readFlatCache(
   context: EchoPluginContext,
   library: WebdavLibraryConfig,
-): Promise<SongInit[] | null> {
+): Promise<{ songs: SongInit[]; truncated: boolean } | null> {
   const meta = parseFlatMeta(await awaitOperation(context.io.readValue(flatMetaKey(library.id))));
   if (!meta || !metaMatches(meta, library)) return null;
   const songs: SongInit[] = [];
@@ -140,7 +145,8 @@ export async function readFlatCache(
       if (song) songs.push(song);
     }
   }
-  return songs.length === meta.count ? songs : null;
+  if (songs.length !== meta.count) return null;
+  return { songs, truncated: meta.truncated };
 }
 
 export async function clearFlatCache(context: EchoPluginContext, libraryId: string): Promise<void> {
@@ -168,9 +174,12 @@ export interface FlatScanCallbacks {
   onOperation?: (operation: { cancel(): void }) => void;
 }
 
-/** Non-zero caps the walk (used by "play folder"); 0 means unlimited. */
+/** Non-zero caps the walk (play folder, and the flat scan's song ceiling);
+ * 0 means unlimited. */
 export interface CollectOptions extends FlatScanCallbacks {
   cap?: number;
+  /** Fires once when the song cap stopped the walk early. */
+  onTruncated?: () => void;
 }
 
 export class FlatScanAborted extends Error {
@@ -198,9 +207,13 @@ export async function collectSongsUnder(
   const queue: string[] = [normalizeDir(root)];
   const songs: SongInit[] = [];
   let scanned = 0;
+  let truncated = false;
   while (queue.length > 0) {
     if (options.shouldAbort && options.shouldAbort()) throw new FlatScanAborted(songs);
-    if (cap > 0 && songs.length >= cap) break;
+    if (cap > 0 && songs.length >= cap) {
+      truncated = true;
+      break;
+    }
     const directory = queue.shift() ?? root;
     const operation = propfindRequest(context.net, endpoint, directory, SCAN_TIMEOUT_MS);
     if (options.onOperation) options.onOperation(operation);
@@ -234,11 +247,15 @@ export async function collectSongsUnder(
             size: entry.contentLength,
           }),
         );
-        if (cap > 0 && songs.length >= cap) break;
+        if (cap > 0 && songs.length >= cap) {
+          truncated = true;
+          break;
+        }
       }
     }
     if (options.onProgress) options.onProgress(songs.length, scanned);
   }
+  if (truncated && options.onTruncated) options.onTruncated();
   return songs;
 }
 
