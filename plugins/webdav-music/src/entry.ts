@@ -89,6 +89,7 @@ interface FileRowJson extends Record<string, JsonValue> {
   path: string;
   title: string;
   artist: string;
+  album: string;
   size: number;
   ext: string;
   quality: string;
@@ -317,10 +318,66 @@ function fileRowFromSong(song: SongInit): FileRowJson {
     path: song.path,
     title: song.title,
     artist: song.artist,
+    album: song.album,
     size: song.size,
     ext: extension,
     quality: qualityForExtension(extension),
   };
+}
+
+// ── Flat view (filter + sort) ──────────────────────────────────────────────
+//
+// The page browses one filtered, sorted view of the flat list; page loads,
+// locates and plays must all see the same ordering, so the query is applied
+// server-side instead of the page sorting its loaded page locally. The sort
+// keys follow the host SongListHeader contract (name/title/artist/album/
+// duration); duration has no scan-time data and sorts stably by path.
+
+interface FlatViewQuery {
+  keyword: string;
+  sort: string;
+  sortDir: 1 | 2;
+}
+
+function flatViewQueryOf(args: Record<string, JsonValue>): FlatViewQuery {
+  const sort = argString(args, 'sort');
+  return {
+    keyword: argString(args, 'keyword').trim(),
+    sort: ['name', 'title', 'artist', 'album', 'duration'].indexOf(sort) >= 0 ? sort : 'title',
+    sortDir: argNumber(args, 'sortDir', 1) === 2 ? 2 : 1,
+  };
+}
+
+function flatCompare(a: SongInit, b: SongInit, sort: string, dir: 1 | 2): number {
+  const textOf = (song: SongInit): string => {
+    if (sort === 'name') return song.path;
+    if (sort === 'artist') return song.artist;
+    if (sort === 'album') return song.album;
+    return song.title;
+  };
+  const left = textOf(a).toLowerCase();
+  const right = textOf(b).toLowerCase();
+  let result = left < right ? -1 : left > right ? 1 : 0;
+  if (result === 0) {
+    // Equal keys keep the deterministic scan order (path) instead of the
+    // engine's unstable sort order.
+    const pathA = a.path.toLowerCase();
+    const pathB = b.path.toLowerCase();
+    result = pathA < pathB ? -1 : pathA > pathB ? 1 : 0;
+  }
+  return dir === 2 ? -result : result;
+}
+
+function buildFlatView(songs: SongInit[], query: FlatViewQuery): SongInit[] {
+  const keyword = query.keyword;
+  const filtered = keyword
+    ? songs.filter(
+        (song) =>
+          matchesKeyword(`${song.artist} ${song.title}`, keyword) ||
+          matchesKeyword(song.title, keyword),
+      )
+    : songs;
+  return filtered.slice().sort((a, b) => flatCompare(a, b, query.sort, query.sortDir));
 }
 
 function compareByTitle(
@@ -717,18 +774,11 @@ async function flatPage(args: Record<string, JsonValue>): Promise<JsonValue> {
       songs: [],
       truncated: truncatedIds.has(library.id),
     };
-  const keyword = argString(args, 'keyword').trim();
-  const filtered = keyword
-    ? songs.filter(
-        (song) =>
-          matchesKeyword(`${song.artist} ${song.title}`, keyword) ||
-          matchesKeyword(song.title, keyword),
-      )
-    : songs;
-  const page = filtered.slice(offset, offset + limit);
+  const view = buildFlatView(songs, flatViewQueryOf(args));
+  const page = view.slice(offset, offset + limit);
   return {
     ready: true,
-    total: filtered.length,
+    total: view.length,
     offset,
     limit,
     truncated: truncatedIds.has(library.id),
@@ -776,22 +826,71 @@ async function flatClear(args: Record<string, JsonValue>): Promise<JsonValue> {
   return { ok: true, flats, enrichments, lyrics };
 }
 
-/** Index of one song inside the flat list, so the page can locate a playing
- * row that pagination has not loaded. */
+/** Index of one song inside the current sorted/filtered flat view, so the
+ * page can locate a playing row that pagination has not loaded. */
 async function flatLocate(args: Record<string, JsonValue>): Promise<JsonValue> {
   const library = libraryFromArgs(args);
   if (!library) return { ready: false, index: -1, total: 0 };
-  const songs = flatSongs.get(library.id);
+  let songs = flatSongs.get(library.id);
+  if (!songs) {
+    const cached = await readFlatSongsSafe(requireContext(), library);
+    if (cached) {
+      flatSongs.set(library.id, cached.songs);
+      songs = cached.songs;
+    }
+  }
   if (!songs) return { ready: true, index: -1, total: 0 };
+  const view = buildFlatView(songs, flatViewQueryOf(args));
   const id = argString(args, 'id');
   let index = -1;
-  for (let i = 0; i < songs.length; i += 1) {
-    if (songs[i].id === id) {
+  for (let i = 0; i < view.length; i += 1) {
+    if (view[i].id === id) {
       index = i;
       break;
     }
   }
-  return { ready: true, index, total: songs.length };
+  return { ready: true, index, total: view.length };
+}
+
+/** Batched cover/duration delivery for song rows, mirroring local-music's
+ * library.covers: rows request their own art as they enter the view and the
+ * page batches ids. Covers come from the persisted enrichment records only —
+ * a miss is a KV read, never a network request. */
+const COVER_BATCH_IDS_LIMIT = 24;
+const COVER_BATCH_PAYLOAD_LIMIT = 512 * 1024;
+
+async function flatCovers(args: Record<string, JsonValue>): Promise<JsonValue> {
+  const ctx = requireContext();
+  const ids = argStringArray(args, 'ids').slice(0, COVER_BATCH_IDS_LIMIT);
+  const covers: { [songId: string]: JsonValue } = {};
+  const durations: { [songId: string]: JsonValue } = {};
+  let payload = 0;
+  let truncated = false;
+  for (const songId of ids) {
+    try {
+      const value = (await raceTimeout(
+        ctx,
+        awaitOperation(ctx.io.readValue(enrichStoreKey(songId))),
+        ENRICH_PERSIST_BUDGET_MS,
+      )) as JsonValue;
+      const record = parseEnrichRecord(value);
+      if (!record) continue;
+      if (record.durationMs > 0) durations[songId] = record.durationMs;
+      if (record.cover) {
+        // Cap the reply payload like local-music's cover batches: the rest
+        // of the batch retries in a later call (truncated flag).
+        if (payload + record.cover.length > COVER_BATCH_PAYLOAD_LIMIT) {
+          truncated = true;
+          continue;
+        }
+        covers[songId] = record.cover;
+        payload += record.cover.length;
+      }
+    } catch (error) {
+      // A transient KV miss behaves like "no record yet".
+    }
+  }
+  return { covers, durations, truncated };
 }
 
 function enrichmentExtras(enrichment: TrackEnrichment): QueueTrackExtras {
@@ -889,9 +988,13 @@ async function playCommand(args: Record<string, JsonValue>): Promise<JsonValue> 
     const loaded = memory ?? (await readFlatSongsSafe(ctx, library))?.songs ?? null;
     if (!loaded) return { error: 'flat-missing', message: '平铺列表尚未就绪，请先扫描' };
     flatSongs.set(library.id, loaded);
+    // The page plays the current sorted/filtered view (host catalog
+    // semantics): the index and the queue both come from the same view the
+    // pages and locate are built on.
+    const view = buildFlatView(loaded, flatViewQueryOf(args));
     startIndex = Math.max(0, Math.floor(argNumber(args, 'index', 0)));
-    if (startIndex >= loaded.length) return { error: 'empty', message: '歌曲不存在' };
-    for (const song of loaded) songs.push(song);
+    if (startIndex >= view.length) return { error: 'empty', message: '歌曲不存在' };
+    for (const song of view) songs.push(song);
     queueTitle = `${library.name}（平铺）`;
   } else {
     const paths = argStringArray(args, 'paths');
@@ -1165,6 +1268,7 @@ export async function activate(ctx: EchoPluginContext): Promise<void> {
   ctx.registerCommand('flat.info', (commandArgs) => flatInfo(commandArgs));
   ctx.registerCommand('flat.clear', (commandArgs) => flatClear(commandArgs));
   ctx.registerCommand('flat.locate', (commandArgs) => flatLocate(commandArgs));
+  ctx.registerCommand('flat.covers', (commandArgs) => flatCovers(commandArgs));
   ctx.registerCommand('flat.abort', () => {
     if (!scanJob) return { ok: false };
     requestScanAbort(scanJob);

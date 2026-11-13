@@ -4,70 +4,48 @@ import QtQuick.Controls.Basic
 import QtQuick.Layouts
 import EchoMusic.Theme
 
-Item {
+// Settings row copied from the host SettingsRow (same as local-music): copy
+// column on the left (heading / description), controls passed as children on
+// the right. Lives inside a section card; separate rows with a hairline
+// EchoDivider between them.
+RowLayout {
     id: row
-    objectName: "webdavSettingsRow"
-    property string title: ""
-    property string hint: ""
-    property bool switchRow: false
-    property bool divider: true
-    readonly property bool followsVisibleRow: {
-        if (!parent)
-            return false;
-        let previous = false;
-        for (const sibling of parent.children) {
-            if (sibling === row)
-                return previous;
-            previous = previous || sibling.visible;
-        }
-        return previous;
-    }
-    property Component editor
-    implicitHeight: Math.max(58, 20 + Math.max(copy.implicitHeight, control.implicitHeight))
-    RowLayout {
-        anchors.fill: parent
-        anchors.leftMargin: 18
-        anchors.rightMargin: 18
-        anchors.topMargin: 10
-        anchors.bottomMargin: 10
-        spacing: 24
-        ColumnLayout {
-            id: copy
+    property string heading: ""
+    property string description: ""
+    property real controlGap: 12
+    default property alias controls: actions.data
+    Layout.fillWidth: true
+    Layout.minimumWidth: 0
+    spacing: 24
+    ColumnLayout {
+        Layout.fillHeight: false
+        Layout.fillWidth: true
+        Layout.minimumWidth: 0
+        Layout.topMargin: 4
+        Layout.bottomMargin: 4
+        spacing: 4
+        Label {
             Layout.fillWidth: true
-            Layout.minimumWidth: 0
-            spacing: 2
-            Label {
-                Layout.fillWidth: true
-                text: row.title
-                color: Theme.floatingText
-                font: Theme.font(13, 650)
-                wrapMode: Text.Wrap
-                lineHeight: 1.35
-            }
-            Label {
-                Layout.fillWidth: true
-                visible: row.hint.length > 0
-                text: row.hint
-                color: Theme.floatingSecondaryText
-                font: Theme.font(12, Theme.regularWeight)
-                wrapMode: Text.Wrap
-                lineHeight: 1.4
-            }
+            text: row.heading
+            textFormat: Text.PlainText
+            color: Theme.floatingText
+            font: Theme.font(13, Theme.semiboldWeight)
+            wrapMode: Text.Wrap
         }
-        Loader {
-            id: control
-            Layout.preferredWidth: row.switchRow ? 44 : Math.min(250, Math.max(120, row.width * .46))
-            Layout.fillHeight: false
-            sourceComponent: row.editor
+        Label {
+            Layout.fillWidth: true
+            visible: text.length > 0
+            text: row.description
+            textFormat: Text.PlainText
+            color: Theme.floatingSecondaryText
+            font: Theme.font(12, Theme.regularWeight)
+            wrapMode: Text.Wrap
         }
     }
-    Rectangle {
-        objectName: "webdavSettingsDivider"
-        visible: row.divider && row.followsVisibleRow
-        anchors.left: parent.left
-        anchors.right: parent.right
-        anchors.top: parent.top
-        height: 1
-        color: Theme.floatingBorder
+    RowLayout {
+        id: actions
+        Layout.fillHeight: false
+        Layout.fillWidth: false
+        spacing: row.controlGap
     }
 }

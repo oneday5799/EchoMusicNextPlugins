@@ -1184,3 +1184,138 @@ test('deactivate 打断在途 enrichment 不复活持久缓存', async () => {
     // deactivate already ran inside the test body.
   }
 });
+
+// ── Host-style view semantics (歌曲列表页对齐) ─────────────────────────────
+
+const VIEW_XML = `<?xml version="1.0" encoding="utf-8"?>
+<d:multistatus xmlns:d="DAV:">
+ <d:response><d:href>/</d:href><d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>
+ <d:response><d:href>/s1.mp3</d:href><d:propstat><d:prop><d:displayname>a - 第二.mp3</d:displayname><d:resourcetype/><d:getcontentlength>10</d:getcontentlength></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>
+ <d:response><d:href>/s2.mp3</d:href><d:propstat><d:prop><d:displayname>b - 第一.mp3</d:displayname><d:resourcetype/><d:getcontentlength>20</d:getcontentlength></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>
+</d:multistatus>`;
+
+// s1.mp3 parses to artist "a" / title "第二"; s2.mp3 to artist "b" / title
+// "第一" — so the scan order (s1, s2) differs from the title-sorted view
+// (s2, s1) and from the artist-sorted view (s1, s2).
+async function setupFlatView() {
+  const env = await setup({
+    propfind: (path) => (path === '/' ? VIEW_XML : ''),
+  });
+  await env.commands.get('flat.load')({ libraryId: 'lib1', force: true });
+  await waitFor(() => env.published.some((entry) => entry.flatScan && entry.flatScan.done));
+  return env;
+}
+
+test('flat.page 支持宿主排序契约：默认标题升序，sort/sortDir 生效', async () => {
+  const env = await setupFlatView();
+  try {
+    const titles = (result) => result.songs.map((song) => song.title);
+    const defaults = await env.commands.get('flat.page')({
+      libraryId: 'lib1',
+      offset: 0,
+      limit: 10,
+    });
+    assert.deepEqual(titles(defaults), ['第一', '第二'], '默认按标题升序（与扫描序不同）');
+
+    const byArtist = await env.commands.get('flat.page')({
+      libraryId: 'lib1',
+      offset: 0,
+      limit: 10,
+      sort: 'artist',
+    });
+    assert.deepEqual(titles(byArtist), ['第二', '第一'], '按歌手升序');
+
+    const byArtistDesc = await env.commands.get('flat.page')({
+      libraryId: 'lib1',
+      offset: 0,
+      limit: 10,
+      sort: 'artist',
+      sortDir: 2,
+    });
+    assert.deepEqual(titles(byArtistDesc), ['第一', '第二'], '按歌手降序');
+
+    assert.equal(byArtist.total, 2);
+    assert.equal(byArtist.songs[0].album, '', '平铺行携带专辑字段');
+  } finally {
+    await env.deactivate();
+  }
+});
+
+test('flat.locate 与 play 使用同一排序视图', async () => {
+  const env = await setupFlatView();
+  try {
+    const s1 = makeStableSongId('lib1', '/s1.mp3');
+
+    // Default (title) view: s1 sorts second.
+    const locatedDefault = await env.commands.get('flat.locate')({
+      libraryId: 'lib1',
+      id: s1,
+    });
+    assert.equal(locatedDefault.index, 1);
+    assert.equal(locatedDefault.total, 2);
+
+    // Artist view: s1 sorts first.
+    const locatedArtist = await env.commands.get('flat.locate')({
+      libraryId: 'lib1',
+      id: s1,
+      sort: 'artist',
+    });
+    assert.equal(locatedArtist.index, 0);
+
+    // Playing index 0 of the artist view queues s1 first.
+    await env.commands.get('play')({
+      libraryId: 'lib1',
+      flat: true,
+      index: 0,
+      mode: 'now',
+      sort: 'artist',
+    });
+    assert.equal(env.replaces.length, 1);
+    assert.equal(env.replaces[0].tracks.length, 2);
+    assert.equal(env.replaces[0].index, 0);
+    assert.equal(env.replaces[0].tracks[0].id, s1, '视图排序决定队列顺序');
+  } finally {
+    await env.deactivate();
+  }
+});
+
+test('flat.covers 从持久 enrichment 批量返回封面与时长', async () => {
+  const cover = new Uint8Array(2000).fill(6);
+  const env = await setup({
+    propfind: (path) => (path === '/' ? VIEW_XML : ''),
+    get: (path) => {
+      if (path.endsWith('/s1.mp3')) {
+        return {
+          status: 206,
+          data: id3Tag([
+            ['TIT2', id3Text(1, '第二')],
+            ['TPE1', id3Text(1, 'a')],
+            ['TLEN', id3Text(0, '123000')],
+            ['APIC', apicPayload(cover)],
+          ]),
+        };
+      }
+      return { status: 404, data: new ArrayBuffer(0) };
+    },
+  });
+  try {
+    // Play s1 so its enrichment (cover + duration) lands in the KV store.
+    await env.commands.get('play')({ libraryId: 'lib1', paths: ['/s1.mp3'], mode: 'now' });
+    await tick();
+
+    const s1 = makeStableSongId('lib1', '/s1.mp3');
+    const s2 = makeStableSongId('lib1', '/s2.mp3');
+    const batch = await env.commands.get('flat.covers')({ ids: [s1, s2] });
+    assert.equal(typeof batch.covers[s1], 'string');
+    assert.equal(batch.covers[s1].startsWith('data:image/jpeg;base64,'), true, '封面来自持久记录');
+    assert.equal(batch.durations[s1], 123000, '时长来自持久记录');
+    assert.equal(batch.covers[s2], undefined, '无记录的歌曲不返回封面');
+    assert.equal(batch.truncated, false);
+
+    const unknown = await env.commands.get('flat.covers')({ ids: ['webdav-nope'] });
+    assert.deepEqual(Object.keys(unknown.covers), []);
+    assert.deepEqual(Object.keys(unknown.durations), []);
+  } finally {
+    await env.deactivate();
+  }
+});

@@ -8,6 +8,11 @@ import EchoMusic.Theme
 
 // Plugin settings, hosted by the shared settings dialog which already
 // scrolls: this column must stay a plain layout without nested scrolling.
+// Layout follows local-music and the host settings pages: icon + heading
+// above a muted card, rows inside the card separated by hairline dividers.
+// Library fields keep the draft/save pair (text fields need a save point);
+// the single-value source dropdown patches immediately like local-music's
+// completion mode, with an optimistic revert on failure.
 ColumnLayout {
     id: settingsRoot
     objectName: "webdavMusicSettings"
@@ -28,11 +33,12 @@ ColumnLayout {
     property var libraryIds: []
     /** Library id -> expanded, mirroring the legacy plugin's collapsible groups. */
     property var expandedLibraries: ({})
+    property string coverLyricSource: "embedded"
     /** Cached scan list count (flat.info of the active library), shown in
      * the cache-management section. */
     property string cachedCountLabel: ""
 
-    spacing: 14
+    spacing: 16
 
     function run(name, args, callback) {
         const operation = plugin.executeCommand(name, args || {});
@@ -52,7 +58,6 @@ ColumnLayout {
                     callback(operation.result);
             } else if (operation.state === 3) {
                 errorMessage = operation.errorMessage || "操作失败";
-                plugin.toast.danger(errorMessage);
             }
         };
         operation.completed.connect(handler);
@@ -92,6 +97,7 @@ ColumnLayout {
             };
             if (draft && draft.libraries)
                 draft.libraries = asArray(draft.libraries);
+            coverLyricSource = draft && draft.coverLyricSource === "kugou" ? "kugou" : "embedded";
             loaded = true;
             syncLibraryIds();
             refreshCacheInfo();
@@ -224,6 +230,20 @@ ColumnLayout {
         syncLibraryIds();
     }
 
+    /** Optimistic single-value patch (local-music's patchOnlineMode): the
+     * selection updates at once and reverts when the backend rejects it. */
+    function patchCoverLyricSource(value) {
+        errorMessage = "";
+        const previous = coverLyricSource;
+        coverLyricSource = value === "kugou" ? "kugou" : "embedded";
+        run("settings.patch", {
+            coverLyricSource: coverLyricSource
+        }, function (result) {
+            if (!result || result.ok !== true)
+                coverLyricSource = previous;
+        });
+    }
+
     function save() {
         errorMessage = "";
         if (!loaded || !draft) {
@@ -271,261 +291,216 @@ ColumnLayout {
 
     Component.onCompleted: loadDraft()
 
-    Rectangle {
-        Layout.fillWidth: true
-        radius: 16
-        color: Theme.floating.elevated
-        border.color: Theme.floatingBorder
-        implicitHeight: Math.max(80, overview.implicitHeight + 28)
-
-        RowLayout {
-            id: overview
-            anchors.fill: parent
-            anchors.margins: 14
-            spacing: 14
-
-            Rectangle {
-                Layout.preferredWidth: 52
-                Layout.preferredHeight: 52
-                radius: 16
-                color: "#66ccff"
-
-                EchoIcon {
-                    anchors.centerIn: parent
-                    name: "cloud"
-                    color: "#ffffff"
-                    width: 26
-                    height: 26
-                }
-            }
-
-            ColumnLayout {
-                Layout.fillWidth: true
-                spacing: 4
-
-                Label {
-                    text: "WebDAV 音乐"
-                    font: Theme.font(13, 700)
-                    color: Theme.floatingText
-                }
-                Label {
-                    Layout.fillWidth: true
-                    text: "连接 WebDAV 服务器，浏览、搜索并播放网盘音乐；歌词与封面来自音频内嵌标签或酷狗资料。"
-                    font: Theme.font(12, Theme.regularWeight)
-                    color: Theme.floatingSecondaryText
-                    wrapMode: Text.Wrap
-                }
-            }
-
-            EchoTag {
-                text: `${settingsRoot.libraryIds.length} 个库`
-                tone: EchoTag.Neutral
-            }
-        }
-    }
-
     SettingsSection {
         Layout.fillWidth: true
         heading: "音乐库"
-        subtitle: "支持添加多个 WebDAV 服务器，当前库决定侧边栏页面展示的内容"
+        glyph: "folder-open"
 
-        trailing: Component {
-            EchoButton {
-                text: "添加音乐库"
-                glyph: "plus"
-                accent: false
-                onClicked: settingsRoot.addLibrary()
+        Repeater {
+            model: settingsRoot.libraryIds.map(function (id) {
+                return id;
+            })
+
+            delegate: ColumnLayout {
+                id: libraryGroup
+                required property int index
+                required property string modelData
+                Layout.fillWidth: true
+                spacing: 0
+
+                // Re-read from the live draft on every change so field
+                // edits flow into headers and editors without the
+                // delegate itself being recreated.
+                readonly property var lib: settingsRoot.libraryById(modelData) || ({})
+                readonly property bool isActive: settingsRoot.draft && settingsRoot.draft.activeLibraryId === modelData
+                readonly property bool expanded: !!settingsRoot.expandedLibraries[modelData]
+
+                // Hairline between consecutive library rows; the margins put
+                // it in the middle of the card column's 20px row rhythm.
+                EchoDivider {
+                    Layout.fillWidth: true
+                    Layout.bottomMargin: 20
+                    visible: libraryGroup.index > 0
+                    lineColor: Theme.withAlpha(Theme.floatingText, 0.12)
+                }
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    Layout.minimumWidth: 0
+                    spacing: 12
+
+                    EchoIcon {
+                        name: libraryGroup.lib.serverUrl && libraryGroup.lib.serverUrl.length > 0 ? "cloud" : "alert-circle"
+                        color: libraryGroup.lib.serverUrl && libraryGroup.lib.serverUrl.length > 0 ? Theme.accent : Theme.colors.danger
+                        Layout.preferredWidth: 20
+                        Layout.preferredHeight: 20
+                    }
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        Layout.minimumWidth: 0
+                        spacing: 4
+
+                        Label {
+                            Layout.fillWidth: true
+                            text: libraryGroup.lib.name && libraryGroup.lib.name.length > 0 ? libraryGroup.lib.name : `库 ${libraryGroup.index + 1}`
+                            textFormat: Text.PlainText
+                            font: Theme.font(13, Theme.semiboldWeight)
+                            color: Theme.floatingText
+                            elide: Text.ElideRight
+                        }
+                        Label {
+                            Layout.fillWidth: true
+                            text: libraryGroup.lib.serverUrl && libraryGroup.lib.serverUrl.length > 0 ? settingsRoot.hostOf(libraryGroup.lib.serverUrl) : "尚未配置服务器地址"
+                            textFormat: Text.PlainText
+                            font: Theme.font(12, Theme.regularWeight)
+                            color: Theme.floatingSecondaryText
+                            elide: Text.ElideMiddle
+                        }
+                    }
+                    EchoTag {
+                        visible: libraryGroup.isActive
+                        text: "当前"
+                        tone: EchoTag.Accent
+                    }
+                    EchoSoftButton {
+                        visible: !libraryGroup.isActive && libraryGroup.lib.serverUrl && libraryGroup.lib.serverUrl.length > 0
+                        text: "设为当前"
+                        size: EchoControlSize.Small
+                        colors: Theme.floating
+                        foreground: Theme.floating.text
+                        onClicked: settingsRoot.updateDraft({
+                            activeLibraryId: libraryGroup.modelData
+                        })
+                    }
+                    EchoIconButton {
+                        glyph: "chevron-down"
+                        tooltipText: libraryGroup.expanded ? "收起" : "展开"
+                        rotation: libraryGroup.expanded ? 0 : -90
+                        Behavior on rotation {
+                            NumberAnimation {
+                                duration: 150
+                                easing.type: Easing.OutCubic
+                            }
+                        }
+                        onClicked: settingsRoot.toggleLibraryExpanded(libraryGroup.modelData)
+                    }
+                    EchoIconButton {
+                        glyph: "trash"
+                        tooltipText: "删除此库"
+                        onClicked: settingsRoot.removeLibrary(libraryGroup.modelData)
+                    }
+                }
+
+                SettingRow {
+                    Layout.fillWidth: true
+                    Layout.topMargin: 12
+                    visible: libraryGroup.expanded
+                    heading: "服务器地址"
+                    description: "以 https:// 或 http:// 开头，例如 https://dav.example.com"
+
+                    EchoTextField {
+                        Layout.preferredWidth: 220
+                        text: libraryGroup.lib.serverUrl || ""
+                        placeholderText: "https://dav.example.com"
+                        onTextEdited: settingsRoot.updateLibrary(libraryGroup.modelData, "serverUrl", text)
+                    }
+                }
+                SettingRow {
+                    Layout.fillWidth: true
+                    visible: libraryGroup.expanded
+                    heading: "显示名称"
+                    description: "留空时显示服务器地址"
+
+                    EchoTextField {
+                        Layout.preferredWidth: 160
+                        text: libraryGroup.lib.name || ""
+                        placeholderText: "显示名称"
+                        onTextEdited: settingsRoot.updateLibrary(libraryGroup.modelData, "name", text)
+                    }
+                }
+                SettingRow {
+                    Layout.fillWidth: true
+                    visible: libraryGroup.expanded
+                    heading: "用户名"
+                    description: "留空则按匿名方式访问"
+
+                    EchoTextField {
+                        Layout.preferredWidth: 160
+                        text: libraryGroup.lib.username || ""
+                        placeholderText: "可留空"
+                        onTextEdited: settingsRoot.updateLibrary(libraryGroup.modelData, "username", text)
+                    }
+                }
+                SettingRow {
+                    Layout.fillWidth: true
+                    visible: libraryGroup.expanded
+                    heading: "密码"
+                    description: "仅保存在本机插件存储中"
+
+                    EchoTextField {
+                        Layout.preferredWidth: 160
+                        echoMode: TextInput.Password
+                        text: libraryGroup.lib.password || ""
+                        placeholderText: "可留空"
+                        onTextEdited: settingsRoot.updateLibrary(libraryGroup.modelData, "password", text)
+                    }
+                }
+                SettingRow {
+                    Layout.fillWidth: true
+                    visible: libraryGroup.expanded
+                    heading: "根目录"
+                    description: "从服务器的哪个目录开始浏览"
+
+                    EchoTextField {
+                        Layout.preferredWidth: 160
+                        text: libraryGroup.lib.rootPath || "/"
+                        placeholderText: "/"
+                        onTextEdited: settingsRoot.updateLibrary(libraryGroup.modelData, "rootPath", text)
+                    }
+                }
+                SettingRow {
+                    Layout.fillWidth: true
+                    visible: libraryGroup.expanded
+                    heading: "默认平铺视图"
+                    description: "开启后进入页面默认展示整库歌曲列表（歌曲选项卡），关闭则从目录浏览开始"
+
+                    EchoSwitch {
+                        checked: libraryGroup.lib.flatView === true
+                        Accessible.name: "默认平铺视图"
+                        onToggled: settingsRoot.updateLibrary(libraryGroup.modelData, "flatView", checked)
+                    }
+                }
             }
         }
 
-        body: Component {
-            ColumnLayout {
-                spacing: 0
+        Label {
+            Layout.fillWidth: true
+            visible: settingsRoot.libraryIds.length === 0
+            text: "尚未添加 WebDAV 库。"
+            textFormat: Text.PlainText
+            font: Theme.font(12, Theme.regularWeight)
+            color: Theme.floatingSecondaryText
+            wrapMode: Text.Wrap
+        }
 
-                Repeater {
-                    model: settingsRoot.libraryIds
+        EchoDivider {
+            Layout.fillWidth: true
+            visible: settingsRoot.libraryIds.length > 0
+            lineColor: Theme.withAlpha(Theme.floatingText, 0.12)
+        }
 
-                    delegate: ColumnLayout {
-                        id: libraryGroup
-                        required property int index
-                        required property string modelData
-                        Layout.fillWidth: true
-                        spacing: 0
+        SettingRow {
+            Layout.fillWidth: true
+            heading: "添加音乐库"
+            description: "支持添加多个 WebDAV 服务器；改动点击下方保存后生效"
 
-                        // Re-read from the live draft on every change so field
-                        // edits flow into headers and editors without the
-                        // delegate itself being recreated.
-                        readonly property var lib: settingsRoot.libraryById(modelData) || ({})
-                        readonly property bool isActive: settingsRoot.draft && settingsRoot.draft.activeLibraryId === modelData
-                        readonly property bool expanded: !!settingsRoot.expandedLibraries[modelData]
-
-                        Item {
-                            Layout.fillWidth: true
-                            implicitHeight: 48
-
-                            Rectangle {
-                                anchors.left: parent.left
-                                anchors.right: parent.right
-                                anchors.top: parent.top
-                                height: 1
-                                color: Theme.floatingBorder
-                                visible: libraryGroup.index > 0
-                            }
-                            Rectangle {
-                                anchors.fill: parent
-                                color: Theme.rowHover
-                                visible: headerArea.containsMouse
-                            }
-                            MouseArea {
-                                id: headerArea
-                                anchors.fill: parent
-                                hoverEnabled: true
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: settingsRoot.toggleLibraryExpanded(libraryGroup.modelData)
-                            }
-                            RowLayout {
-                                anchors.fill: parent
-                                anchors.leftMargin: 18
-                                anchors.rightMargin: 18
-                                spacing: 8
-
-                                EchoIcon {
-                                    name: "chevron-down"
-                                    color: Theme.iconSecondary
-                                    Layout.preferredWidth: 16
-                                    Layout.preferredHeight: 16
-                                    rotation: libraryGroup.expanded ? 0 : -90
-                                    Behavior on rotation {
-                                        NumberAnimation {
-                                            duration: 150
-                                            easing.type: Easing.OutCubic
-                                        }
-                                    }
-                                }
-                                Label {
-                                    Layout.fillWidth: true
-                                    text: libraryGroup.lib.name && libraryGroup.lib.name.length > 0 ? libraryGroup.lib.name : `库 ${libraryGroup.index + 1}`
-                                    font: Theme.font(13, 650)
-                                    color: Theme.floatingText
-                                    elide: Text.ElideRight
-                                }
-                                Label {
-                                    readonly property string host: settingsRoot.hostOf(libraryGroup.lib.serverUrl)
-                                    visible: host.length > 0
-                                    text: host
-                                    font: Theme.font(12, Theme.regularWeight)
-                                    color: Theme.floatingSecondaryText
-                                    elide: Text.ElideMiddle
-                                }
-                                EchoTag {
-                                    visible: libraryGroup.isActive
-                                    text: "当前"
-                                    tone: EchoTag.Accent
-                                }
-                                EchoButton {
-                                    text: "设为当前"
-                                    accent: false
-                                    size: EchoControlSize.Small
-                                    visible: !libraryGroup.isActive
-                                    onClicked: settingsRoot.updateDraft({
-                                        activeLibraryId: libraryGroup.modelData
-                                    })
-                                }
-                                EchoIconButton {
-                                    glyph: "trash"
-                                    tooltipText: "删除此库"
-                                    onClicked: settingsRoot.removeLibrary(libraryGroup.modelData)
-                                }
-                            }
-                        }
-                        SettingRow {
-                            Layout.fillWidth: true
-                            visible: libraryGroup.expanded
-                            title: "服务器地址"
-                            hint: "以 https:// 或 http:// 开头，例如 https://dav.example.com"
-
-                            editor: Component {
-                                EchoTextField {
-                                    text: libraryGroup.lib.serverUrl || ""
-                                    placeholderText: "https://dav.example.com"
-                                    onTextEdited: settingsRoot.updateLibrary(libraryGroup.modelData, "serverUrl", text)
-                                }
-                            }
-                        }
-                        SettingRow {
-                            Layout.fillWidth: true
-                            visible: libraryGroup.expanded
-                            title: "名称"
-                            hint: "留空时显示服务器地址"
-
-                            editor: Component {
-                                EchoTextField {
-                                    text: libraryGroup.lib.name || ""
-                                    placeholderText: "显示名称"
-                                    onTextEdited: settingsRoot.updateLibrary(libraryGroup.modelData, "name", text)
-                                }
-                            }
-                        }
-                        SettingRow {
-                            Layout.fillWidth: true
-                            visible: libraryGroup.expanded
-                            title: "用户名"
-                            hint: "留空则按匿名方式访问"
-
-                            editor: Component {
-                                EchoTextField {
-                                    text: libraryGroup.lib.username || ""
-                                    placeholderText: "可留空"
-                                    onTextEdited: settingsRoot.updateLibrary(libraryGroup.modelData, "username", text)
-                                }
-                            }
-                        }
-                        SettingRow {
-                            Layout.fillWidth: true
-                            visible: libraryGroup.expanded
-                            title: "密码"
-                            hint: "仅保存在本机插件存储中"
-
-                            editor: Component {
-                                EchoTextField {
-                                    echoMode: TextInput.Password
-                                    text: libraryGroup.lib.password || ""
-                                    placeholderText: "可留空"
-                                    onTextEdited: settingsRoot.updateLibrary(libraryGroup.modelData, "password", text)
-                                }
-                            }
-                        }
-                        SettingRow {
-                            Layout.fillWidth: true
-                            visible: libraryGroup.expanded
-                            title: "根目录"
-                            hint: "从服务器的哪个目录开始浏览"
-
-                            editor: Component {
-                                EchoTextField {
-                                    text: libraryGroup.lib.rootPath || "/"
-                                    placeholderText: "/"
-                                    onTextEdited: settingsRoot.updateLibrary(libraryGroup.modelData, "rootPath", text)
-                                }
-                            }
-                        }
-                        SettingRow {
-                            Layout.fillWidth: true
-                            visible: libraryGroup.expanded
-                            title: "平铺视图"
-                            hint: "递归扫描全部子目录，生成可搜索的整库列表"
-
-                            switchRow: true
-                            editor: Component {
-                                EchoSwitch {
-                                    checked: libraryGroup.lib.flatView === true
-                                    Accessible.name: "平铺视图"
-                                    onToggled: settingsRoot.updateLibrary(libraryGroup.modelData, "flatView", checked)
-                                }
-                            }
-                        }
-                    }
-                }
+            EchoSoftButton {
+                text: "添加"
+                glyph: "plus"
+                glyphSize: 12
+                colors: Theme.floating
+                foreground: Theme.floating.text
+                onClicked: settingsRoot.addLibrary()
             }
         }
     }
@@ -533,26 +508,29 @@ ColumnLayout {
     SettingsSection {
         Layout.fillWidth: true
         heading: "歌词与封面"
-        subtitle: "内嵌标签读取音频文件自带的封面与歌词；酷狗资料在线匹配封面、专辑与歌词"
+        glyph: "tags"
 
-        trailing: Component {
+        SettingRow {
+            Layout.fillWidth: true
+            heading: "资料来源"
+            description: "内嵌标签优先时在线资料只补缺失字段；酷狗资料优先时在线匹配的封面、专辑与歌手覆盖内嵌标签"
+
+            // Same dropdown pattern as the host settings' 深浅色模式 row:
+            // an EchoSelect at 144px on the row's trailing slot.
             EchoSelect {
                 colors: Theme.floating
-                options: [
-                    {
+                Layout.preferredWidth: 144
+                options: [{
                         value: "embedded",
                         label: "内嵌标签优先"
-                    },
-                    {
+                    }, {
                         value: "kugou",
                         label: "酷狗资料优先"
-                    }
-                ]
-                value: settingsRoot.draft ? settingsRoot.draft.coverLyricSource : "embedded"
+                    }]
+                value: settingsRoot.coverLyricSource
+                Accessible.name: "歌词与封面资料来源"
                 onValueEdited: function (nextValue) {
-                    settingsRoot.updateDraft({
-                        coverLyricSource: nextValue === "kugou" ? "kugou" : "embedded"
-                    });
+                    settingsRoot.patchCoverLyricSource(nextValue === "kugou" ? "kugou" : "embedded");
                 }
             }
         }
@@ -561,36 +539,29 @@ ColumnLayout {
     SettingsSection {
         Layout.fillWidth: true
         heading: "缓存"
-        subtitle: "平铺列表、播放时读取的歌曲资料与在线歌词都会缓存到本机，加速下次访问"
+        glyph: "database"
 
-        body: Component {
-            ColumnLayout {
-                spacing: 12
+        Label {
+            Layout.fillWidth: true
+            visible: settingsRoot.cachedCountLabel.length > 0
+            text: settingsRoot.cachedCountLabel
+            textFormat: Text.PlainText
+            font: Theme.font(12, Theme.regularWeight)
+            color: Theme.floatingSecondaryText
+            wrapMode: Text.Wrap
+        }
 
-                Label {
-                    Layout.fillWidth: true
-                    visible: settingsRoot.cachedCountLabel.length > 0
-                    text: settingsRoot.cachedCountLabel
-                    font: Theme.font(12, Theme.regularWeight)
-                    color: Theme.floatingSecondaryText
-                    wrapMode: Text.Wrap
-                }
+        SettingRow {
+            Layout.fillWidth: true
+            heading: "清除插件缓存"
+            description: "移除平铺扫描列表、播放时持久化的歌曲资料与在线歌词；库配置与设置不受影响"
 
-                SettingRow {
-                    Layout.fillWidth: true
-                    title: "清除插件缓存"
-                    hint: "移除平铺扫描列表、播放时持久化的歌曲资料与在线歌词；库配置不受影响"
-
-                    switchRow: false
-                    editor: Component {
-                        EchoButton {
-                            text: "立即清除"
-                            accent: false
-                            enabled: !settingsRoot.saving
-                            onClicked: settingsRoot.confirmClearCache()
-                        }
-                    }
-                }
+            EchoSoftButton {
+                text: "立即清除"
+                danger: true
+                enabled: !settingsRoot.saving
+                colors: Theme.floating
+                onClicked: settingsRoot.confirmClearCache()
             }
         }
     }
@@ -601,7 +572,8 @@ ColumnLayout {
 
         Label {
             Layout.fillWidth: true
-            text: settingsRoot.saving ? "正在保存…" : "修改库列表与资料来源后，点击保存才会生效。"
+            text: settingsRoot.saving ? "正在保存…" : "修改库列表后点击保存生效；资料来源改动即时保存。"
+            textFormat: Text.PlainText
             font: Theme.font(12, Theme.regularWeight)
             color: Theme.floatingSecondaryText
             wrapMode: Text.Wrap
@@ -629,7 +601,8 @@ ColumnLayout {
         Layout.fillWidth: true
         visible: settingsRoot.errorMessage.length > 0
         text: settingsRoot.errorMessage
-        font: Theme.font(12, Theme.regularWeight)
+        textFormat: Text.PlainText
+        font: Theme.font(11, Theme.regularWeight)
         color: Theme.colors.danger
         wrapMode: Text.Wrap
     }

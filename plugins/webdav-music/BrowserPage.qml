@@ -1,14 +1,21 @@
 pragma ComponentBehavior: Bound
 import QtQuick
+import QtQml.Models
 import QtQuick.Controls.Basic
 import QtQuick.Layouts
 import EchoMusic.Shell
 import EchoMusic.PluginSdk
 import EchoMusic.Controls
 import EchoMusic.Theme
+import EchoMusic.Music
 
-// WebDAV library browser: directory tree or flat scan list, with play /
-// queue actions, batch selection and per-library settings hand-off.
+// WebDAV library page composed from the same host detail-page structure as
+// local-music: EchoPageScrollContainer viewport with a flow header and a
+// sticky toolbar (EchoDetailTabs + SongListHeader), SongRow rows over the
+// shared SongListGeometry, skeleton loading rows, load-more on scroll end
+// and the shared EchoEnter page fade. The 目录 tab drives the directory
+// browse: a folder/file list styled after the same rows, with the header's
+// back button playing the breadcrumb (album drill-in pattern).
 Item {
     id: root
 
@@ -20,175 +27,106 @@ Item {
     property string activeLibraryId: ""
     property string coverLyricSource: "embedded"
     property var currentLibrary: null
-    property bool flatMode: false
+    /** 0 = 歌曲 (flat scan list), 1 = 目录 (directory browse). */
+    property int viewTab: 0
     property string keyword: ""
+    // Host sort-header contract: Index/Title/Artist/Album/Duration = 1..5,
+    // direction 1 = ascending, 2 = descending.
+    property int sortField: 2
+    property int sortDirection: 1
+    readonly property string sortKey: ({
+            1: "name",
+            2: "title",
+            3: "artist",
+            4: "album",
+            5: "duration"
+        })[sortField] || "title"
 
+    property bool flatReady: false
+    /** Library-wide flat list count from flat.load (unfiltered). */
+    property int flatCount: 0
+    property bool flatTruncated: false
+
+    // Cumulative rows: paging appends at the list end like the shared
+    // catalogs, driven by atYEnd instead of page buttons.
+    property var pageRows: []
+    property int songTotal: 0
+    property bool pageLoading: false
+    property bool loadingMore: false
+    readonly property bool hasMore: flatReady && viewTab === 0 && pageRows.length < songTotal
+    // Monotonic request epochs: only the newest view request may land.
+    property int pageEpoch: 0
+
+    // Directory browse state (tab 1).
     property var browse: ({
         loading: false,
         error: "",
-        path: "/",
+        path: "",
         root: "/",
         dirs: [],
-        files: [],
-        cover: ""
+        files: []
     })
-    property bool flatReady: false
-    property bool flatLoading: false
-    property int flatTotal: 0
-    property var flatSongs: []
-    property int flatOffset: 0
-    readonly property int flatPageSize: 100
+    // Guards against a stale browse response: rapid navigation fires two
+    // browse.load requests and the slower (older) reply must not overwrite
+    // the newer directory's rows (legacy v1.4.5 fix).
+    property int browseToken: 0
 
     property var scanState: ({})
-    // Bool bindings on Qt 6.12 lose their binding (and freeze at the old
-    // value) the moment the expression evaluates to undefined, so every
-    // consumer reads these normalized flags instead of touching scanState
-    // fields through `&&` chains.
     readonly property bool scanRunning: !!root.scanState && root.scanState.running === true
     readonly property bool scanDone: !!root.scanState && root.scanState.done === true
     readonly property bool scanAborted: !!root.scanState && root.scanState.aborted === true
     readonly property string scanError: root.scanState && typeof root.scanState.error === "string" ? root.scanState.error : ""
     readonly property string scanLabel: root.scanState && typeof root.scanState.label === "string" ? root.scanState.label : ""
-    readonly property int scanCount: root.scanState && typeof root.scanState.count === "number" ? root.scanState.count : 0
-    readonly property bool scanTruncated: !!root.scanState && root.scanState.truncated === true
-    readonly property bool flatTruncated: scanTruncated || flatTruncatedFlag
-    property bool flatTruncatedFlag: false
-    property string sortKey: "name"
-    property bool selectionMode: false
-    property var selectedPaths: ({})
-    property int busy: 0
-    property string errorMessage: ""
-    // Guards against a stale browse response: rapid navigation fires two
-    // browse.load requests and the slower (older) reply must not overwrite
-    // the newer directory's rows (legacy v1.4.5 fix).
-    property int browseToken: 0
-    // Same token contract for flat paging: rapid page flips / keyword edits
-    // must not let an older flat.page reply overwrite the newer page.
-    property int flatPageToken: 0
-    // Pending row to scroll to after the locate page arrives.
-    property int pendingLocate: -1
-    property bool locateLoading: false
-    // State changes that arrived while the page was backgrounded are picked
-    // up on the next activation instead of reloading the hidden page.
-    property bool pendingLibraryRefresh: false
 
-    readonly property bool working: busy > 0
+    property string errorMessage: ""
+    readonly property int contentInset: 24
+
+    // Host queue ingestion rewrites track ids to "plugin:<plugin-id>:<id>"
+    // (EchoPluginPlaylist::parse) and the player snapshot hands that
+    // rewritten id back; rows carry the bare song id, so strip the
+    // namespace before comparing anywhere (row highlight, locate).
+    function songIdOf(trackId) {
+        return String(trackId || "").replace(/^plugin:[^:]+:/, "");
+    }
+
     readonly property string currentTrackId: {
         const snapshot = plugin.player.snapshot;
         return snapshot && snapshot.hasTrack ? songIdOf(snapshot.track.id) : "";
     }
-    // Host queue ingestion rewrites track ids to "plugin:<plugin-id>:<id>"
-    // (EchoPluginPlaylist::parse) and the player snapshot hands that
-    // rewritten id back; rows carry the bare song id, so strip the
-    // namespace before any comparison (row highlight, locate).
-    function songIdOf(trackId) {
-        return String(trackId || "").replace(/^plugin:[^:]+:/, "");
-    }
-    readonly property var pathSegments: {
-        const path = browse.path || "/";
-        const prefix = browse.root || "/";
-        let rest = path;
-        if (prefix.length > 1 && rest.indexOf(prefix) === 0)
-            rest = rest.slice(prefix.length) || "/";
-        return rest.split("/").filter(function (part) {
-            return part.length > 0;
-        });
-    }
-    readonly property var displayRows: {
-        const filter = keyword.trim().toLowerCase();
-        let rows = [];
-        if (flatMode) {
-            rows = flatSongs.map(function (song) {
-                return {
-                    kind: "file",
-                    name: song.title,
-                    path: song.path,
-                    title: song.title,
-                    artist: song.artist,
-                    size: song.size,
-                    ext: song.ext,
-                    quality: song.quality
-                };
-            });
-        } else {
-            for (let i = 0; i < browse.dirs.length; i++)
-                rows.push({
-                    kind: "dir",
-                    name: browse.dirs[i].name,
-                    path: browse.dirs[i].path,
-                    title: browse.dirs[i].name,
-                    artist: "",
-                    size: 0,
-                    ext: "",
-                    quality: ""
-                });
-            for (let j = 0; j < browse.files.length; j++) {
-                const file = browse.files[j];
-                rows.push({
-                    kind: "file",
-                    name: file.title,
-                    path: file.path,
-                    title: file.title,
-                    artist: file.artist,
-                    size: file.size,
-                    ext: file.ext,
-                    quality: file.quality
-                });
-            }
+    readonly property string headerTitle: {
+        if (root.viewTab === 1 && root.browse.path.length > 0 && root.browse.path !== (root.browse.root || "/")) {
+            const cut = root.browse.path.lastIndexOf("/");
+            const name = cut >= 0 ? root.browse.path.slice(cut + 1) : root.browse.path;
+            if (name.length > 0)
+                return name;
         }
-        if (filter.length > 0)
-            rows = rows.filter(function (row) {
-                return row.title.toLowerCase().indexOf(filter) >= 0 || (row.artist || "").toLowerCase().indexOf(filter) >= 0;
-            });
-        if (sortKey !== "name")
-            rows = rows.slice().sort(function (a, b) {
-                if (a.kind !== b.kind)
-                    return a.kind === "dir" ? -1 : 1;
-                if (sortKey === "size")
-                    return (b.size || 0) - (a.size || 0);
-                return compareText(a.title, b.title);
-            });
-        return rows;
+        return "WebDAV 音乐";
     }
-    readonly property int selectedCount: Object.keys(selectedPaths).length
-    readonly property int flatPageCount: Math.max(1, Math.ceil(flatTotal / flatPageSize))
-    readonly property int flatPageNumber: Math.floor(flatOffset / flatPageSize) + 1
-
-    function compareText(a, b) {
-        const left = (a || "").toLowerCase();
-        const right = (b || "").toLowerCase();
-        if (left < right)
-            return -1;
-        return left > right ? 1 : 0;
+    readonly property string songCountLabel: {
+        const base = `${root.flatCount} 首歌曲`;
+        return root.flatTruncated ? `${base}（已达上限，结果不完整）` : base;
     }
 
-    function formatBytes(size) {
-        if (!isFinite(size) || size < 0)
+    function formatDuration(ms) {
+        if (!isFinite(ms) || ms <= 0)
             return "";
-        const units = ["B", "KB", "MB", "GB", "TB"];
-        let value = size;
-        let unit = 0;
-        while (value >= 1024 && unit < units.length - 1) {
-            value /= 1024;
-            unit += 1;
-        }
-        const text = unit === 0 ? String(Math.round(value)) : value >= 100 ? String(Math.round(value)) : value.toFixed(1);
-        return `${text} ${units[unit]}`;
+        const total = Math.round(ms / 1000);
+        const minutes = Math.floor(total / 60);
+        const seconds = total % 60;
+        return `${minutes}:${seconds < 10 ? "0" : ""}${seconds}`;
     }
 
     function run(name, args, callback) {
         const operation = plugin.executeCommand(name, args || {});
         if (!operation) {
             // A null operation (usually deactivation) must still settle the
-            // request, same contract as Settings' run().
+            // request: every caller sets a loading flag before this call.
             if (callback)
                 callback(null);
             return;
         }
-        busy += 1;
         const handler = function () {
             operation.completed.disconnect(handler);
-            busy -= 1;
             if (operation.state === 2) {
                 if (callback)
                     callback(operation.result);
@@ -196,8 +134,8 @@ Item {
                 const message = operation.errorMessage || "操作失败";
                 errorMessage = message;
                 plugin.toast.danger(message);
-                // A failed command must settle the caller too, or loading
-                // flags like flatLoading stay stranded forever.
+                // Failure still settles the request so loading states and
+                // epoch guards never strand a skeleton view.
                 if (callback)
                     callback(null);
             }
@@ -254,6 +192,16 @@ Item {
         return null;
     }
 
+    /** The sorted/filtered view query shared by pages, locate and play: the
+     * backend applies the same ordering so indexes line up everywhere. */
+    function viewArgs() {
+        return {
+            keyword: keyword.trim(),
+            sort: sortKey,
+            sortDir: sortDirection
+        };
+    }
+
     function refreshSettings(reload) {
         run("settings.get", {}, function (result) {
             const nextLibraries = result ? asArray(result.libraries) : [];
@@ -264,38 +212,360 @@ Item {
                 nextId = result && typeof result.activeLibraryId === "string" ? result.activeLibraryId : "";
             activeLibraryId = nextId;
             currentLibrary = libraryById(nextId);
-            flatMode = currentLibrary ? currentLibrary.flatView === true : false;
             if (reload)
                 reloadCurrent();
         });
     }
 
     function reloadCurrent() {
-        selectionMode = false;
-        selectedPaths = ({});
-        if (flatMode) {
-            flatReload();
+        flatReady = false;
+        flatCount = 0;
+        flatTruncated = false;
+        if (viewTab === 0) {
+            ensureFlatAndLoad();
         } else {
-            browseLoad(browse.path && browse.path.length > 0 ? browse.path : (currentLibrary && currentLibrary.rootPath ? currentLibrary.rootPath : "/"));
+            browseLoad("");
         }
     }
 
-    function browseLoad(path) {
+    /** Loads (or starts) the flat scan for the active library, then pages
+     * the list. Mirrors local-music's reloadLibrary + libraryReady gate. */
+    function ensureFlatAndLoad() {
         if (!currentLibrary)
             return;
+        run("flat.load", {
+            libraryId: activeLibraryId
+        }, function (result) {
+            if (!result)
+                return;
+            if (result.ready) {
+                flatReady = true;
+                flatCount = typeof result.count === "number" ? result.count : 0;
+                flatTruncated = result.truncated === true;
+                resetView();
+            } else if (result.started) {
+                // The scan runs in the task center; the finished publish
+                // reloads this view through onStateChanged.
+                pageLoading = false;
+            } else if (result.busy) {
+                plugin.toast.info(result.message || "已有扫描任务正在进行");
+            } else {
+                errorMessage = result.message || "无法开始扫描";
+            }
+        });
+    }
+
+    function resetView() {
+        pageEpoch += 1;
+        clearSongRows();
+        pageLoading = false;
+        loadingMore = false;
+        if (viewTab === 0) {
+            if (!flatReady)
+                return;
+            pageLoad();
+        } else {
+            browseLoad("");
+        }
+    }
+
+    function rowModel(row) {
+        return {
+            kind: "file",
+            path: row.path,
+            title: row.title || row.path,
+            artistText: row.artist || "",
+            albumText: row.album || "",
+            coverUrl: "",
+            durationText: "",
+            durationMs: 0,
+            extraText: "",
+            resourceId: row.id,
+            // Host EchoArtistLinks reads `modelData.id.length` per delegate; an
+            // entry without `id` throws on every re-evaluation. WebDAV songs
+            // have no domain id — an empty id keeps the button honestly
+            // disabled without the throw.
+            artistLinks: row.artist ? [{
+                    name: row.artist,
+                    id: ""
+                }] : [],
+            albumId: "",
+            original: false,
+            privilegeTags: [],
+            qualityLabel: row.quality === "flac" ? "无损" : ""
+        };
+    }
+
+    /** Push rows into the song list: the JS array IS the display model, and
+     * the reassignment it takes on append is a model reset — so preserve the
+     * scroll position around it. forceLayout flushes the reset relayout
+     * before the restore. */
+    function appendSongRows(rows) {
+        if (rows.length === 0)
+            return;
+        const y = songList.contentY;
+        for (let i = 0; i < rows.length; i++)
+            songIndexById[rows[i].resourceId] = pageRows.length + i;
+        pageRows = pageRows.concat(rows);
+        songList.forceLayout();
+        songList.contentY = y;
+    }
+
+    function clearSongRows() {
+        pageRows = [];
+        songIndexById = ({});
+        // The miss cache must not outlive the rows it describes: a library
+        // rebuild (rescan, settings change) can produce covers for songs
+        // whose earlier lookup failed transiently.
+        coverRequests = ({});
+        coverMisses = ({});
+    }
+
+    // ── Cover delivery for song rows ───────────────────────────────────────
+    //
+    // Delegates request their own cover as they enter the view and the
+    // requests batch into small flat.covers calls. Covers come from the
+    // persisted enrichment records, so a batch is a few KV reads — never a
+    // network request. The reply also carries known durations.
+
+    property var songIndexById: ({})
+    property var coverRequests: ({})
+    // ids already shipped in a batch that has not landed yet: a delegate
+    // entering the view must not stack a duplicate request behind it.
+    property var coverInFlightIds: ({})
+    property var coverMisses: ({})
+    property bool coversInFlight: false
+    readonly property int coverBatchSize: 16
+
+    Timer {
+        id: coverBatchTimer
+        interval: 60
+        onTriggered: root.requestCoverBatch()
+    }
+
+    function applyCovers(result, requestedIds) {
+        const covers = result && result.covers ? result.covers : {};
+        const durations = result && result.durations ? result.durations : {};
+        const truncated = !!(result && result.truncated);
+        for (let i = 0; i < requestedIds.length; i++) {
+            const id = requestedIds[i];
+            if (covers[id])
+                continue;
+            if (truncated) {
+                // The reply hit its payload cap; retry this id in a later
+                // batch instead of writing it off.
+                coverRequests[id] = true;
+            } else {
+                // No entry exists for this song; delegates stop re-requesting.
+                coverMisses[id] = true;
+            }
+        }
+        // In-place row update plus a poke at the live delegate: the model
+        // array is never reassigned here, so no reset can fire mid-scroll.
+        // Both writes are diffed: a row can already hold the URL from an
+        // earlier batch while its delegate sat in the reuse pool.
+        const ids = Object.keys(covers);
+        for (let c = 0; c < ids.length; c++) {
+            const id = ids[c];
+            const url = covers[id];
+            const index = songIndexById[id];
+            if (!url || index === undefined || !pageRows[index])
+                continue;
+            if (pageRows[index].coverUrl !== url)
+                pageRows[index].coverUrl = url;
+            const item = songList.itemAtIndex(index);
+            if (item && !item.pooled && item.coverUrl !== url)
+                item.coverUrl = url;
+        }
+        const durationIds = Object.keys(durations);
+        for (let d = 0; d < durationIds.length; d++) {
+            const durationId = durationIds[d];
+            const ms = durations[durationId];
+            const durationIndex = songIndexById[durationId];
+            if (typeof ms !== "number" || ms <= 0 || durationIndex === undefined || !pageRows[durationIndex])
+                continue;
+            const text = formatDuration(ms);
+            if (pageRows[durationIndex].durationMs !== ms) {
+                pageRows[durationIndex].durationMs = ms;
+                pageRows[durationIndex].durationText = text;
+            }
+            const durationItem = songList.itemAtIndex(durationIndex);
+            if (durationItem && !durationItem.pooled && durationItem.durationText !== text) {
+                durationItem.durationMs = ms;
+                durationItem.durationText = text;
+            }
+        }
+        if (Object.keys(coverRequests).length > 0 && !coverBatchTimer.running)
+            coverBatchTimer.restart();
+    }
+
+    function scheduleRowCover(id, currentUrl) {
+        if (!id || id.length === 0 || currentUrl.length > 0)
+            return;
+        if (coverMisses[id] || coverRequests[id] || coverInFlightIds[id])
+            return;
+        coverRequests[id] = true;
+        if (!coverBatchTimer.running)
+            coverBatchTimer.restart();
+    }
+
+    /** The authoritative cover for a song id, straight off the page rows:
+     * a delegate re-derives its coverUrl from this on reuse instead of
+     * keeping whatever the previous row left imperatively poked. */
+    function rowCoverFor(id) {
+        const index = songIndexById[id];
+        if (index === undefined || !pageRows[index])
+            return "";
+        return pageRows[index].coverUrl;
+    }
+
+    function requestCoverBatch() {
+        const ids = Object.keys(coverRequests);
+        if (ids.length === 0)
+            return;
+        if (coversInFlight) {
+            coverBatchTimer.restart();
+            return;
+        }
+        const batch = ids.slice(0, root.coverBatchSize);
+        for (let i = 0; i < batch.length; i++) {
+            delete coverRequests[batch[i]];
+            coverInFlightIds[batch[i]] = true;
+        }
+        coversInFlight = true;
+        // Hand-rolled instead of run(): a failed batch must settle quietly
+        // (no toast) and leave re-requesting to the delegates when they
+        // enter the view again.
+        const operation = plugin.executeCommand("flat.covers", {
+            ids: batch
+        });
+        if (!operation) {
+            for (let r = 0; r < batch.length; r++)
+                delete coverInFlightIds[batch[r]];
+            coversInFlight = false;
+            return;
+        }
+        const handler = function () {
+            operation.completed.disconnect(handler);
+            coversInFlight = false;
+            for (let f = 0; f < batch.length; f++)
+                delete coverInFlightIds[batch[f]];
+            if (operation.state === 2)
+                applyCovers(operation.result, batch);
+        };
+        operation.completed.connect(handler);
+    }
+
+    // ── Flat paging ────────────────────────────────────────────────────────
+
+    function pageLoad() {
+        if (!flatReady || viewTab !== 0)
+            return;
+        const epoch = ++pageEpoch;
+        pageLoading = true;
+        const query = viewArgs();
+        run("flat.page", {
+            libraryId: activeLibraryId,
+            offset: 0,
+            limit: 100,
+            keyword: query.keyword,
+            sort: query.sort,
+            sortDir: query.sortDir
+        }, function (result) {
+            if (epoch !== pageEpoch)
+                return;
+            pageLoading = false;
+            if (!result)
+                return;
+            if (!result.ready) {
+                flatReady = false;
+                return;
+            }
+            songTotal = result.total || 0;
+            appendSongRows(asArray(result.songs).map(rowModel));
+        });
+    }
+
+    function loadMore() {
+        if (!hasMore || loadingMore || pageLoading || locateLoading)
+            return;
+        const epoch = pageEpoch;
+        loadingMore = true;
+        const query = viewArgs();
+        run("flat.page", {
+            libraryId: activeLibraryId,
+            offset: pageRows.length,
+            limit: 100,
+            keyword: query.keyword,
+            sort: query.sort,
+            sortDir: query.sortDir
+        }, function (result) {
+            if (epoch !== pageEpoch)
+                return;
+            loadingMore = false;
+            if (!result || !result.ready) {
+                if (result && !result.ready)
+                    flatReady = false;
+                return;
+            }
+            songTotal = result.total || 0;
+            appendSongRows(asArray(result.songs).map(rowModel));
+        });
+    }
+
+    // ── Directory browse (tab 1) ───────────────────────────────────────────
+
+    readonly property var displayDirRows: {
+        const filter = keyword.trim().toLowerCase();
+        let rows = [];
+        for (let i = 0; i < browse.dirs.length; i++)
+            rows.push({
+                kind: "dir",
+                id: "",
+                path: browse.dirs[i].path,
+                title: browse.dirs[i].name,
+                artistText: "",
+                albumText: "",
+                quality: "",
+                size: 0
+            });
+        for (let j = 0; j < browse.files.length; j++) {
+            const file = browse.files[j];
+            rows.push({
+                kind: "file",
+                id: file.id,
+                path: file.path,
+                title: file.title,
+                artistText: file.artist,
+                albumText: file.album || "",
+                quality: file.quality,
+                size: file.size
+            });
+        }
+        if (filter.length > 0)
+            rows = rows.filter(function (row) {
+                return row.title.toLowerCase().indexOf(filter) >= 0 || (row.artistText || "").toLowerCase().indexOf(filter) >= 0;
+            });
+        return rows;
+    }
+    readonly property bool dirHasFiles: browse.files.length > 0
+
+    function browseLoad(path) {
+        if (!currentLibrary || viewTab !== 1)
+            return;
+        const target = path || (currentLibrary.rootPath ? currentLibrary.rootPath : "/");
         const token = ++browseToken;
         browse = {
             loading: true,
             error: "",
-            path: path,
+            path: target,
             root: browse.root,
             dirs: [],
-            files: [],
-            cover: ""
+            files: []
         };
         run("browse.load", {
             libraryId: activeLibraryId,
-            path: path
+            path: target
         }, function (result) {
             // A stale reply (a slower request for a directory the user has
             // already left) must not overwrite the current rows.
@@ -305,178 +575,41 @@ Item {
                 browse = {
                     loading: false,
                     error: result && result.message ? result.message : "加载失败",
-                    path: path,
+                    path: target,
                     root: result && result.root ? result.root : browse.root,
                     dirs: [],
-                    files: [],
-                    cover: ""
+                    files: []
                 };
                 return;
             }
             browse = {
                 loading: false,
                 error: "",
-                path: result.path || path,
+                path: result.path || target,
                 root: result.root || "/",
                 dirs: asArray(result.dirs),
-                files: asArray(result.files),
-                cover: result.cover || ""
+                files: asArray(result.files)
             };
         });
     }
 
-    function flatReload() {
-        if (!currentLibrary)
-            return;
-        flatLoading = true;
-        run("flat.load", {
-            libraryId: activeLibraryId
-        }, function (result) {
-            if (!result) {
-                flatLoading = false;
-                return;
-            }
-            if (result.ready) {
-                flatReady = true;
-                flatLoading = false;
-                flatTruncatedFlag = result.truncated === true;
-                flatPageLoad(0);
-            } else if (result.started) {
-                flatReady = false;
-            } else {
-                flatLoading = false;
-                errorMessage = result.message || "无法开始扫描";
-            }
-        });
-    }
+    // ── Playback actions ───────────────────────────────────────────────────
 
-    function flatPageLoad(offset) {
-        if (!currentLibrary)
-            return;
-        // Rapid paging / keyword edits fire overlapping flat.page requests;
-        // the slower (older) reply must not overwrite the newer page, same
-        // token contract as browseLoad.
-        const token = ++flatPageToken;
-        flatLoading = true;
-        run("flat.page", {
-            libraryId: activeLibraryId,
-            offset: offset,
-            limit: flatPageSize,
-            keyword: keyword.trim()
-        }, function (result) {
-            if (token !== flatPageToken)
+    function playAll() {
+        if (viewTab === 0) {
+            if (!flatReady)
                 return;
-            flatLoading = false;
-            if (!result || !result.ready) {
-                flatSongs = [];
-                flatTotal = 0;
-                return;
-            }
-            flatReady = true;
-            flatTotal = result.total || 0;
-            flatOffset = result.offset || offset;
-            flatTruncatedFlag = result.truncated === true;
-            flatSongs = asArray(result.songs);
-            if (root.pendingLocate >= 0 && root.pendingLocate < flatSongs.length) {
-                const target = root.pendingLocate;
-                root.pendingLocate = -1;
-                Qt.callLater(function () {
-                    listView.positionViewAtIndex(target, ListView.Center);
-                });
-            }
-        });
-    }
-
-    /** Scrolls the flat list to the playing row, loading its page first when
-     * pagination has not reached it yet (legacy v1.2.0 定位当前播放). */
-    function locateCurrent() {
-        if (!flatMode || locateLoading || flatLoading)
-            return;
-        if (keyword.trim().length > 0) {
-            plugin.toast.info("定位前请先清空搜索关键词");
-            return;
-        }
-        if (currentTrackId.length === 0) {
-            plugin.toast.info("当前没有播放 WebDAV 歌曲");
-            return;
-        }
-        for (let i = 0; i < flatSongs.length; i++) {
-            if (flatSongs[i].id === currentTrackId) {
-                listView.positionViewAtIndex(i, ListView.Center);
-                return;
-            }
-        }
-        locateLoading = true;
-        run("flat.locate", {
-            libraryId: activeLibraryId,
-            id: currentTrackId
-        }, function (result) {
-            locateLoading = false;
-            if (!result)
-                return;
-            const index = typeof result.index === "number" ? result.index : -1;
-            if (index < 0) {
-                plugin.toast.info("当前播放的歌曲不在平铺列表中");
-                return;
-            }
-            const pageStart = Math.floor(index / flatPageSize) * flatPageSize;
-            if (pageStart === flatOffset && flatSongs.length > index - pageStart) {
-                listView.positionViewAtIndex(index - pageStart, ListView.Center);
-                return;
-            }
-            pendingLocate = index - pageStart;
-            flatPageLoad(pageStart);
-        });
-    }
-
-    function playRows(mode, paths, flatIndex, playAll) {
-        if (!currentLibrary)
-            return;
-        const args = {
-            libraryId: activeLibraryId,
-            mode: mode
-        };
-        if (flatIndex !== undefined && flatIndex !== null) {
-            args.flat = true;
-            args.index = flatIndex;
-        } else if (paths && paths.length > 0) {
-            args.paths = paths;
-        } else if (!flatMode && browse.path) {
-            args.dir = browse.path;
-            args.index = 0;
-        }
-        if (playAll === true)
-            args.all = true;
-        run("play", args, function (result) {
-            if (result && result.ok && mode !== "now")
-                plugin.toast.success(`已将 ${result.count || 0} 首加入${mode === "next" ? "播放列表" : "队列"}`);
-        });
-    }
-
-    function playRowAt(index) {
-        const row = displayRows[index];
-        if (!row)
-            return;
-        if (flatMode) {
-            playRows("now", null, flatOffset + index);
-            return;
-        }
-        if (row.kind === "dir") {
+            const query = viewArgs();
             run("play", {
                 libraryId: activeLibraryId,
-                dir: row.path,
-                mode: "now"
+                flat: true,
+                index: 0,
+                mode: "now",
+                all: true,
+                keyword: query.keyword,
+                sort: query.sort,
+                sortDir: query.sortDir
             }, null);
-            return;
-        }
-        playRows("now", [row.path], null);
-    }
-
-    function rowPlayAllFromCurrentView() {
-        // all:true marks this as 播放全部 — the whole view plays in both
-        // host queue modes (single mode only affects double-click).
-        if (flatMode) {
-            playRows("now", null, 0, true);
             return;
         }
         if (!browse.path)
@@ -490,54 +623,243 @@ Item {
         }, null);
     }
 
-    function toggleSelected(path) {
-        const next = Object.assign({}, selectedPaths);
-        if (next[path])
-            delete next[path];
-        else
-            next[path] = true;
-        selectedPaths = next;
-    }
-
-    function selectAllVisible() {
-        const next = {};
-        for (let i = 0; i < displayRows.length; i++) {
-            if (displayRows[i].kind === "file")
-                next[displayRows[i].path] = true;
-        }
-        selectedPaths = next;
-    }
-
-    function toggleFlatMode() {
-        if (!currentLibrary)
+    /** Plays the song at `index` of the current flat view; double-click
+     * semantics follow the host 播放队列模式 (single mode plays just that
+     * track, context mode the whole view). */
+    function playAt(index) {
+        if (!flatReady || viewTab !== 0)
             return;
-        const draft = [];
-        for (let i = 0; i < libraries.length; i++) {
-            const library = Object.assign({}, libraries[i]);
-            if (library.id === currentLibrary.id)
-                library.flatView = !flatMode;
-            draft.push(library);
-        }
-        run("settings.patch", {
-            libraries: draft,
-            activeLibraryId: activeLibraryId,
-            coverLyricSource: coverLyricSource
+        const query = viewArgs();
+        run("play", {
+            libraryId: activeLibraryId,
+            flat: true,
+            index: index,
+            mode: "now",
+            keyword: query.keyword,
+            sort: query.sort,
+            sortDir: query.sortDir
         }, null);
     }
 
-    onActiveLibraryIdChanged: reloadCurrent()
-    onFlatModeChanged: reloadCurrent()
+    function playPaths(paths) {
+        if (!currentLibrary)
+            return;
+        run("play", {
+            libraryId: activeLibraryId,
+            paths: paths,
+            mode: "now"
+        }, null);
+    }
+
+    function queueRow(path, mode) {
+        run("play", {
+            libraryId: activeLibraryId,
+            paths: [path],
+            mode: mode
+        }, function (result) {
+            if (result && (result.ok || result.count >= 0))
+                plugin.toast.success(mode === "next" ? "将在下一首播放" : "已添加到队列");
+        });
+    }
+
+    function playFolder(path) {
+        run("play", {
+            libraryId: activeLibraryId,
+            dir: path,
+            mode: "now",
+            index: 0
+        }, null);
+    }
+
+    function queueFolder(path, mode) {
+        run("play", {
+            libraryId: activeLibraryId,
+            dir: path,
+            mode: mode
+        }, function (result) {
+            if (result && (result.ok || result.count >= 0))
+                plugin.toast.success(mode === "next" ? "将在下一首播放" : "已添加到队列");
+        });
+    }
+
+    function showSongMenu(id, path, sceneX, sceneY) {
+        menuSongId = id;
+        songMenu.songId = id;
+        songMenu.songPath = path;
+        songMenu.rowIndex = 0;
+        for (let i = 0; i < pageRows.length; i++) {
+            if (pageRows[i].resourceId === id) {
+                songMenu.rowIndex = i;
+                break;
+            }
+        }
+        // Popups have no mapFromItem; map the scene point onto the page, the
+        // popup's parent, and open there like the host menus do.
+        const local = root.mapFromItem(null, sceneX, sceneY);
+        songMenu.popup(local.x, local.y);
+    }
+
+    function showFolderMenu(path, sceneX, sceneY) {
+        folderMenu.folderPath = path;
+        const local = root.mapFromItem(null, sceneX, sceneY);
+        folderMenu.popup(local.x, local.y);
+    }
+
+    // ── Locate ─────────────────────────────────────────────────────────────
+
+    /** Locate the playing row. The fast path scans the loaded rows; songs
+     * past the loaded pages ask the backend for their index in the current
+     * sort/filter view and append pages until the row exists. The fetch is
+     * mutually exclusive with the scroll-driven loaders — both would append
+     * rows at the same offset and duplicate them. */
+    property bool locateLoading: false
+
+    function locateCurrent() {
+        if (viewTab !== 0 || !flatReady || locateLoading || loadingMore || pageLoading)
+            return;
+        const trackId = root.currentTrackId;
+        if (trackId.length === 0) {
+            plugin.toast.info("当前没有播放 WebDAV 歌曲");
+            return;
+        }
+        for (let i = 0; i < pageRows.length; i++) {
+            if (pageRows[i].resourceId === trackId) {
+                EchoListPositioning.positionIfNeeded(songList, i, ListView.Center, viewport);
+                return;
+            }
+        }
+        const epoch = pageEpoch;
+        // Freeze the view args for the whole chain: a keyword edit mid-fill
+        // must not splice rows of the new view onto the old one (the
+        // debounced resetView will restart everything anyway).
+        const locateArgs = viewArgs();
+        locateLoading = true;
+        run("flat.locate", {
+            libraryId: activeLibraryId,
+            id: trackId,
+            keyword: locateArgs.keyword,
+            sort: locateArgs.sort,
+            sortDir: locateArgs.sortDir
+        }, function (result) {
+            if (epoch !== pageEpoch) {
+                locateLoading = false;
+                return;
+            }
+            // A null result means the command itself failed (run() already
+            // toasted); only a real reply with index < 0 is "not in view".
+            if (!result) {
+                locateLoading = false;
+                return;
+            }
+            const index = typeof result.index === "number" ? result.index : -1;
+            if (index < 0) {
+                locateLoading = false;
+                plugin.toast.info("当前播放的歌曲不在平铺列表中");
+                return;
+            }
+            locateFillTo(index, epoch, locateArgs);
+        });
+    }
+
+    /** Append pages (bounded fetches, same view args as loadMore) until the
+     * located row is loaded, then center it. */
+    function locateFillTo(index, epoch, locateArgs) {
+        if (pageRows.length > index || pageRows.length >= songTotal) {
+            EchoListPositioning.positionIfNeeded(songList, Math.min(index, pageRows.length - 1), ListView.Center, viewport);
+            locateLoading = false;
+            return;
+        }
+        run("flat.page", {
+            libraryId: activeLibraryId,
+            offset: pageRows.length,
+            limit: Math.min(500, index - pageRows.length + 100),
+            keyword: locateArgs.keyword,
+            sort: locateArgs.sort,
+            sortDir: locateArgs.sortDir
+        }, function (result) {
+            if (epoch !== pageEpoch) {
+                locateLoading = false;
+                return;
+            }
+            if (!result || !result.ready) {
+                locateLoading = false;
+                return;
+            }
+            songTotal = result.total || 0;
+            appendSongRows(asArray(result.songs).map(rowModel));
+            locateFillTo(index, epoch, locateArgs);
+        });
+    }
+
+    function startScan() {
+        run("flat.load", {
+            libraryId: activeLibraryId,
+            force: true
+        }, function (result) {
+            if (result && result.busy)
+                plugin.toast.info(result.message || "已有扫描任务正在进行");
+        });
+    }
+
+    function changeSort(field) {
+        if (sortField === field) {
+            sortDirection = sortDirection === 2 ? 1 : 2;
+        } else {
+            sortField = field;
+            sortDirection = 1;
+        }
+        resetView();
+    }
+
+    function parentDir(path) {
+        const normalized = path || "/";
+        const cut = normalized.lastIndexOf("/");
+        if (cut <= 0)
+            return "/";
+        return normalized.slice(0, cut);
+    }
+
+    readonly property var pathSegments: {
+        const path = browse.path || "/";
+        const prefix = browse.root || "/";
+        let rest = path;
+        if (prefix.length > 1 && rest.indexOf(prefix) === 0)
+            rest = rest.slice(prefix.length) || "/";
+        return rest.split("/").filter(function (part) {
+            return part.length > 0;
+        });
+    }
+
+    function crumbPath(index) {
+        const prefix = browse.root && browse.root.length > 0 ? browse.root : "/";
+        let path = prefix === "/" ? "" : prefix;
+        for (let i = 0; i <= index; i++)
+            path += `/${pathSegments[i]}`;
+        return path.length === 0 ? "/" : path;
+    }
 
     onPageActiveChanged: {
         if (!pageActive)
             return;
-        if (libraries.length === 0 || pendingLibraryRefresh) {
+        if (pendingLibraryRefresh) {
             pendingLibraryRefresh = false;
             refreshSettings(true);
+            return;
         }
+        if (libraries.length === 0)
+            refreshSettings(true);
     }
 
     Component.onCompleted: {
+        if (plugin.cover) {
+            try {
+                headerCoverUrl = plugin.cover.createThemedIconCoverUrl({
+                    icon: "cloud"
+                });
+            } catch (error) {
+                headerCoverUrl = "";
+            }
+        }
         const state = plugin.ui.state;
         scanState = state && state.flatScan ? state.flatScan : {};
         const revision = state && typeof state.settingsRevision === "number" ? state.settingsRevision : 0;
@@ -546,11 +868,18 @@ Item {
     }
 
     property int lastSettingsRevision: -1
+    // A library notification while the page sits in a background stack would
+    // still rebuild every row delegate for nothing the user can see; the
+    // reload waits for reactivation.
+    property bool pendingLibraryRefresh: false
 
+    // Every publish hands over a fresh state object; assigning it re-evaluates
+    // every binding that reads it. Skip the write when no rendered field
+    // actually moved so steady phases cost zero.
     function scanStateEquals(a, b) {
         if (a === b)
             return true;
-        if (!a || !b)
+        if (!a || !b || typeof a !== "object" || typeof b !== "object")
             return false;
         const keys = Object.keys(a);
         if (keys.length !== Object.keys(b).length)
@@ -571,8 +900,13 @@ Item {
                 root.scanState = nextScan;
                 // Scan publishes drive heavy re-renders; a page sitting in
                 // the background skips the work and reloads on activation.
-                if (!root.pageActive)
+                if (!root.pageActive) {
                     root.pendingLibraryRefresh = true;
+                } else if ((root.scanDone || root.scanAborted) && root.viewTab === 0) {
+                    // A finished (or stopped, partial) scan refreshes the
+                    // flat view; running publishes leave the list alone.
+                    root.resetView();
+                }
             }
             const revision = state && typeof state.settingsRevision === "number" ? state.settingsRevision : -1;
             if (revision >= 0 && revision !== root.lastSettingsRevision) {
@@ -582,625 +916,798 @@ Item {
                 } else {
                     root.pendingLibraryRefresh = true;
                 }
-            } else if (root.pageActive && root.scanDone && root.flatMode && !root.flatReady) {
-                root.flatReload();
             }
         }
     }
 
-    ColumnLayout {
+    /** Themed fallback art so the header always shows a playlist cover. */
+    property string headerCoverUrl: ""
+
+    EchoEnter {
+        target: viewport
+        active: root.pageActive
+    }
+
+    EchoPageScrollContainer {
+        id: viewport
         anchors.fill: parent
-        anchors.margins: 20
-        spacing: 12
+        pageActive: root.pageActive
+        scrollView: root.viewTab === 0 ? songList : dirList
+        coordinatedViews: [songList, dirList]
+        resetViews: coordinatedViews
+        stickyHeaders: [pageHeader, toolbar]
 
-        RowLayout {
-            Layout.fillWidth: true
-            spacing: 12
+        SongListGeometry {
+            id: listGeometry
+            rowCount: songList.count
+        }
 
-            EchoCover {
-                Layout.preferredWidth: 52
-                Layout.preferredHeight: 52
-                visible: !root.flatMode
-                source: root.browse.cover || ""
-                placeholderGlyph: "folder-open"
+        ListView {
+            id: songList
+            x: root.contentInset
+            width: Math.max(0, parent.width - root.contentInset * 2)
+            height: parent.height
+            // Visible even when empty so the shared footer carries the
+            // empty state, like CatalogSongList's footer.
+            visible: root.viewTab === 0 && !root.pageLoading
+            topMargin: detailHeader.expandedHeight + toolbar.height + 8
+            bottomMargin: 48
+            // JS array model: SongRow's artistLinks needs JS-array semantics
+            // (ListModels hand nested object arrays back as nested models,
+            // breaking the artist row). Appends preserve the scroll position
+            // in appendSongRows; the pool guard must stay off, its delayed
+            // detach/reattach re-snaps the position after the restore.
+            model: root.pageRows
+            reuseItems: true
+            cacheBuffer: 240
+            boundsBehavior: Flickable.StopAtBounds
+            onAtYEndChanged: if (atYEnd)
+                root.loadMore()
+            onMovementEnded: if (atYEnd)
+                root.loadMore()
+            ScrollBar.vertical: EchoPageScrollBar {
+                view: songList
+                container: viewport
+                viewActive: songList.visible && root.pageActive
             }
-
-            ColumnLayout {
-                Layout.fillWidth: true
-                spacing: 3
-
-                RowLayout {
+            delegate: SongRow {
+                id: row
+                required original
+                required privilegeTags
+                required qualityLabel
+                required path
+                // Not a SongRow property, but applyCovers pokes it in place
+                // alongside durationText when a batch lands; the model
+                // injects it on (re)creation like the other roles.
+                required durationMs
+                property bool pooled: false
+                width: songList.width
+                geometry: listGeometry
+                // The album column stays filled: folder names are real
+                // albums for WebDAV songs, and hiding the cell would leave
+                // the header's album cell over an empty column.
+                showAlbum: true
+                active: resourceId.length > 0 && resourceId === root.currentTrackId
+                playing: root.plugin.player.playing
+                playbackLoading: root.plugin.player.loading
+                playbackAvailable: root.flatReady
+                // Rows entering the view (created or reused out of the pool)
+                // ask for their own cover; the batch machinery dedupes.
+                Component.onCompleted: root.scheduleRowCover(resourceId, coverUrl)
+                onPooledChanged: if (!pooled)
+                    root.scheduleRowCover(resourceId, coverUrl)
+                // No favorite ledger for WebDAV files; leaving this false
+                // disables the heart instead of offering a dead toggle.
+                actionsAvailable: false
+                resourceActive: root.pageActive && !pooled
+                contextTarget: root.menuSongId.length > 0 && resourceId === root.menuSongId
+                ListView.onPooled: pooled = true
+                // A pooled delegate keeps every statically assigned property
+                // from its previous row — applyCovers pokes coverUrl
+                // imperatively, so reuse must re-derive it for the new row
+                // or the artwork of another song bleeds through. onReused
+                // runs after the model has re-bound the required properties,
+                // and the onPooledChanged handler above then re-requests the
+                // (now empty) cover through the deduped batch path.
+                ListView.onReused: {
+                    coverUrl = root.rowCoverFor(resourceId);
+                    pooled = false;
+                }
+                onPlayRequested: id => {
+                    if (id === root.currentTrackId) {
+                        root.plugin.player.toggle();
+                        return;
+                    }
+                    root.playAt(index);
+                }
+                onDoubleClicked: if (!row.pendingPlay)
+                    root.playAt(index)
+                onCommentsRequested: id => root.plugin.toast.info("WebDAV 歌曲暂不支持评论")
+                onMoreRequested: (id, sceneX, sceneY) => root.showSongMenu(id, row.path, sceneX, sceneY)
+                TapHandler {
+                    acceptedButtons: Qt.RightButton
+                    onTapped: eventPoint => {
+                        const point = row.mapToItem(null, eventPoint.position.x, eventPoint.position.y);
+                        root.showSongMenu(row.resourceId, row.path, point.x, point.y);
+                    }
+                }
+            }
+            footer: Item {
+                id: songFooter
+                readonly property bool empty: root.viewTab === 0 && !root.pageLoading && root.pageRows.length === 0
+                readonly property bool more: root.loadingMore
+                width: songList.width
+                visible: songFooter.empty || songFooter.more
+                height: songFooter.empty ? 156 : 44
+                ColumnLayout {
+                    anchors.centerIn: parent
+                    visible: songFooter.empty
                     spacing: 8
 
-                    Label {
-                        text: "WebDAV 音乐"
-                        font: Theme.font(18, Theme.semiboldWeight)
-                        color: Theme.text
+                    EchoIcon {
+                        Layout.alignment: Qt.AlignHCenter
+                        Layout.preferredWidth: 34
+                        Layout.preferredHeight: 34
+                        name: root.scanError.length > 0 || root.errorMessage.length > 0 ? "alert-circle" : "database"
+                        color: Theme.iconSecondary
                     }
-                    EchoTag {
-                        visible: root.currentLibrary !== null
-                        text: root.flatMode ? "平铺" : "目录"
-                        tone: EchoTag.Neutral
+                    Label {
+                        Layout.alignment: Qt.AlignHCenter
+                        text: {
+                            if (root.scanError.length > 0)
+                                return `扫描失败：${root.scanError}`;
+                            if (root.errorMessage.length > 0)
+                                return root.errorMessage;
+                            if (root.libraries.length === 0)
+                                return "还没有 WebDAV 库，点击右上角设置添加";
+                            if (!root.flatReady)
+                                return root.scanRunning || root.scanLabel.length > 0 ? root.scanLabel : "平铺列表尚未扫描，点击「扫描」建立列表";
+                            return "没有匹配的歌曲";
+                        }
+                        font: Theme.font(12, Theme.regularWeight)
+                        color: Theme.secondaryText
+                    }
+                    EchoSoftButton {
+                        Layout.alignment: Qt.AlignHCenter
+                        visible: root.libraries.length === 0
+                        text: "打开插件设置"
+                        onClicked: root.openSettings()
+                    }
+                    EchoSoftButton {
+                        Layout.alignment: Qt.AlignHCenter
+                        visible: root.libraries.length > 0 && !root.flatReady && !root.scanRunning
+                        text: "开始扫描"
+                        onClicked: root.startScan()
                     }
                 }
-
-                Label {
-                    Layout.fillWidth: true
-                    text: root.flatMode ? `共 ${root.flatTotal} 首 · ${root.currentLibrary ? root.currentLibrary.name : ""}` : root.browse.loading ? "正在加载目录…" : `${root.browse.dirs.length} 个目录 · ${root.browse.files.length} 个文件`
-                    font: Theme.font(12, Theme.regularWeight)
+                Text {
+                    anchors.centerIn: parent
+                    visible: songFooter.more
+                    text: "正在加载更多…"
+                    textFormat: Text.PlainText
                     color: Theme.secondaryText
-                    elide: Text.ElideRight
-                }
-            }
-
-            EchoButton {
-                text: "播放全部"
-                glyph: "player-play"
-                accent: true
-                onClicked: root.rowPlayAllFromCurrentView()
-            }
-            EchoIconButton {
-                visible: root.flatMode
-                glyph: "current-location"
-                tooltipText: "定位当前播放"
-                enabled: root.flatReady
-                onClicked: root.locateCurrent()
-            }
-            EchoIconButton {
-                glyph: "arrows-sort"
-                tooltipText: "排序方式"
-                onClicked: sortMenu.popup()
-            }
-            EchoIconButton {
-                glyph: "check"
-                tooltipText: root.selectionMode ? "退出批量选择" : "批量选择"
-                foreground: root.selectionMode ? Theme.accent : Theme.iconMain
-                onClicked: {
-                    root.selectionMode = !root.selectionMode;
-                    if (!root.selectionMode)
-                        root.selectedPaths = ({});
-                }
-            }
-            EchoIconButton {
-                glyph: root.flatMode ? "folder-open" : "list"
-                tooltipText: root.flatMode ? "切换到目录浏览" : "切换到平铺列表"
-                onClicked: root.toggleFlatMode()
-            }
-            EchoIconButton {
-                glyph: "refresh-source"
-                tooltipText: root.flatMode ? "重新扫描" : "刷新目录"
-                onClicked: root.flatMode ? root.run("flat.load", {
-                    libraryId: root.activeLibraryId,
-                    force: true
-                }, function (result) {
-                    if (result && result.ready)
-                        root.flatPageLoad(root.flatOffset);
-                }) : root.browseLoad(root.browse.path)
-            }
-        }
-
-        RowLayout {
-            Layout.fillWidth: true
-            spacing: 10
-
-            EchoSelect {
-                Layout.preferredWidth: 220
-                visible: root.libraries.length > 0
-                placeholder: "选择 WebDAV 库"
-                options: {
-                    const rows = root.asArray(root.libraries);
-                    const items = [];
-                    for (let i = 0; i < rows.length; i++)
-                        items.push({
-                            value: rows[i].id,
-                            label: rows[i].name
-                        });
-                    return items;
-                }
-                value: root.activeLibraryId
-                onValueEdited: function (nextValue) {
-                    root.activeLibraryId = typeof nextValue === "string" ? nextValue : "";
-                }
-            }
-            EchoButton {
-                text: "添加库"
-                glyph: "plus"
-                accent: false
-                visible: root.libraries.length === 0
-                onClicked: root.openSettings()
-            }
-            Item {
-                Layout.fillWidth: true
-            }
-            EchoTextField {
-                Layout.preferredWidth: 260
-                placeholderText: root.flatMode ? "搜索平铺列表" : "过滤当前目录"
-                clearable: true
-                text: root.keyword
-                onTextEdited: {
-                    root.keyword = text;
-                    searchDebounce.restart();
-                }
-                onAccepted: {
-                    root.keyword = text;
-                    searchDebounce.stop();
-                    if (root.flatMode)
-                        root.flatPageLoad(0);
-                }
-                onCleared: {
-                    root.keyword = "";
-                    // A pending debounce would fire right after the clear
-                    // and re-run the query with the now-empty keyword.
-                    searchDebounce.stop();
-                    if (root.flatMode)
-                        root.flatPageLoad(0);
-                }
-            }
-        }
-
-        Rectangle {
-            Layout.fillWidth: true
-            visible: root.scanRunning || root.scanError.length > 0 || root.scanDone || root.scanAborted || root.flatTruncated
-            radius: 10
-            color: Theme.rowHover
-            border.color: Theme.subtleBorder
-            implicitHeight: Math.max(scanLabel.implicitHeight, EchoControlSize.heightFor(EchoControlSize.Standard)) + 18
-            RowLayout {
-                anchors.fill: parent
-                anchors.margins: 9
-                spacing: 10
-
-                EchoSpinner {
-                    visible: root.scanRunning
-                    Layout.preferredWidth: 16
-                    Layout.preferredHeight: 16
-                }
-                Label {
-                    id: scanLabel
-                    Layout.fillWidth: true
-                    text: {
-                        if (root.scanError.length > 0)
-                            return `扫描失败：${root.scanError}`;
-                        if (root.scanDone)
-                            return `扫描完成，共 ${root.scanCount} 首${root.scanTruncated ? "（已达 20000 首上限，结果不完整）" : ""}`;
-                        if (root.scanAborted)
-                            return `扫描已中止，已保留 ${root.scanCount} 首`;
-                        if (root.scanRunning)
-                            return root.scanLabel || "正在扫描…";
-                        if (root.flatTruncated)
-                            return "列表已达 20000 首上限，结果不完整";
-                        return root.scanLabel || "正在扫描…";
-                    }
                     font: Theme.font(12, Theme.regularWeight)
-                    color: root.scanError.length > 0 ? Theme.colors.danger : Theme.secondaryText
-                    elide: Text.ElideRight
-                }
-                EchoButton {
-                    visible: root.scanRunning
-                    text: "停止"
-                    accent: false
-                    onClicked: root.run("flat.abort", {}, null)
-                }
-                EchoButton {
-                    visible: (root.scanDone || root.scanAborted) && root.flatMode
-                    text: "查看列表"
-                    accent: false
-                    onClicked: root.flatPageLoad(0)
                 }
             }
         }
 
-        RowLayout {
-            Layout.fillWidth: true
-            visible: !root.flatMode
-            spacing: 4
-
-            EchoIconButton {
-                glyph: "arrow-left"
-                tooltipText: "上一级"
-                enabled: root.browse.path && root.currentLibrary && root.browse.path !== (root.browse.root || "/")
-                onClicked: root.browseLoad(parentDir(root.browse.path))
+        // Directory browse (目录 tab): folder rows above file rows, styled
+        // after the same 60px row rhythm. Delegates stay simple — a plain
+        // Item holds both variants because SongRow's required properties
+        // are model-injected only at the delegate root.
+        ListView {
+            id: dirList
+            x: root.contentInset
+            width: Math.max(0, parent.width - root.contentInset * 2)
+            height: parent.height
+            visible: root.viewTab === 1 && !root.browse.loading
+            topMargin: detailHeader.expandedHeight + toolbar.height + 8
+            bottomMargin: 48
+            model: root.displayDirRows
+            boundsBehavior: Flickable.StopAtBounds
+            ScrollBar.vertical: EchoPageScrollBar {
+                view: dirList
+                container: viewport
+                viewActive: dirList.visible && root.pageActive
             }
-            Repeater {
-                model: root.pathSegments
+            delegate: Item {
+                id: dirRow
+                required property int index
+                required property var modelData
+                readonly property bool isDir: dirRow.modelData.kind === "dir"
+                readonly property bool isCurrent: !isDir && root.currentTrackId.length > 0 && dirRow.modelData.id === root.currentTrackId
+                width: dirList.width
+                height: 60
 
-                delegate: RowLayout {
-                    id: crumbRow
-                    required property int index
-                    required property string modelData
-                    spacing: 4
-
-                    EchoIconButton {
-                        glyph: "chevron-right"
-                        tooltipText: ""
-                        hoverBackground: false
-                        visualContentActive: false
-                        Layout.preferredWidth: 14
-                        Layout.preferredHeight: 14
-                        enabled: false
-                        visible: crumbRow.index > 0
+                // Folder row: navigates on double-click, plays the folder
+                // from the hover action, context menu on right-click.
+                ItemDelegate {
+                    id: rowFolder
+                    anchors.fill: parent
+                    visible: dirRow.isDir
+                    hoverEnabled: true
+                    padding: 0
+                    highlighted: false
+                    background: Rectangle {
+                        radius: Theme.controlRadius
+                        color: rowFolder.hovered || rowFolder.visualFocus ? Theme.rowHover : "transparent"
                     }
-                    Label {
-                        text: crumbRow.modelData
-                        font: Theme.font(12, Theme.mediumWeight)
-                        color: crumbRow.index === root.pathSegments.length - 1 ? Theme.text : Theme.secondaryText
-                        MouseArea {
-                            anchors.fill: parent
-                            hoverEnabled: true
-                            cursorShape: Qt.PointingHandCursor
-                            onClicked: root.browseLoad(crumbPath(crumbRow.index))
+                    contentItem: RowLayout {
+                        spacing: 12
+
+                        Item {
+                            Layout.preferredWidth: listGeometry.indexWidth
+                            Layout.minimumWidth: listGeometry.indexWidth
+                            Layout.maximumWidth: listGeometry.indexWidth
+                            Layout.fillHeight: true
+                            EchoIcon {
+                                anchors.centerIn: parent
+                                name: "folder-open"
+                                color: Theme.accent
+                                width: 20
+                                height: 20
+                            }
+                        }
+                        EchoTextTagRow {
+                            Layout.fillWidth: true
+                            Layout.minimumWidth: 0
+                            text: dirRow.modelData.title
+                            font: Theme.spacedFont(13, Theme.semiboldWeight, -0.2)
+                            color: Theme.text
+                            fillTextWidth: true
+                        }
+                        EchoIcon {
+                            name: "chevron-right"
+                            color: Theme.secondaryText
+                            width: 14
+                            height: 14
+                            Layout.rightMargin: 10
                         }
                     }
-                }
-            }
-            Item {
-                Layout.fillWidth: true
-            }
-        }
-
-        Rectangle {
-            Layout.fillWidth: true
-            Layout.fillHeight: true
-            radius: 12
-            color: Theme.card
-            border.color: Theme.subtleBorder
-
-            ListView {
-                id: listView
-                anchors.fill: parent
-                anchors.margins: 6
-                clip: true
-                spacing: 2
-                model: root.displayRows
-                visible: !root.browse.loading && !root.flatLoading && root.displayRows.length > 0
-                ScrollBar.vertical: EchoScrollBar {
-                }
-
-                delegate: Rectangle {
-                    id: rowDelegate
-                    required property int index
-                    required property var modelData
-                    width: listView.width
-                    height: 52
-                    radius: 8
-                    readonly property bool current: root.currentTrackId !== "" && modelData.kind === "file" && rowKey(modelData) === root.currentTrackId
-                    readonly property bool selected: root.selectedPaths[modelData.path] === true
-                    color: current ? Theme.selected : selected ? Theme.rowHover : rowHoverArea.containsMouse ? Theme.rowHover : "transparent"
-
-                    function rowKey(row) {
-                        const library = root.currentLibrary;
-                        if (!library)
-                            return "";
-                        let hash = 0;
-                        const text = `${library.id}|${row.path}`;
-                        for (let i = 0; i < text.length; i++)
-                            hash = ((hash << 5) - hash + text.charCodeAt(i)) | 0;
-                        return `webdav-${(hash >>> 0).toString(36)}`;
-                    }
-
-                    RowLayout {
-                        anchors.fill: parent
-                        anchors.leftMargin: 10
-                        anchors.rightMargin: 10
-                        spacing: 10
-
-                        EchoCheckBox {
-                            visible: root.selectionMode && rowDelegate.modelData.kind === "file"
-                            checked: rowDelegate.selected
-                            onToggled: root.toggleSelected(rowDelegate.modelData.path)
+                    TapHandler {
+                        acceptedButtons: Qt.RightButton
+                        onTapped: eventPoint => {
+                            const point = rowFolder.mapToItem(null, eventPoint.position.x, eventPoint.position.y);
+                            root.showFolderMenu(dirRow.modelData.path, point.x, point.y);
                         }
-                        EchoIconButton {
-                            Layout.preferredWidth: 28
-                            Layout.preferredHeight: 28
-                            glyph: rowDelegate.current ? "player-pause" : "player-play"
-                            tooltipText: rowDelegate.current ? "正在播放" : "立即播放"
-                            foreground: rowDelegate.current ? Theme.accent : Theme.iconSecondary
-                            visible: rowDelegate.modelData.kind === "file"
-                            onClicked: {
-                                if (rowDelegate.current) {
-                                    root.plugin.player.toggle();
-                                } else {
-                                    root.playRowAt(rowDelegate.index);
+                    }
+                    onDoubleClicked: root.browseLoad(dirRow.modelData.path)
+                }
+                EchoIconButton {
+                    // Folder play action rides the hover state, matching the
+                    // song rows' hover play affordance.
+                    visible: dirRow.isDir && (rowFolder.hovered || rowFolder.visualFocus)
+                    anchors.verticalCenter: parent.verticalCenter
+                    x: listGeometry.indexWidth - 15
+                    width: 30
+                    height: 30
+                    padding: 8
+                    glyph: "play"
+                    tooltipText: "播放此文件夹"
+                    foreground: Theme.iconMain
+                    onClicked: root.playFolder(dirRow.modelData.path)
+                }
+
+                // File row mirrors SongRow's visuals without the model
+                // machinery (no covers, no artist links, no album column).
+                ItemDelegate {
+                    id: rowFile
+                    anchors.fill: parent
+                    visible: !dirRow.isDir
+                    hoverEnabled: true
+                    padding: 0
+                    readonly property bool contextTarget: root.menuSongId.length > 0 && dirRow.modelData.id === root.menuSongId
+                    background: Rectangle {
+                        radius: Theme.controlRadius
+                        color: rowFile.contextTarget ? Theme.colors.hover : dirRow.isCurrent ? Theme.selected : rowFile.hovered || rowFile.visualFocus ? Theme.rowHover : "transparent"
+                    }
+                    contentItem: RowLayout {
+                        spacing: 0
+
+                        Item {
+                            Layout.preferredWidth: listGeometry.indexWidth
+                            Layout.minimumWidth: listGeometry.indexWidth
+                            Layout.maximumWidth: listGeometry.indexWidth
+                            Layout.fillHeight: true
+                            Text {
+                                anchors.centerIn: parent
+                                text: dirRow.index + 1
+                                textFormat: Text.PlainText
+                                color: Theme.secondaryText
+                                font: Theme.font(12, Theme.regularWeight)
+                                visible: !rowFile.hovered && !rowFile.visualFocus && !dirRow.isCurrent
+                            }
+                            EchoPlaybackButton {
+                                anchors.centerIn: parent
+                                width: 30
+                                height: 30
+                                padding: 8
+                                playing: dirRow.isCurrent && root.plugin.player.playing
+                                loading: dirRow.isCurrent && root.plugin.player.loading
+                                foreground: dirRow.isCurrent || hovered ? Theme.accentText : Theme.iconMain
+                                visible: rowFile.hovered || rowFile.visualFocus || dirRow.isCurrent
+                                enabled: !loading
+                                onClicked: {
+                                    if (dirRow.isCurrent) {
+                                        root.plugin.player.toggle();
+                                        return;
+                                    }
+                                    root.playPaths([dirRow.modelData.path]);
+                                }
+                            }
+                        }
+                        RowLayout {
+                            Layout.fillWidth: true
+                            Layout.minimumWidth: 0
+                            spacing: 12
+
+                            EchoCover {
+                                Layout.preferredWidth: 46
+                                Layout.preferredHeight: 46
+                                placeholderGlyph: "music"
+                            }
+                            ColumnLayout {
+                                Layout.fillWidth: true
+                                Layout.minimumWidth: 0
+                                spacing: 2
+
+                                EchoTextTagRow {
+                                    Layout.fillWidth: true
+                                    Layout.minimumWidth: 0
+                                    text: dirRow.modelData.title
+                                    font: Theme.spacedFont(13, Theme.semiboldWeight, -0.2)
+                                    color: dirRow.isCurrent ? Theme.accentText : Theme.text
+                                    spacing: 6
+                                    Loader {
+                                        active: dirRow.modelData.quality === "flac"
+                                        visible: active
+                                        sourceComponent: EchoTag {
+                                            text: "无损"
+                                            tone: EchoTag.Custom
+                                            customTone: "#06B6D4"
+                                        }
+                                    }
+                                }
+                                EchoTextTagRow {
+                                    Layout.fillWidth: true
+                                    Layout.minimumWidth: 0
+                                    visible: (dirRow.modelData.artistText || "").length > 0
+                                    text: dirRow.modelData.artistText
+                                    font: Theme.font(12, Theme.mediumWeight)
+                                    color: dirRow.isCurrent ? Theme.accentText : Theme.secondaryText
                                 }
                             }
                         }
                         Label {
-                            Layout.preferredWidth: 26
-                            visible: !root.selectionMode && rowDelegate.modelData.kind === "file"
-                            text: String(rowDelegate.index + 1)
+                            visible: dirRow.modelData.size > 0
+                            text: root.formatBytes(dirRow.modelData.size)
                             font: Theme.font(12, Theme.regularWeight)
                             color: Theme.secondaryText
-                            horizontalAlignment: Text.AlignHCenter
-                        }
-                        EchoIcon {
-                            Layout.preferredWidth: 20
-                            Layout.preferredHeight: 20
-                            visible: rowDelegate.modelData.kind === "dir"
-                            name: "folder-open"
-                            color: Theme.accent
-                        }
-                        ColumnLayout {
-                            Layout.fillWidth: true
-                            spacing: 1
-
-                            Label {
-                                Layout.fillWidth: true
-                                text: rowDelegate.modelData.title || rowDelegate.modelData.name
-                                font: Theme.font(13, rowDelegate.current ? Theme.semiboldWeight : Theme.mediumWeight)
-                                color: rowDelegate.current ? Theme.accent : Theme.text
-                                elide: Text.ElideRight
-                            }
-                            Label {
-                                Layout.fillWidth: true
-                                visible: rowDelegate.modelData.kind === "file" && (rowDelegate.modelData.artist || "").length > 0
-                                text: rowDelegate.modelData.artist
-                                font: Theme.font(11, Theme.regularWeight)
-                                color: Theme.secondaryText
-                                elide: Text.ElideRight
-                            }
-                        }
-                        EchoTag {
-                            visible: rowDelegate.modelData.kind === "file" && rowDelegate.modelData.quality === "flac"
-                            text: "无损"
-                            tone: EchoTag.Accent
-                        }
-                        Label {
-                            visible: rowDelegate.modelData.kind === "file" && rowDelegate.modelData.size > 0
-                            text: root.formatBytes(rowDelegate.modelData.size)
-                            font: Theme.font(11, Theme.regularWeight)
-                            color: Theme.secondaryText
-                        }
-                        EchoIconButton {
-                            glyph: "playlist-add"
-                            tooltipText: "添加到队列"
-                            visible: rowDelegate.modelData.kind === "file" && !root.selectionMode
-                            onClicked: root.playRows("append", [rowDelegate.modelData.path], null)
+                            Layout.rightMargin: 12
                         }
                     }
-
-                    MouseArea {
-                        id: rowHoverArea
-                        anchors.fill: parent
-                        hoverEnabled: true
-                        acceptedButtons: Qt.LeftButton | Qt.RightButton
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: function (mouse) {
-                            if (mouse.button === Qt.RightButton) {
-                                rowMenu.popup();
-                                return;
-                            }
-                            if (root.selectionMode && rowDelegate.modelData.kind === "file")
-                                root.toggleSelected(rowDelegate.modelData.path);
-                        }
-                        onDoubleClicked: function (mouse) {
-                            if (mouse.button === Qt.LeftButton && !root.selectionMode)
-                                root.playRowAt(rowDelegate.index);
+                    TapHandler {
+                        acceptedButtons: Qt.RightButton
+                        onTapped: eventPoint => {
+                            const point = rowFile.mapToItem(null, eventPoint.position.x, eventPoint.position.y);
+                            root.showSongMenu(dirRow.modelData.id || "", dirRow.modelData.path, point.x, point.y);
                         }
                     }
+                    onDoubleClicked: if (!(dirRow.isCurrent && root.plugin.player.loading))
+                        root.playPaths([dirRow.modelData.path])
+                }
+            }
+            footer: Item {
+                id: dirFooter
+                readonly property bool empty: root.viewTab === 1 && !root.browse.loading && root.displayDirRows.length === 0
+                width: dirList.width
+                visible: dirFooter.empty
+                height: 156
+                ColumnLayout {
+                    anchors.centerIn: parent
+                    spacing: 8
 
-                    EchoMenu {
-                        id: rowMenu
-
-                        EchoMenuEntry {
-                            visible: rowDelegate.modelData.kind === "dir"
-                            text: "播放此文件夹"
-                            onTriggered: root.run("play", {
-                                libraryId: root.activeLibraryId,
-                                dir: rowDelegate.modelData.path,
-                                mode: "now"
-                            }, null)
-                        }
-                        EchoMenuEntry {
-                            visible: rowDelegate.modelData.kind === "dir"
-                            text: "下一首播放（文件夹）"
-                            onTriggered: root.run("play", {
-                                libraryId: root.activeLibraryId,
-                                dir: rowDelegate.modelData.path,
-                                mode: "next"
-                            }, null)
-                        }
-                        EchoMenuEntry {
-                            visible: rowDelegate.modelData.kind === "file"
-                            text: "立即播放"
-                            onTriggered: root.playRowAt(rowDelegate.index)
-                        }
-                        EchoMenuEntry {
-                            visible: rowDelegate.modelData.kind === "file"
-                            text: "下一首播放"
-                            onTriggered: root.playRows("next", [rowDelegate.modelData.path], null)
-                        }
-                        EchoMenuEntry {
-                            visible: rowDelegate.modelData.kind === "file"
-                            text: "添加到队列"
-                            onTriggered: root.playRows("append", [rowDelegate.modelData.path], null)
-                        }
+                    EchoIcon {
+                        Layout.alignment: Qt.AlignHCenter
+                        Layout.preferredWidth: 34
+                        Layout.preferredHeight: 34
+                        name: root.browse.error.length > 0 ? "alert-circle" : "folder-open"
+                        color: Theme.iconSecondary
+                    }
+                    Label {
+                        Layout.alignment: Qt.AlignHCenter
+                        text: root.browse.error.length > 0 ? root.browse.error : "此目录没有音频文件或子目录"
+                        font: Theme.font(12, Theme.regularWeight)
+                        color: Theme.secondaryText
                     }
                 }
             }
+        }
 
-            EchoMenu {
-                id: sortMenu
+        // Initial-load skeleton, mirroring the shared catalog loading view;
+        // the directory browse shows it while its PROPFIND is in flight.
+        ListView {
+            id: skeletonList
+            x: root.contentInset
+            width: Math.max(0, parent.width - root.contentInset * 2)
+            height: parent.height
+            visible: (root.viewTab === 0 && root.pageLoading && root.pageRows.length === 0) || (root.viewTab === 1 && root.browse.loading)
+            interactive: false
+            reuseItems: true
+            cacheBuffer: 0
+            model: 8
+            topMargin: detailHeader.expandedHeight + toolbar.height + 8
+            EchoViewPoolGuard {
+                targetView: skeletonList
+            }
+            delegate: SongSkeletonRow {
+                property bool pooled: false
+                width: skeletonList.width
+                geometry: listGeometry
+                animate: root.pageActive && !pooled
+                showAlbum: true
+                ListView.onPooled: pooled = true
+                ListView.onReused: pooled = false
+            }
+        }
 
-                EchoMenuEntry {
-                    text: root.sortKey === "name" ? "✓ 按文件名" : "按文件名"
-                    onTriggered: root.sortKey = "name"
+        EchoPageStickyHeader {
+            id: pageHeader
+            container: viewport
+            flowPosition: 0
+            // The shared sliver header collapses from 176 to 56 as the list
+            // scrolls; the sticky toolbar rides on its animated height while
+            // the flow positions below use the fixed expanded height.
+            height: detailHeader.implicitHeight
+
+            SongDetailHeader {
+                id: detailHeader
+                anchors.fill: parent
+                scrollTop: viewport.scrollTop
+                heading: root.headerTitle
+                typeLabel: "WEBDAV"
+                // Always-visible intro plus the shared metadata count row,
+                // matching the local library header composition.
+                subtitle: "浏览并播放 WebDAV 网盘中的音乐。"
+                secondaryDetailsComponent: Component {
+                    Flow {
+                        objectName: "webdavLibraryMetadata"
+                        spacing: 12
+
+                        EchoButtonContent {
+                            objectName: "webdavLibrarySongCount"
+                            width: Math.min(parent.width, implicitWidth + 4)
+                            height: implicitHeight
+                            horizontalAlignment: Qt.AlignLeft
+                            glyph: "music"
+                            glyphSize: 12
+                            spacing: 6
+                            lineHeight: 16.5
+                            text: root.songCountLabel
+                            font: Theme.font(11, Theme.semiboldWeight)
+                            color: Theme.secondaryText
+                        }
+                        Repeater {
+                            model: [root.currentLibrary && root.currentLibrary.name ? `${root.currentLibrary.name}` : "", root.viewTab === 1 ? `${root.displayDirRows.length} 项` : ""].filter(value => value.length > 0)
+                            delegate: EchoTextTagRow {
+                                required property string modelData
+                                objectName: "webdavLibraryMetadataField"
+                                width: Math.min(parent.width, implicitWidth + 4)
+                                height: implicitHeight
+                                text: modelData
+                                lineHeight: 16.5
+                                font: Theme.font(11, Theme.semiboldWeight)
+                                color: Theme.secondaryText
+                            }
+                        }
+                    }
                 }
-                EchoMenuEntry {
-                    text: root.sortKey === "title" ? "✓ 按标题" : "按标题"
-                    onTriggered: root.sortKey = "title"
+                playable: root.viewTab === 0 ? root.flatReady && root.songTotal > 0 : root.dirHasFiles
+                showBatchAction: false
+                resourceActive: root.pageActive
+                loading: root.scanRunning && !root.flatReady
+                coverComponent: Component {
+                    EchoCover {
+                        objectName: "webdavLibraryCover"
+                        source: root.headerCoverUrl
+                        resourceActive: root.pageActive
+                        cornerRadius: Theme.mediaRadius / detailHeader.coverScale
+                        placeholderGlyph: "cloud"
+                        placeholderGlyphSize: 32
+                    }
                 }
-                EchoMenuEntry {
-                    text: root.sortKey === "size" ? "✓ 按大小" : "按大小"
-                    onTriggered: root.sortKey = "size"
+                // Only supply the slot while drilled in: the host loader stays
+                // visible whenever a component is set, so a hidden button would
+                // still reserve its width as blank space before the actions.
+                leadingActions: root.viewTab === 1 && root.browse.path.length > 0 && root.browse.path !== (root.browse.root || "/") ? backActions : null
+                Component {
+                    id: backActions
+
+                    EchoSoftButton {
+                        text: "返回"
+                        glyph: "arrow-left"
+                        onClicked: root.browseLoad(root.parentDir(root.browse.path))
+                    }
                 }
+                additionalActions: Component {
+                    RowLayout {
+                        spacing: 8
+
+                        EchoSoftButton {
+                            text: "扫描"
+                            glyph: "refresh-source"
+                            onClicked: root.startScan()
+                        }
+                        EchoSoftButton {
+                            text: "设置"
+                            glyph: "settings"
+                            onClicked: root.openSettings()
+                        }
+                    }
+                }
+                collapsedActions: Component {
+                    RowLayout {
+                        spacing: 8
+
+                        EchoIconButton {
+                            glyph: "refresh-source"
+                            tooltipText: "重新扫描"
+                            onClicked: root.startScan()
+                        }
+                        EchoIconButton {
+                            glyph: "settings"
+                            tooltipText: "插件设置"
+                            onClicked: root.openSettings()
+                        }
+                    }
+                }
+                onPlayRequested: root.playAll()
+            }
+        }
+
+        EchoPageStickyHeader {
+            id: toolbar
+            container: viewport
+            visible: true
+            flowPosition: detailHeader.expandedHeight
+            stickyTop: pageHeader.height
+            height: toolbarColumn.implicitHeight
+
+            // Shared rule: one hairline between the tab row and the sort
+            // header. Like the host pages it overlays the tab row's last
+            // device row instead of occupying a layout row, so the sort
+            // header and its own bottom divider keep the host's exact
+            // offsets.
+            EchoDivider {
+                objectName: "webdavToolbarDivider"
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.leftMargin: root.contentInset
+                anchors.rightMargin: root.contentInset
+                y: tabsRow.height - 1
+                height: 1
+                lineColor: Theme.subtleBorder
             }
 
             ColumnLayout {
-                anchors.centerIn: parent
-                visible: listView.visible === false
-                spacing: 8
-                width: Math.min(360, parent.width - 40)
-
-                EchoIcon {
-                    Layout.alignment: Qt.AlignHCenter
-                    Layout.preferredWidth: 34
-                    Layout.preferredHeight: 34
-                    name: root.browse.error || root.errorMessage ? "alert-circle" : root.flatMode ? "database" : "folder-open"
-                    color: Theme.iconSecondary
-                }
-                Label {
-                    Layout.fillWidth: true
-                    horizontalAlignment: Text.AlignHCenter
-                    wrapMode: Text.Wrap
-                    text: {
-                        if (root.browse.loading || root.flatLoading)
-                            return "正在加载…";
-                        if (root.browse.error || root.errorMessage)
-                            return root.browse.error || root.errorMessage;
-                        if (root.libraries.length === 0)
-                            return "还没有 WebDAV 库，点击右上角「添加库」开始";
-                        if (root.flatMode && !root.flatReady)
-                            return "平铺列表尚未扫描，点击「重新扫描」建立列表";
-                        if (root.scanRunning)
-                            return root.scanLabel || "正在扫描…";
-                        return root.flatMode ? "没有匹配的歌曲" : "此目录没有音频文件";
-                    }
-                    font: Theme.font(12, Theme.regularWeight)
-                    color: Theme.secondaryText
-                }
-                EchoButton {
-                    Layout.alignment: Qt.AlignHCenter
-                    visible: root.libraries.length === 0
-                    text: "打开插件设置"
-                    glyph: "settings"
-                    accent: true
-                    onClicked: root.openSettings()
-                }
-                EchoButton {
-                    Layout.alignment: Qt.AlignHCenter
-                    visible: root.flatMode && !root.flatReady && !root.scanRunning && root.libraries.length > 0
-                    text: "开始扫描"
-                    glyph: "database"
-                    accent: true
-                    loading: root.flatLoading
-                    onClicked: root.flatReload()
-                }
-            }
-
-            EchoSpinner {
-                anchors.centerIn: parent
-                visible: (root.browse.loading || root.flatLoading) && root.displayRows.length === 0
-                width: 22
-                height: 22
-            }
-        }
-
-        RowLayout {
-            Layout.fillWidth: true
-            visible: root.flatMode && root.flatTotal > 0
-            spacing: 10
-
-            Label {
-                text: `第 ${root.flatPageNumber} / ${root.flatPageCount} 页 · 共 ${root.flatTotal} 首`
-                font: Theme.font(12, Theme.regularWeight)
-                color: Theme.secondaryText
-            }
-            Item {
-                Layout.fillWidth: true
-            }
-            EchoIconButton {
-                glyph: "chevron-left"
-                tooltipText: "上一页"
-                enabled: root.flatOffset > 0
-                onClicked: root.flatPageLoad(Math.max(0, root.flatOffset - root.flatPageSize))
-            }
-            EchoIconButton {
-                glyph: "chevron-right"
-                tooltipText: "下一页"
-                enabled: root.flatOffset + root.flatPageSize < root.flatTotal
-                onClicked: root.flatPageLoad(root.flatOffset + root.flatPageSize)
-            }
-        }
-
-        Rectangle {
-            Layout.fillWidth: true
-            visible: root.selectionMode
-            radius: 12
-            color: Theme.elevated
-            border.color: Theme.subtleBorder
-            implicitHeight: 54
-            RowLayout {
+                id: toolbarColumn
                 anchors.fill: parent
-                anchors.leftMargin: 14
-                anchors.rightMargin: 14
-                spacing: 10
+                spacing: 0
 
-                Label {
-                    text: `已选 ${root.selectedCount} 首`
-                    font: Theme.font(13, Theme.semiboldWeight)
-                    color: Theme.text
-                }
-                EchoButton {
-                    text: "全选本页"
-                    accent: false
-                    onClicked: root.selectAllVisible()
-                }
-                Item {
+                RowLayout {
+                    id: tabsRow
+                    objectName: "webdavToolbarRow"
                     Layout.fillWidth: true
-                }
-                EchoButton {
-                    text: "播放选中"
-                    glyph: "player-play"
-                    accent: true
-                    enabled: root.selectedCount > 0
-                    onClicked: {
-                        root.playRows("now", Object.keys(root.selectedPaths), null);
-                        root.selectionMode = false;
+                    Layout.preferredHeight: 56
+                    Layout.leftMargin: root.contentInset
+                    Layout.rightMargin: root.contentInset
+                    spacing: 8
+
+                    EchoDetailTabs {
+                        labels: ["歌曲", "目录"]
+                        counts: [root.songTotal, ""]
+                        currentIndex: root.viewTab
+                        onPicked: index => {
+                            root.viewTab = index;
+                            root.resetView();
+                        }
+                    }
+                    Item {
+                        Layout.fillWidth: true
+                    }
+                    EchoSelect {
+                        Layout.preferredWidth: 180
+                        visible: root.libraries.length > 1
+                        placeholder: "选择 WebDAV 库"
+                        options: {
+                            const rows = root.asArray(root.libraries);
+                            const items = [];
+                            for (let i = 0; i < rows.length; i++)
+                                items.push({
+                                    value: rows[i].id,
+                                    label: rows[i].name || rows[i].serverUrl || rows[i].id
+                                });
+                            return items;
+                        }
+                        value: root.activeLibraryId
+                        onValueEdited: function (nextValue) {
+                            // Switching libraries rebuilds both views; the
+                            // explicit reload keeps the change one-shot (no
+                            // change-signal handler that would also fire
+                            // during refreshSettings itself).
+                            root.activeLibraryId = typeof nextValue === "string" ? nextValue : "";
+                            root.currentLibrary = root.libraryById(root.activeLibraryId);
+                            root.reloadCurrent();
+                        }
+                    }
+                    EchoTextField {
+                        Layout.preferredWidth: 160
+                        Layout.minimumWidth: 80
+                        placeholderText: root.viewTab === 1 ? "搜索目录..." : "搜索歌曲..."
+                        clearable: true
+                        text: root.keyword
+                        onTextEdited: {
+                            root.keyword = text;
+                            searchDebounce.restart();
+                        }
+                        onAccepted: {
+                            root.keyword = text;
+                            searchDebounce.stop();
+                            root.resetView();
+                        }
+                        onCleared: {
+                            root.keyword = "";
+                            // A pending debounce would fire right after and
+                            // only waste an epoch-discarded fetch.
+                            searchDebounce.stop();
+                            root.resetView();
+                        }
+                    }
+                    SongLocateButton {
+                        visible: root.viewTab === 0
+                        onClicked: root.locateCurrent()
                     }
                 }
-                EchoButton {
-                    text: "添加到队列"
-                    glyph: "playlist-add"
-                    accent: false
-                    enabled: root.selectedCount > 0
-                    onClicked: {
-                        root.playRows("append", Object.keys(root.selectedPaths), null);
-                        root.selectionMode = false;
-                        root.selectedPaths = ({});
-                    }
+                SongListHeader {
+                    visible: root.viewTab === 0
+                    Layout.fillWidth: true
+                    Layout.leftMargin: root.contentInset
+                    Layout.rightMargin: root.contentInset
+                    Layout.preferredHeight: root.viewTab === 0 ? 44 : 0
+                    geometry: listGeometry
+                    sortField: root.sortField
+                    sortDirection: root.sortDirection
+                    onSortPicked: field => root.changeSort(field)
                 }
-                EchoIconButton {
-                    glyph: "x"
-                    tooltipText: "退出批量选择"
-                    onClicked: {
-                        root.selectionMode = false;
-                        root.selectedPaths = ({});
+                // Breadcrumb row for the 目录 tab, occupying the same slot
+                // as the sort header in the 歌曲 tab.
+                RowLayout {
+                    id: crumbRow
+                    visible: root.viewTab === 1
+                    Layout.fillWidth: true
+                    Layout.leftMargin: root.contentInset
+                    Layout.rightMargin: root.contentInset
+                    Layout.preferredHeight: root.viewTab === 1 ? 44 : 0
+                    spacing: 4
+
+                    EchoIconButton {
+                        glyph: "arrow-left"
+                        tooltipText: "上一级"
+                        enabled: root.browse.path && root.currentLibrary && root.browse.path !== (root.browse.root || "/")
+                        onClicked: root.browseLoad(root.parentDir(root.browse.path))
+                    }
+                    Repeater {
+                        model: root.pathSegments
+
+                        delegate: RowLayout {
+                            id: crumbSegment
+                            required property int index
+                            required property string modelData
+                            spacing: 4
+
+                            EchoIcon {
+                                name: "chevron-right"
+                                color: Theme.secondaryText
+                                Layout.preferredWidth: 14
+                                Layout.preferredHeight: 14
+                                visible: crumbSegment.index > 0
+                            }
+                            EchoActionButton {
+                                id: crumbButton
+                                hoverEnabled: true
+                                flat: true
+                                padding: 4
+                                font: Theme.font(12, crumbSegment.index === root.pathSegments.length - 1 ? Theme.mediumWeight : Theme.regularWeight)
+                                contentItem: EchoTextTagRow {
+                                    text: crumbSegment.modelData
+                                    font: crumbButton.font
+                                    color: crumbSegment.index === root.pathSegments.length - 1 ? Theme.text : Theme.secondaryText
+                                }
+                                background: Rectangle {
+                                    color: crumbButton.hovered || crumbButton.visualFocus ? Theme.rowHover : "transparent"
+                                    radius: Theme.controlRadius
+                                }
+                                onClicked: root.browseLoad(root.crumbPath(crumbSegment.index))
+                            }
+                        }
+                    }
+                    Item {
+                        Layout.fillWidth: true
                     }
                 }
             }
         }
     }
 
-    function parentDir(path) {
-        const normalized = path || "/";
-        const cut = normalized.lastIndexOf("/");
-        if (cut <= 0)
-            return "/";
-        return normalized.slice(0, cut);
+    function formatBytes(size) {
+        if (!isFinite(size) || size < 0)
+            return "";
+        const units = ["B", "KB", "MB", "GB", "TB"];
+        let value = size;
+        let unit = 0;
+        while (value >= 1024 && unit < units.length - 1) {
+            value /= 1024;
+            unit += 1;
+        }
+        const text = unit === 0 ? String(Math.round(value)) : value >= 100 ? String(Math.round(value)) : value.toFixed(1);
+        return `${text} ${units[unit]}`;
     }
 
-    function crumbPath(index) {
-        const prefix = browse.root && browse.root.length > 0 ? browse.root : "/";
-        let path = prefix === "/" ? "" : prefix;
-        for (let i = 0; i <= index; i++)
-            path += `/${pathSegments[i]}`;
-        return path.length === 0 ? "/" : path;
+    // The menus live at page scope so scene coordinates from the row
+    // delegates map cleanly onto them.
+    EchoMenu {
+        id: songMenu
+
+        property string songId: ""
+        property string songPath: ""
+        property int rowIndex: 0
+
+        EchoMenuEntry {
+            visible: root.viewTab === 0
+            text: "立即播放"
+            onTriggered: root.playAt(songMenu.rowIndex)
+        }
+        EchoMenuEntry {
+            visible: root.viewTab === 1
+            text: "立即播放"
+            onTriggered: root.playPaths([songMenu.songPath])
+        }
+        EchoMenuEntry {
+            text: "下一首播放"
+            onTriggered: root.queueRow(songMenu.songPath, "next")
+        }
+        EchoMenuEntry {
+            text: "添加到队列"
+            onTriggered: root.queueRow(songMenu.songPath, "append")
+        }
+        onClosed: root.menuSongId = ""
+    }
+
+    EchoMenu {
+        id: folderMenu
+
+        property string folderPath: ""
+
+        EchoMenuEntry {
+            text: "播放此文件夹"
+            onTriggered: root.playFolder(folderMenu.folderPath)
+        }
+        EchoMenuEntry {
+            text: "下一首播放（文件夹）"
+            onTriggered: root.queueFolder(folderMenu.folderPath, "next")
+        }
+        EchoMenuEntry {
+            text: "添加到队列（文件夹）"
+            onTriggered: root.queueFolder(folderMenu.folderPath, "append")
+        }
     }
 
     Timer {
         id: searchDebounce
         interval: 300
-        onTriggered: if (root.flatMode)
-            root.flatPageLoad(0)
+        onTriggered: root.resetView()
     }
+
+    // The right-click context-target row fill reads this from the delegates.
+    property string menuSongId: ""
 }
