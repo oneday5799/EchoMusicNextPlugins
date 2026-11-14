@@ -77,11 +77,10 @@ Item {
     layer.smooth: true
     property bool animateWords: true
     // 远离焦点行的模糊（AMLL blur 语义：CSS filter blur 的 px 值，焦点行 0，
-    // 其余 min(5, 1+距离)（窄视口 ×0.8）由编排核心算好经动画驱动）。经
-    // GlyphPose.blur 落地：宿主按档位 {0,8,16,32} 预烘三盒模糊进 effects
-    // 图集，着色器在相邻档位间连续插值。交叉淡化剖面的可见动态范围集中在
-    // pose 6~8（≈6 以下全锐），折算 CSS 模糊 B px ≈ pose 6.35+0.1B（实测
-    // 标定见 __sweepPoses 注释）。
+    // 其余 min(5, 1+距离)（窄视口 ×0.8）由编排核心算好经动画驱动）。仅作
+    // 信息量暴露（probe 诊断打印）；实际模糊由 AmlGroupView 的组级
+    // layer.effect（MultiEffect）承担——不走 GlyphPose.blur，原因见
+    // __sweepPoses 注释。
     property real blurAmount: 0
 
     readonly property real em: font.pixelSize
@@ -683,61 +682,22 @@ Item {
         } catch (e) {}
         return list;
     }
-    // blurAmount>0 时给全部 pose（含 halo 层与切片层）统一注入 blur，覆盖
-    // __sweepPosesCore 的三个出口（无逐词整行/塑形过渡/逐簇扫掠）。绑定经
-    // 此读取 blurAmount，动画驱动模糊时不需额外信号。
-    // 折算：宿主 bodyBlur 是 crisp↔档位8 烘焙贴图的线性交叉淡化，但合成剖面
-    // 的 10-90% 宽随 t=pose/8 按 Φ⁻¹(1-0.1/t) 陡增——pose≈6 以下肉眼全锐，
-    // 全部动态范围挤在 6~8。Timer 轮换实测（dpr1.25，逻辑px，重复中位数）：
-    //   pose  6.0  6.2  6.4  6.6  6.8  7.0  8.0
-    //   宽   2.38 2.74 3.88 5.33 8.15 10.18 >13
-    // 对 AMLL CSS blur B（逻辑px，宽 1.28B+1 逻辑 = 1.25×(1.28B+1) 物理），
-    // 线性拟合 pose ≈ 6.35 + 0.1×B（B≤5），全段宽度误差 ≤0.5 逻辑px。
-    // bake 密度 min(dpr×.25,.5) 随 dpr 变化，此系数在其他 dpr 需重测。
-    // 起坡斜坡 min(1,B/0.3)：动画从 0 爬升时避免 pose 0→6.35 一帧跳变。
-    // B>5 段为标定曲线的线性外推（AMLL CSS blur 渲染上限 5px，核心已钳制；
-    // 外推段仅为防御）：B=8→pose 7.15、B=12→7.55，外推宽度与 1.28B+1
-    // 一致性递减；pose.blur 钳在 8（烘焙最大档 ≈ CSS 16px），更远行饱和为
-    // 均匀重雾，与目标观感一致。
-    // 半透明墨色会令同 pose 的模糊显著加重（α 对照实验：a=0.4 的未唱行在
-    // pose 6 已达焦点行 pose 8 的溶解宽度，钉 a=1 即恢复曲线；机制未定位到
-    // 宿主管线，但结论可复现）。故模糊行一律换「暗墨叠背景」的不透明外观
-    // （与扫掠带切片同式，视觉逐像素等价），全行共用同一条标定曲线。
+    // 远行模糊不在此注入 GlyphPose.blur：宿主 pose quad = inkBounds ±
+    // (blur×3+2)（GlyphRun.cpp:2247），而模糊档位的实际烘焙支撑 ≈
+    // 3×qRound(8×density)/density ≈ blur×3.6（dpr1.25 时 28.8px vs 22.6px）
+    // ——mask 尾部在 quad 边缘仍非零，被 quad 几何硬切成贯穿行宽的直边亮带
+    // （2026-11-15 实测「已播放行辉光有明显边界」根因，钳小 blur 只能缩带
+    // 不能消边）。模糊改由 AmlGroupView 的组级 layer.effect（MultiEffect）
+    // 承担，等价 AMLL 的 CSS filter blur；本行保持锐利位图交组层统一模糊。
+    // 曾在此按标定曲线（pose ≈ 6.35+0.1×B，标定数据随历史提交可考）注入
+    // blur，并对模糊行做「暗墨叠背景」不透明重映射（glowGain .45，抑制
+    // 半透明墨令同 pose 溶解显著加重的实测现象）——二者均为 pose.blur 路径
+    // 的补偿，随该路径一并移除。
     function __sweepPoses(): var {
         // 经此读取 poseAnchor 注册绑定依赖：行移动时重烘焙，雾色背景采样
-        // 始终对应当前屏幕位置（见 poseAnchor 注释；与 blurAmount 同法）
+        // 始终对应当前屏幕位置（见 poseAnchor 注释）
         const anchor = line.poseAnchor;
-        const list = __sweepPosesCore();
-        const b = line.blurAmount;
-        const amount = b > 0.005 ? (6.35 + 0.1 * b) * Math.min(1, b / 0.3) : 0;
-        if (amount > 0.005) {
-            for (let i = 0; i < list.length; ++i) {
-                const pose = list[i];
-                pose.blur = Math.min(8, amount);
-                const c = pose.color;
-                // halo 层（形体透明只留辉光）与已不透明的切片不处理
-                if (c.a >= 0.999 || pose.halos)
-                    continue;
-                let bg = line.backdropColor;
-                if (line.backdropAt) {
-                    const s = line.backdropAt(pose.__bgx ?? line.width * 0.5, pose.y ?? 0);
-                    if (s)
-                        bg = { "r": s[0], "g": s[1], "b": s[2] };
-                }
-                // 辉光抑制：暗墨 = 未唱色 + 背景的合成，其中未唱色的加亮成分
-                // 被大半径模糊摊开成大面积柔光（亮背景区尤甚）。将墨色偏离
-                // 背景的分量按 glowGain 缩放，压低雾的发光感；保持 a=1，
-                // 不触碰「半透明墨加重模糊宽度」的标定前提。
-                const glowGain = .45;
-                const wR = c.r * c.a + bg.r * (1 - c.a);
-                const wG = c.g * c.a + bg.g * (1 - c.a);
-                const wB = c.b * c.a + bg.b * (1 - c.a);
-                pose.color = Qt.rgba(bg.r + (wR - bg.r) * glowGain,
-                                     bg.g + (wG - bg.g) * glowGain,
-                                     bg.b + (wB - bg.b) * glowGain, 1);
-            }
-        }
-        return list;
+        return __sweepPosesCore();
     }
 
     onWordsChanged: __refreshGeometry()

@@ -1,6 +1,7 @@
 pragma ComponentBehavior: Bound
 import QtQuick
 import QtQuick.Controls.Basic
+import QtQuick.Effects
 import EchoMusic.Theme
 
 // AMLL 歌词组视图（对应 dom/lyric-group.ts + lyric-line.ts 的变换接线）。
@@ -66,11 +67,33 @@ Item {
         }
     }
 
+    // 远行模糊走组级 layer.effect（MultiEffect），等价 AMLL 对整个行包装盒
+    // （含副行）施加 CSS filter blur 的语义。不走 GlyphPose.blur：宿主 pose
+    // quad = inkBounds ± (blur×3+2)（GlyphRun.cpp:2247），而模糊档位的实际
+    // 烘焙支撑 ≈ 3×qRound(8×density)/density ≈ blur×3.6（dpr1.25 时 28.8px
+    // vs 22.6px）——mask 尾部在 quad 边缘仍非零，被 quad 几何硬切成贯穿行宽
+    // 的直边亮带（2026-11-15 实测「已播放行辉光有明显边界」根因）。层模糊的
+    // 衰减自然收敛，无结构性直边。
+    // 钳制与增益：AMLL base 端 blur = 1+distance（已播行 +1）不封顶，钳制
+    // min(5,·) 在 DOM 渲染端（lyric-group.ts:184）——在此复刻同语义，避免远
+    // 行无界。CSS blur(B) 的 σ = B/2；MultiEffect 的核虽标称 radius =
+    // blur×blurMax，但同标称值的视觉溶解宽度远窄于 CSS 高斯（2026-11-15
+    // 实测 1:1 映射被评「太弱且各行无梯度」），×2.5 增益恢复 CSS px 观感。
+    layer.enabled: group.blur > 0.02
+    layer.smooth: true
+    layer.effect: MultiEffect {
+        blurEnabled: true
+        blurMax: 16
+        blur: Math.min(5, group.blur) * 2.5 / 16
+    }
     Rectangle {
         objectName: "amllGroupBackground" + group.index
         anchors.fill: parent
         radius: group.em * 0.25
-        color: Theme.withAlpha(flow.textColor, tap.pressed ? 0.03 : hover.hovered ? 0.07 : 0)
+        // 悬停提示底色。不取 tap.pressed 分支：DragThreshold 策略的 TapHandler
+        // 经 passive grab 会让 pressed 长时间为真（2026-11-15 实测所有组同时
+        // 显示 3% 底色面板、出现明显边界），且按压反馈本就难以察觉
+        color: Theme.withAlpha(flow.textColor, hover.hovered ? 0.07 : 0)
     }
     Item {
         id: inner
