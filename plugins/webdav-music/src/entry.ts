@@ -161,12 +161,20 @@ function enrichStoreKey(songId: string): string {
   return `${ENRICH_STORE_PREFIX}${songId}`;
 }
 
+/** The host storage rejects any single value over 1 MiB and the enrichment
+ * cover is the only field that can approach that (embedded art is fetched up
+ * to COVER_READ_LIMIT, ~1.4MB once base64-encoded). A cover beyond this cap
+ * is dropped from the persisted record — the play path withholds those
+ * covers from the queue too — so the write never fails silently and the
+ * duration still reaches the flat list. */
+const MAX_PERSISTED_COVER_CHARS = 900_000;
+
 function enrichRecordOf(enrichment: TrackEnrichment): Record<string, JsonValue> {
   return {
     title: enrichment.title,
     artist: enrichment.artist,
     album: enrichment.album,
-    cover: enrichment.cover,
+    cover: enrichment.cover.length <= MAX_PERSISTED_COVER_CHARS ? enrichment.cover : '',
     durationMs: enrichment.durationMs,
   };
 }
@@ -878,8 +886,13 @@ async function flatCovers(args: Record<string, JsonValue>): Promise<JsonValue> {
       if (record.durationMs > 0) durations[songId] = record.durationMs;
       if (record.cover) {
         // Cap the reply payload like local-music's cover batches: the rest
-        // of the batch retries in a later call (truncated flag).
-        if (payload + record.cover.length > COVER_BATCH_PAYLOAD_LIMIT) {
+        // of the batch retries in a later call (truncated flag). The cap
+        // never applies to the first cover of a call: an oversized single
+        // cover (embedded art reaches COVER_READ_LIMIT, ~1.4MB in base64)
+        // delivered alone still makes progress — skipping it would make the
+        // page re-queue the same id every batch timer tick and no cover
+        // would ever reach the row.
+        if (payload > 0 && payload + record.cover.length > COVER_BATCH_PAYLOAD_LIMIT) {
           truncated = true;
           continue;
         }
@@ -1200,12 +1213,19 @@ function resolveAudioSource(resolverContext: AudioSourceContext): AudioSourceVal
   const url = buildAuthUrl(library.serverUrl, library.username, library.password, path);
   if (!url) return null;
   const duration = resolverContext.track.durationMs;
-  return {
+  const value: AudioSourceValue = {
     url,
     quality: qualityForExtension(extensionOf(path)),
     sourceKind: 'plugin',
-    durationMs: typeof duration === 'number' && duration > 0 ? Math.round(duration) : undefined,
   };
+  // An explicit `durationMs: undefined` still crosses the FFI as a key with
+  // a null value, and the host candidate validator requires durationMs to
+  // be a real number when present — the whole candidate would be rejected
+  // ("Audio source callback returned an invalid candidate"). Omit the key
+  // entirely when the track carries no duration.
+  if (typeof duration === 'number' && duration > 0)
+    return { ...value, durationMs: Math.round(duration) };
+  return value;
 }
 
 export async function activate(ctx: EchoPluginContext): Promise<void> {

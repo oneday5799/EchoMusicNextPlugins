@@ -322,8 +322,12 @@ function documentFromKugou(lyrics: KugouDto_lyric_Lyrics): LyricDocument | null 
   return {
     format: 'lrc',
     content: built.content,
-    translation: built.translation,
-    romanization: built.romanization,
+    // The host lyric parser requires every document field to be a real
+    // string: an explicit `undefined` crosses the FFI as a null-valued key
+    // and the whole document is rejected ("无效的歌词文档字段"). Lyrics
+    // without a translation/romanization track carry empty strings.
+    translation: built.translation || '',
+    romanization: built.romanization || '',
     source: '酷狗歌词',
   };
 }

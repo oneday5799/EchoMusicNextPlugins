@@ -212,6 +212,13 @@ Item {
                 nextId = result && typeof result.activeLibraryId === "string" ? result.activeLibraryId : "";
             activeLibraryId = nextId;
             currentLibrary = libraryById(nextId);
+            // 默认平铺视图 decides the tab the page opens on (the legacy
+            // flatMode semantics: on → 歌曲, off → start in 目录). Later
+            // setting revisions must not yank the user between tabs mid-use.
+            if (!initialTabApplied) {
+                initialTabApplied = true;
+                viewTab = currentLibrary && currentLibrary.flatView === true ? 0 : 1;
+            }
             if (reload)
                 reloadCurrent();
         });
@@ -261,8 +268,14 @@ Item {
         pageLoading = false;
         loadingMore = false;
         if (viewTab === 0) {
-            if (!flatReady)
+            // flatReady only flips true through flat.load, so a scan that
+            // just finished (or a first visit with no cache) must go through
+            // ensureFlatAndLoad — returning here would leave the list empty
+            // behind the "not scanned" footer forever.
+            if (!flatReady) {
+                ensureFlatAndLoad();
                 return;
+            }
             pageLoad();
         } else {
             browseLoad("");
@@ -390,10 +403,8 @@ Item {
                 pageRows[durationIndex].durationText = text;
             }
             const durationItem = songList.itemAtIndex(durationIndex);
-            if (durationItem && !durationItem.pooled && durationItem.durationText !== text) {
-                durationItem.durationMs = ms;
+            if (durationItem && !durationItem.pooled && durationItem.durationText !== text)
                 durationItem.durationText = text;
-            }
         }
         if (Object.keys(coverRequests).length > 0 && !coverBatchTimer.running)
             coverBatchTimer.restart();
@@ -690,6 +701,10 @@ Item {
         for (let i = 0; i < pageRows.length; i++) {
             if (pageRows[i].resourceId === id) {
                 songMenu.rowIndex = i;
+                // Flat rows resolve their own path here: the SongRow delegate
+                // cannot carry `path` (not a SongRow property, see the
+                // required-property note above).
+                songMenu.songPath = pageRows[i].path;
                 break;
             }
         }
@@ -801,6 +816,13 @@ Item {
         });
     }
 
+    /** The header 扫描 button turns into 停止扫描 while the task runs, like
+     * the old page's banner button; the task center action stays available
+     * too. flat.abort keeps the already-scanned results. */
+    function abortScan() {
+        run("flat.abort", {}, null);
+    }
+
     function changeSort(field) {
         if (sortField === field) {
             sortDirection = sortDirection === 2 ? 1 : 2;
@@ -868,6 +890,8 @@ Item {
     }
 
     property int lastSettingsRevision: -1
+    // The 默认平铺视图 gate applies once, on the first settings load.
+    property bool initialTabApplied: false
     // A library notification while the page sits in a background stack would
     // still rebuild every row delegate for nothing the user can see; the
     // reload waits for reactivation.
@@ -972,14 +996,17 @@ Item {
             }
             delegate: SongRow {
                 id: row
+                // Only names that exist on SongRow itself may be declared
+                // required: the required check runs against the delegate type
+                // plus the injected delegate roles (index/modelData), and an
+                // unknown name fails the whole delegate component at compile
+                // time ("was marked as required but does not exist") — every
+                // row then refuses to render. Row fields outside the SongRow
+                // contract (path, durationMs) stay on the row objects in
+                // pageRows; handlers read them from there by resourceId.
                 required original
                 required privilegeTags
                 required qualityLabel
-                required path
-                // Not a SongRow property, but applyCovers pokes it in place
-                // alongside durationText when a batch lands; the model
-                // injects it on (re)creation like the other roles.
-                required durationMs
                 property bool pooled: false
                 width: songList.width
                 geometry: listGeometry
@@ -1023,12 +1050,12 @@ Item {
                 onDoubleClicked: if (!row.pendingPlay)
                     root.playAt(index)
                 onCommentsRequested: id => root.plugin.toast.info("WebDAV 歌曲暂不支持评论")
-                onMoreRequested: (id, sceneX, sceneY) => root.showSongMenu(id, row.path, sceneX, sceneY)
+                onMoreRequested: (id, sceneX, sceneY) => root.showSongMenu(id, "", sceneX, sceneY)
                 TapHandler {
                     acceptedButtons: Qt.RightButton
                     onTapped: eventPoint => {
                         const point = row.mapToItem(null, eventPoint.position.x, eventPoint.position.y);
-                        root.showSongMenu(row.resourceId, row.path, point.x, point.y);
+                        root.showSongMenu(row.resourceId, "", point.x, point.y);
                     }
                 }
             }
@@ -1171,21 +1198,11 @@ Item {
                             root.showFolderMenu(dirRow.modelData.path, point.x, point.y);
                         }
                     }
-                    onDoubleClicked: root.browseLoad(dirRow.modelData.path)
-                }
-                EchoIconButton {
-                    // Folder play action rides the hover state, matching the
-                    // song rows' hover play affordance.
-                    visible: dirRow.isDir && (rowFolder.hovered || rowFolder.visualFocus)
-                    anchors.verticalCenter: parent.verticalCenter
-                    x: listGeometry.indexWidth - 15
-                    width: 30
-                    height: 30
-                    padding: 8
-                    glyph: "play"
-                    tooltipText: "播放此文件夹"
-                    foreground: Theme.iconMain
-                    onClicked: root.playFolder(dirRow.modelData.path)
+                    // Single click drills in, like the host's album drill-in.
+                    // Double-click is not an option here: its second click
+                    // lands on the new directory's rows and would drill one
+                    // level too deep (or reload the same list twice).
+                    onClicked: root.browseLoad(dirRow.modelData.path)
                 }
 
                 // File row mirrors SongRow's visuals without the model
@@ -1434,9 +1451,9 @@ Item {
                         spacing: 8
 
                         EchoSoftButton {
-                            text: "扫描"
-                            glyph: "refresh-source"
-                            onClicked: root.startScan()
+                            text: root.scanRunning ? "停止扫描" : "扫描"
+                            glyph: root.scanRunning ? "square" : "refresh-source"
+                            onClicked: root.scanRunning ? root.abortScan() : root.startScan()
                         }
                         EchoSoftButton {
                             text: "设置"
@@ -1450,9 +1467,9 @@ Item {
                         spacing: 8
 
                         EchoIconButton {
-                            glyph: "refresh-source"
-                            tooltipText: "重新扫描"
-                            onClicked: root.startScan()
+                            glyph: root.scanRunning ? "square" : "refresh-source"
+                            tooltipText: root.scanRunning ? "停止扫描" : "重新扫描"
+                            onClicked: root.scanRunning ? root.abortScan() : root.startScan()
                         }
                         EchoIconButton {
                             glyph: "settings"

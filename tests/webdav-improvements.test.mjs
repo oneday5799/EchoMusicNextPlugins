@@ -714,6 +714,13 @@ test('伴生 .lrc 文件优先，酷狗歌词持久化后第二次解析不再�
     const first = await resolver.resolve({ track, durationMs: 3000 });
     assert.equal(first.source, '酷狗歌词');
     assert.equal(first.content.includes('第一句'), true);
+    // The host lyric parser rejects any document field that is not a real
+    // string; a kugou lyric without translation/romanization must come back
+    // with empty strings, never undefined keys (FFI null-valued keys).
+    assert.equal(first.translation, '', '无翻译补空串');
+    assert.equal(first.romanization, '', '无音译补空串');
+    for (const value of Object.values(first))
+      assert.equal(typeof value, 'string', '文档字段全部为字符串');
     await tick();
     const lyricKey = [...env.store.keys()].find((key) => key.startsWith('lyr:'));
     assert.ok(lyricKey, '在线歌词已持久化');
@@ -1315,6 +1322,92 @@ test('flat.covers 从持久 enrichment 批量返回封面与时长', async () =>
     const unknown = await env.commands.get('flat.covers')({ ids: ['webdav-nope'] });
     assert.deepEqual(Object.keys(unknown.covers), []);
     assert.deepEqual(Object.keys(unknown.durations), []);
+  } finally {
+    await env.deactivate();
+  }
+});
+
+test('音频源候选：无时长时省略 durationMs 键（宿主校验拒绝 null 值键）', async () => {
+  const env = await setup();
+  try {
+    const track = {
+      sourceId: 'webdav:lib1:webdav-abc',
+      durationMs: 0,
+      data: { p: '/music/a.mp3' },
+    };
+    const without = env.resolvers.audio.resolve({ track });
+    assert.equal(typeof without.url, 'string');
+    assert.equal(
+      without.url.startsWith('http://user:pass@webdav.local/music/a.mp3'),
+      true,
+      'URL 指向 WebDAV 文件并携带认证',
+    );
+    assert.equal(without.quality, 'higher');
+    assert.equal(without.sourceKind, 'plugin');
+    // The FFI carries an explicit undefined as a null-valued key, which the
+    // host candidate validator rejects — the key must be absent entirely.
+    assert.equal(Object.prototype.hasOwnProperty.call(without, 'durationMs'), false);
+
+    const withDuration = env.resolvers.audio.resolve({
+      track: { ...track, durationMs: 123456 },
+    });
+    assert.equal(withDuration.durationMs, 123456);
+    assert.equal(typeof withDuration.durationMs, 'number');
+
+    // Prefixed sourceId (host queue ingestion) resolves the same way.
+    const prefixed = env.resolvers.audio.resolve({
+      track: { ...track, sourceId: 'webdav-music/webdav:lib1:webdav-abc' },
+    });
+    assert.equal(prefixed.url, without.url);
+  } finally {
+    await env.deactivate();
+  }
+});
+
+test('flat.covers 超限单封独占一批返回，截断的余量下一批补齐', async () => {
+  const env = await setup();
+  try {
+    // 600K base64 is beyond the 512K batch payload cap but still persistable
+    // (under the 1 MiB storage limit): the batch must deliver it alone
+    // instead of skipping it forever (the page re-queues truncated ids).
+    const big = `data:image/jpeg;base64,${'A'.repeat(600000)}`;
+    const small = 'data:image/jpeg;base64,iVBORw0KGgo=';
+    env.store.set('enrich:webdav-big', { title: '大封面', cover: big, durationMs: 1000 });
+    env.store.set('enrich:webdav-small', { title: '小封面', cover: small, durationMs: 2000 });
+
+    const first = await env.commands.get('flat.covers')({ ids: ['webdav-big', 'webdav-small'] });
+    assert.equal(typeof first.covers['webdav-big'], 'string', '超限单封仍整发');
+    assert.equal(first.covers['webdav-small'], undefined, '余量不足的后续封面被截断');
+    assert.equal(first.truncated, true);
+    assert.equal(first.durations['webdav-big'], 1000);
+
+    const second = await env.commands.get('flat.covers')({ ids: ['webdav-small'] });
+    assert.equal(second.covers['webdav-small'], small, '截断的封面下一批补齐');
+    assert.equal(second.truncated, false);
+  } finally {
+    await env.deactivate();
+  }
+});
+
+test('超过宿主存储 1MiB 限制的内嵌封面持久化时丢弃，时长保留', async () => {
+  // A ~700KB binary cover base64-encodes to ~933KB, beyond the persisted
+  // record cap: writeValue would otherwise fail with the host's "Stored
+  // value exceeds 1 MiB" and the whole enrichment (duration included) would
+  // silently never land.
+  const hugeCover = new Uint8Array(700000).fill(7);
+  const env = await setup({
+    get: () => ({ status: 206, data: id3WithCover('超大图', hugeCover) }),
+  });
+  try {
+    await env.commands.get('play')({ libraryId: 'lib1', paths: ['/a.mp3'], mode: 'now' });
+    await tick();
+    const songId = makeStableSongId('lib1', '/a.mp3');
+    const record = env.store.get(`enrich:${songId}`);
+    assert.ok(record, 'enrichment 已持久化');
+    assert.equal(record.cover, '', '超限封面从持久记录中丢弃');
+    assert.equal(typeof record.durationMs, 'number', '记录其余字段完整写入');
+    const batch = await env.commands.get('flat.covers')({ ids: [songId] });
+    assert.equal(batch.covers[songId], undefined);
   } finally {
     await env.deactivate();
   }
