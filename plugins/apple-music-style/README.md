@@ -8,7 +8,7 @@
 - 专辑标题、歌手名可跳转对应详情页：皮肤 QML 调用插件命令 `open-detail`，入口再经 `ctx.ui.navigation.navigate` 进入宿主真实路由；`navigation` capability 首次使用时由宿主请求授权。
 - 播放页背景直接复用宿主"封面歌词"模式的模糊封面背景：实例化宿主 `EchoMusic.Playback` 的 `PlaybackBlurredBackground`（与内建封面歌词页同一 fluid 着色器与封面交叉淡化管线），底色、磨砂与透明度材质语义对照宿主 `PlaybackBackground`（`lyricBackground(封面主色)` 500ms 渐变、`1 - transparency/100`、磨砂时黑 55% 底）。背景律动跟随宿主歌词设置 `backgroundRhythm`：经 `settings.host` capability 授权后 `settings.read/observe('lyrics')` 同步，30fps 相位推进与宿主一致；拒绝授权或关闭该设置时背景保持静止。歌词区上下渐隐用遮罩实现；动画全部遵循宿主"减少动效"开关。
 
-皮肤设置还原旧插件全部八项（与皮肤页面共享同一配置句柄，保存在安装私有数据）：增强对比度、字体缩放（50–200%）、字体粗细（300–900）、非活动行模糊、非活动行缩小、弹簧滚动、逐词渐变宽度（0–100%）、对齐位置（0–100%）。设置组件与皮肤共用 `validate` 校验，"恢复默认"调用 `configuration.reset()`。
+皮肤设置还原旧插件的排版七项（与皮肤页面共享同一配置句柄，保存在安装私有数据）：字体缩放（50–200%）、字体粗细（300–900）、非活动行模糊、非活动行缩小、弹簧滚动、逐词渐变宽度（0–100%）、对齐位置（0–100%）。旧插件的「增强对比度」不移植——多种实现方案均无法在宿主 pose 渲染下复现 DOM text-shadow 观感，且 AMLL 基线的明暗比本身已足够。设置组件与皮肤共用 `validate` 校验；「恢复默认」与保存错误提示由宿主换肤抽屉统一渲染（`LyricSkinDrawer` 底部按钮，调用同一 `configuration.reset()`），设置面板不重复提供，避免抽屉里出现两个重置按钮。
 
 与旧插件（EchoMusicPlugins/apple-music-style 1.2.3）的有意差异：
 

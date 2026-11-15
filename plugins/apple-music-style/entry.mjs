@@ -21,14 +21,13 @@ import { awaitOperation } from "echo:plugin-sdk";
 // plugins/apple-music-style/src/config.ts
 var SKIN_ID = "apple-music";
 var DEFAULT_SETTINGS = {
-  enhanceContrast: false,
   fontScale: 100,
   fontWeight: 850,
   enableBlur: true,
   enableScale: true,
   enableSpring: true,
   fadeWidth: 50,
-  alignPosition: 48
+  alignPosition: 35
 };
 var NUMBER_SETTINGS = {
   fontScale: [50, 200],
@@ -36,7 +35,7 @@ var NUMBER_SETTINGS = {
   fadeWidth: [0, 100],
   alignPosition: [0, 100]
 };
-var BOOLEAN_SETTINGS = ["enhanceContrast", "enableBlur", "enableScale", "enableSpring"];
+var BOOLEAN_SETTINGS = ["enableBlur", "enableScale", "enableSpring"];
 function validateSettings(values) {
   if (!values || typeof values !== "object" || Array.isArray(values)) {
     return { errors: ["\u76AE\u80A4\u8BBE\u7F6E\u5FC5\u987B\u662F JSON \u5BF9\u8C61"] };
@@ -62,7 +61,7 @@ function validateSettings(values) {
 function activate(ctx) {
   const skin = ctx.ui.lyricsPage.registerSkin({
     id: SKIN_ID,
-    title: "Apple Music \u98CE\u683C",
+    title: "Apple Music Style",
     description: "\u53CC\u680F\u5E03\u5C40\uFF1A\u5DE6\u4FA7\u5C01\u9762\u4E0E\u64AD\u653E\u63A7\u5236\uFF0C\u53F3\u4FA7\u5BBF\u4E3B\u539F\u751F\u9010\u5B57\u6B4C\u8BCD\u3002",
     component: "qml/Skin.qml",
     titlebar: "host",

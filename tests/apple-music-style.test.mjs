@@ -15,7 +15,6 @@ import {
 test('skin settings defaults mirror the AMLL alignment default', () => {
   assert.equal(SKIN_ID, 'apple-music');
   assert.deepEqual(DEFAULT_SETTINGS, {
-    enhanceContrast: false,
     fontScale: 100,
     fontWeight: 850,
     enableBlur: true,
@@ -39,7 +38,6 @@ test('skin settings validation accepts the default set and full ranges', () => {
       fontWeight: 900,
       fadeWidth: 100,
       alignPosition: 100,
-      enhanceContrast: true,
       enableBlur: false,
       enableScale: false,
       enableSpring: false,
@@ -60,7 +58,9 @@ test('skin settings validation rejects wrong types and out-of-range values', () 
   assert.ok(validateSettings({ fadeWidth: 101 }).errors);
   assert.ok(validateSettings({ alignPosition: -1 }).errors);
   assert.ok(validateSettings({ alignPosition: 101 }).errors);
-  assert.ok(validateSettings({ enhanceContrast: 1 }).errors);
+  // 已移除的 enhanceContrast 键按未知键忽略，不得再参与校验
+  assert.equal(validateSettings({ enhanceContrast: 1 }), true);
+  assert.equal(validateSettings({ enhanceContrast: true }), true);
   assert.ok(validateSettings({ enableBlur: 'yes' }).errors);
   assert.ok(validateSettings({ enableScale: 0 }).errors);
   assert.ok(validateSettings({ enableSpring: null }).errors);
@@ -68,7 +68,8 @@ test('skin settings validation rejects wrong types and out-of-range values', () 
 
 test('skin settings normalization clamps and fills defaults', () => {
   assert.deepEqual(normalizeSettings(undefined), DEFAULT_SETTINGS);
-  assert.deepEqual(normalizeSettings({ enhanceContrast: 1 }).enhanceContrast, false);
+  // 已移除的 enhanceContrast 不再出现在归一化结果里
+  assert.equal('enhanceContrast' in normalizeSettings({ enhanceContrast: 1 }), false);
   assert.deepEqual(normalizeSettings({ fontScale: 999 }), { ...DEFAULT_SETTINGS, fontScale: 200 });
   assert.deepEqual(normalizeSettings({ fontWeight: -5 }), { ...DEFAULT_SETTINGS, fontWeight: 300 });
   assert.deepEqual(normalizeSettings({ fadeWidth: 80 }), { ...DEFAULT_SETTINGS, fadeWidth: 80 });
@@ -143,12 +144,13 @@ test('AMLL refactor wiring drives the lyric page through the base core', async (
   const group = await readFile(pluginRoot + 'qml/amll/AmlGroupView.qml', 'utf8');
   const line = await readFile(pluginRoot + 'qml/amll/AmlLineView.qml', 'utf8');
   const dots = await readFile(pluginRoot + 'qml/amll/AmlInterludeDots.qml', 'utf8');
+  const skinSettings = await readFile(pluginRoot + 'qml/SkinSettings.qml', 'utf8');
+  const entry = await readFile(pluginRoot + 'entry.mjs', 'utf8');
   const config = JSON.parse(await readFile(pluginRoot + 'plugin.config.json', 'utf8'));
   const manifest = JSON.parse(await readFile(pluginRoot + 'manifest.json', 'utf8'));
 
-  // 八项旧设置全部接线到渲染属性
+  // 七项旧设置全部接线到渲染属性（enhanceContrast 已移除）
   for (const key of [
-    'enhanceContrast',
     'fontScale',
     'fontWeight',
     'enableBlur',
@@ -159,9 +161,30 @@ test('AMLL refactor wiring drives the lyric page through the base core', async (
   ])
     assert.ok(skin.includes(`"${key}"`), `Skin.qml missing setting ${key}`);
   assert.ok(skin.includes('LyricFlow {'), '右栏必须使用 AMLL 歌词流');
-  assert.ok(skin.includes('sublineOpacity: root.s.enhanceContrast ? 0.72 : 0.56'));
+  assert.ok(skin.includes('sublineOpacity: 0.56'));
+  assert.ok(!skin.includes('enhanceContrast'), '增强对比度设置已整体移除');
   assert.ok(skin.includes('wordFade: root.s.fadeWidth / 100'));
   assert.ok(skin.includes('focusPosition: root.s.alignPosition / 100'));
+  // 对齐位置 AMLL 默认 0.35：QML 兜底与 entry.mjs 捆绑须与 config.ts 同步
+  assert.ok(skin.includes('values.alignPosition, 35, 0, 100'), 'Skin.qml 兜底默认须为 35');
+  assert.ok(
+    skinSettings.includes('values.alignPosition, 35, 0, 100'),
+    'SkinSettings.qml 兜底默认须为 35',
+  );
+  assert.ok(
+    entry.includes('alignPosition: 35'),
+    'entry.mjs 捆绑 DEFAULT_SETTINGS 须与 config.ts 同步',
+  );
+  // 恢复默认入口由宿主抽屉统一渲染（LyricSkinDrawer 底部 EchoSoftButton），
+  // 插件设置面板不得自带——否则抽屉里出现两个重置按钮（忽略注释里的字样）
+  const skinSettingsCode = skinSettings.replace(/^\s*\/\/.*$/gm, '');
+  assert.ok(!skinSettingsCode.includes('恢复默认'), 'SkinSettings 不得自带恢复默认按钮');
+  assert.ok(!skinSettingsCode.includes('errorMessage'), '错误提示同样由宿主抽屉渲染');
+  assert.ok(!skinSettingsCode.includes('调整歌词外观'), '设置面板顶部说明文字已移除');
+  assert.ok(
+    entry.includes('"Apple Music Style"'),
+    '皮肤注册标题须为 Apple Music Style（换肤卡片与设置页头共用）',
+  );
   assert.ok(!skin.includes('EchoPluginLyricsView'), '不再依赖宿主原生歌词视图');
   // 播放页背景直接复用宿主“封面歌词”模式的渲染器与材质语义
   assert.ok(skin.includes('import EchoMusic.Playback'), '背景必须导入宿主 Playback 模块');
@@ -268,6 +291,23 @@ test('AMLL refactor wiring drives the lyric page through the base core', async (
   assert.ok(skin.includes('alpha: root.playMode === 2 ? 1 : 0.5'), '随机激活态全白、非激活 0.5 白');
   for (const icon of ['shuffle', 'skip', 'play', 'pause', 'loop'])
     assert.ok(config.assets.includes(`qml/icons/${icon}.svg`), `缺少旧版图标资产 ${icon}.svg`);
+
+  // 收藏按钮：收藏态只切换爱心填充字形，不点亮圆底或改变图标颜色
+  assert.ok(
+    skin.includes('root.player.snapshot.favorite ? "heart-filled" : "heart"'),
+    '收藏态必须只切换爱心填充字形',
+  );
+  assert.ok(!skin.includes('actionButton.active'), '收藏态不得改变按钮背景或图标颜色');
+
+  // 封面投影：对照旧插件 .amms-cover-img 双层 box-shadow（12/40 + 2/8），
+  // 用宿主 EchoSurfaceShadow（SDF 环带，不画源矩形）；无封面占位不投影
+  assert.ok(skin.includes('EchoSurfaceShadow'), '封面投影必须用宿主 EchoSurfaceShadow');
+  assert.ok(
+    skin.includes('blur: 40') && skin.includes('Qt.vector2d(0, 12)'),
+    '主投影层 0 12px 40px',
+  );
+  assert.ok(skin.includes('blur: 8') && skin.includes('Qt.vector2d(0, 2)'), '贴合投影层 0 2px 8px');
+  assert.ok(skin.includes('visible: coverItem.hasArtwork'), '无封面占位时不投影');
 
   // 宿主能力声明不变
   for (const feature of ['text.glyphs', 'graphics.glyphRun.canvas', 'settings.host'])

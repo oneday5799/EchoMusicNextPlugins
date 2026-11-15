@@ -1,5 +1,4 @@
 export interface SkinSettings {
-  enhanceContrast: boolean;
   fontScale: number;
   fontWeight: number;
   enableBlur: boolean;
@@ -12,7 +11,6 @@ export interface SkinSettings {
 export const SKIN_ID = 'apple-music';
 
 export const DEFAULT_SETTINGS: SkinSettings = {
-  enhanceContrast: false,
   fontScale: 100,
   fontWeight: 850,
   enableBlur: true,
@@ -29,7 +27,7 @@ const NUMBER_SETTINGS: Record<string, [number, number]> = {
   alignPosition: [0, 100],
 };
 
-const BOOLEAN_SETTINGS = ['enhanceContrast', 'enableBlur', 'enableScale', 'enableSpring'];
+const BOOLEAN_SETTINGS = ['enableBlur', 'enableScale', 'enableSpring'];
 
 export function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
@@ -63,7 +61,6 @@ export function normalizeSettings(value: unknown): SkinSettings {
     return Number.isFinite(raw) ? raw : fallback;
   };
   return {
-    enhanceContrast: source.enhanceContrast === true,
     fontScale: clamp(number('fontScale', DEFAULT_SETTINGS.fontScale), 50, 200),
     fontWeight: clamp(number('fontWeight', DEFAULT_SETTINGS.fontWeight), 300, 900),
     enableBlur: source.enableBlur !== false,

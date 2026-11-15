@@ -91,14 +91,13 @@ Item {
 
     // 皮肤设置与换肤抽屉的设置组件共享同一 configuration 句柄
     readonly property var s: ({
-            "enhanceContrast": root.configuration.values.enhanceContrast === true,
             "fontScale": root.num(root.configuration.values.fontScale, 100, 50, 200),
             "fontWeight": root.num(root.configuration.values.fontWeight, 850, 300, 900),
             "enableBlur": root.configuration.values.enableBlur !== false,
             "enableScale": root.configuration.values.enableScale !== false,
             "enableSpring": root.configuration.values.enableSpring !== false,
             "fadeWidth": root.num(root.configuration.values.fadeWidth, 50, 0, 100),
-            "alignPosition": root.num(root.configuration.values.alignPosition, 48, 0, 100)
+            "alignPosition": root.num(root.configuration.values.alignPosition, 35, 0, 100)
         })
 
     // Apple Music 观感固定为深色封面背景上的白色文字，不随主题翻转
@@ -547,8 +546,35 @@ Item {
                     Layout.preferredHeight: leftContent.coverSize
                     Layout.bottomMargin: leftContent.coverGap
 
-                    // 封面直接叠在封面模糊背景上：MultiEffect 阴影会把纯黑
-                    // 源矩形一并画出，暂停缩小时露出一圈黑底，故不使用阴影
+                    // 封面投影：对照旧插件 .amms-cover-img 双层 box-shadow
+                    // （0 12px 40px rgba(0,0,0,.45) + 0 2px 8px rgba(0,0,0,.25)）。
+                    // 用宿主 EchoSurfaceShadow（解析 SDF 环带、内部裁剪不画源矩形），
+                    // 规避旧 MultiEffect 方案把不透明封面矩形一并画出、暂停缩小时
+                    // 露出黑底圈的问题；阴影层与封面同 scale（CSS transform 缩放时
+                    // 阴影随动），无封面占位时与旧插件一致不投影
+                    Item {
+                        id: coverShadow
+                        anchors.fill: parent
+                        scale: coverItem.scale
+                        visible: coverItem.hasArtwork
+
+                        EchoSurfaceShadow {
+                            anchors.fill: parent
+                            surface: parent
+                            radius: 14
+                            blur: 40
+                            offset: Qt.vector2d(0, 12)
+                            color: Qt.rgba(0, 0, 0, 0.45)
+                        }
+                        EchoSurfaceShadow {
+                            anchors.fill: parent
+                            surface: parent
+                            radius: 14
+                            blur: 8
+                            offset: Qt.vector2d(0, 2)
+                            color: Qt.rgba(0, 0, 0, 0.25)
+                        }
+                    }
                     EchoCover {
                         id: coverItem
                         anchors.fill: parent
@@ -702,7 +728,6 @@ Item {
                         AmActionButton {
                             glyph: root.player.snapshot.favorite ? "heart-filled" : "heart"
                             label: qsTr("收藏")
-                            active: root.player.snapshot.favorite
                             enabled: root.page.active && root.player.hasTrack
                             onClicked: root.page.command("favorite", {
                                 "revision": root.player.revision
@@ -1010,8 +1035,8 @@ Item {
             blurEnabled: root.s.enableBlur
             scaleEnabled: root.s.enableScale
             springEnabled: root.s.enableSpring
-            // 副歌词透明度：普通 0.56，增强对比度 0.72
-            sublineOpacity: root.s.enhanceContrast ? 0.72 : 0.56
+            // 副歌词透明度：0.56（AMLL 基线）
+            sublineOpacity: 0.56
             lineWidthAspect: 0.86
             pageHeight: root.height
         }
@@ -1019,12 +1044,13 @@ Item {
         // 上下边缘不做渐隐（AMLL 无边缘遮罩；远行由模糊 + 视口剔除自然消隐）
     }
 
-    // 圆形操作按钮（收藏/评论/分享/更多），对应旧版 38px 圆形按钮
+    // 圆形操作按钮（收藏/更多外观），对应旧版 38px 圆形按钮。
+    // 收藏态只切换爱心填充字形（heart → heart-filled），不点亮圆底与
+    // 图标颜色——圆底仅跟随悬停（2026-11-15 用户要求）
     component AmActionButton: AbstractButton {
         id: actionButton
         property string glyph
         property string label
-        property bool active: false
 
         implicitWidth: 38
         implicitHeight: 38
@@ -1032,7 +1058,7 @@ Item {
         Accessible.name: label
         background: Rectangle {
             radius: width / 2
-            color: actionButton.enabled && (actionButton.hovered || actionButton.active) ? "#40ffffff" : "#26ffffff"
+            color: actionButton.enabled && actionButton.hovered ? "#40ffffff" : "#26ffffff"
             Behavior on color {
                 enabled: root.motion
                 ColorAnimation {
@@ -1046,7 +1072,7 @@ Item {
                 width: 18
                 height: 18
                 name: actionButton.glyph
-                color: actionButton.active ? "#ffffff" : "#ccffffff"
+                color: "#ccffffff"
             }
         }
     }

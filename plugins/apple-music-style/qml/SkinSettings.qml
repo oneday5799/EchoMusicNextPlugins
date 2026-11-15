@@ -88,43 +88,8 @@ ColumnLayout {
 
     spacing: 14
 
-    Label {
-        Layout.fillWidth: true
-        text: qsTr("调整歌词外观。设置保存在当前皮肤配置中。")
-        font: Theme.font(12, Theme.regularWeight)
-        color: Theme.floating.secondaryText
-        wrapMode: Text.Wrap
-    }
-
-    // 增强对比度
-    RowLayout {
-        Layout.fillWidth: true
-        spacing: 14
-
-        ColumnLayout {
-            Layout.fillWidth: true
-            spacing: 4
-
-            Label {
-                text: qsTr("增强对比度")
-                font: Theme.font(13, 700)
-                color: Theme.floating.text
-            }
-            Label {
-                Layout.fillWidth: true
-                text: qsTr("提高副歌词（翻译/音译）的亮度，改善封面背景上的可读性。")
-                font: Theme.font(12, Theme.regularWeight)
-                color: Theme.floating.secondaryText
-                wrapMode: Text.Wrap
-            }
-        }
-        EchoSwitch {
-            checked: settingsRoot.configuration.values.enhanceContrast === true
-            Accessible.name: qsTr("增强对比度")
-            onToggled: settingsRoot.patch("enhanceContrast", checked)
-        }
-    }
-
+    // 增强对比度设置已移除（2026-11-15）：多种实现方案均无法达到预期观感，
+    // AMLL 基线的明暗比本身已足够
     RowLayout {
         Layout.fillWidth: true
         spacing: 14
@@ -248,34 +213,11 @@ ColumnLayout {
         suffix: "%"
         from: 0
         to: 100
-        current: settingsRoot.num(settingsRoot.configuration.values.alignPosition, 48, 0, 100)
+        current: settingsRoot.num(settingsRoot.configuration.values.alignPosition, 35, 0, 100)
         onCommitted: nextValue => settingsRoot.patch("alignPosition", nextValue)
     }
 
-    RowLayout {
-        Layout.fillWidth: true
-        spacing: 16
-
-        Label {
-            Layout.fillWidth: true
-            text: settingsRoot.configuration.busy ? qsTr("正在保存设置…") : qsTr("恢复歌词外观的初始设置。")
-            font: Theme.font(12, Theme.regularWeight)
-            color: Theme.floating.secondaryText
-            wrapMode: Text.Wrap
-        }
-        EchoButton {
-            text: qsTr("恢复默认")
-            colors: Theme.floating
-            onClicked: settingsRoot.configuration.reset()
-        }
-    }
-
-    Label {
-        Layout.fillWidth: true
-        visible: settingsRoot.configuration.errorMessage.length > 0
-        text: settingsRoot.configuration.errorMessage
-        wrapMode: Text.Wrap
-        color: Theme.colors.danger
-        font: Theme.font(12, Theme.regularWeight)
-    }
+    // 重置入口与错误提示由宿主皮肤抽屉统一渲染（LyricSkinDrawer 底部
+    // EchoSoftButton「恢复默认」/ errorMessage Label，调用同一 configuration
+    // 句柄），此处不再重复提供——否则抽屉里会出现两个重置按钮（2026-11-15 实测）。
 }
