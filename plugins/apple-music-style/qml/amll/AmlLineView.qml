@@ -547,9 +547,18 @@ Item {
                     const haloOpacity = blurBase * env * line.brightColor.a;
                     if (haloOpacity > 0.01)
                         halos = [{
-                                // 宿主 mask 烘焙半径 max(1, ceil(em·dpr·strength·.15))：
-                                // dpr 抵消后逻辑半径 = em×strength×.15（≤.12em）
-                                "radius": Math.max(1, Math.ceil(line.em * blurBase * 0.15)),
+                                // 半径钳到 ≤2：SDK 的 halo tile 按 16px 模糊档采样
+                                // （glyph-run.frag mix(墨, blur16, r/16)），密集 CJK
+                                // 笔画间覆盖到外扩边界仍不衰减，而 pose 四边形按
+                                // radius×3+2 外扩（GlyphRun.cpp:2247）——大半径时整
+                                // 个外扩矩形发雾、出现贯穿直边的「背景」（2026-11-15
+                                // 行末强调字实测：续 右缘外扩 21px 处亮 +15 后直落
+                                // 背景）。钳小后覆盖贴字形、外扩仅 8 逻辑 px、雾尾
+                                // ≤+2 亮度不可见，且更贴 AMLL text-shadow .1em 的
+                                // 紧贴观感；宿主把 glow 烘进紧贴 rect 的 packed 纹理
+                                // （LyricLine.cpp:443，无外扩）同此观感。强度变化由
+                                // opacity（blurBase×env）承担
+                                "radius": Math.min(2, Math.max(1, Math.ceil(line.em * blurBase * 0.15))),
                                 "opacity": haloOpacity,
                                 "color": Qt.rgba(1, 1, 1, 1)
                             }];
