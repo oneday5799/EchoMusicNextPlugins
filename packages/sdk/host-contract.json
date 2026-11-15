@@ -89,6 +89,7 @@
     "userCloudDelete",
     "userDetail",
     "userGradeInfo",
+    "userHistory",
     "userInfo",
     "userPlaylists",
     "userVerify",
@@ -240,7 +241,7 @@
     "ui.dialogs",
     "clipboard.write"
   ],
-  "hostVersion": "0.1.3",
+  "hostVersion": "0.1.5",
   "module": "echo:plugin-sdk",
   "packageFormat": "echomod",
   "qmlModule": "EchoMusic.PluginSdk",
@@ -1267,6 +1268,12 @@
         {
           "name": "write",
           "parameters": ["QString"],
+          "returnType": "EchoMusic::EchoPluginOperation*",
+          "signal": false
+        },
+        {
+          "name": "writeImage",
+          "parameters": ["QByteArray"],
           "returnType": "EchoMusic::EchoPluginOperation*",
           "signal": false
         }
