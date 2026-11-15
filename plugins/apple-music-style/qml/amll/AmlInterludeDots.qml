@@ -38,14 +38,20 @@ Item {
         if (!st)
             return;
         const snap = st.getSnapshot();
-        content.opacity = snap.opacity;
+        dots.x = st.left;
+        dots.y = st.posY.getCurrentPosition();
+        // 视口边缘渐隐（同 AmlGroupView）：上/下缘进入边缘带线性降至 0，
+        // 触及视口边界前已完全隐藏，clip 硬切分界线不再出现
+        const band = view.edgeBand;
+        const fade = band > 0 ? Math.min(1,
+            Math.max(0, dots.y / band),
+            Math.max(0, (view.height - dots.y - dots.height) / band)) : 1;
+        content.opacity = snap.opacity * fade;
         // 呼吸缩放仅在开启动效时生效（关闭动效时恒为 1，不与快照叠加）
         content.scale = flow.motion ? snap.scale : 1;
         dot0.opacity = snap.dotOpacities[0];
         dot1.opacity = snap.dotOpacities[1];
         dot2.opacity = snap.dotOpacities[2];
-        dots.x = st.left;
-        dots.y = st.posY.getCurrentPosition();
         dots.visible = snap.isActive || snap.opacity > 0.005;
     }
     // 内容盒（呼吸缩放/容器透明度宿主）；外层 item 只承担 x/y 定位。

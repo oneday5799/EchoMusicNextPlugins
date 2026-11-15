@@ -90,6 +90,7 @@ Item {
         objectName: "amllGroupBackground" + group.index
         anchors.fill: parent
         radius: group.em * 0.25
+        opacity: group.edgeFade
         // 悬停提示底色。不取 tap.pressed 分支：DragThreshold 策略的 TapHandler
         // 经 passive grab 会让 pressed 长时间为真（2026-11-15 实测所有组同时
         // 显示 3% 底色面板、出现明显边界），且按压反馈本就难以察觉
@@ -99,6 +100,9 @@ Item {
         id: inner
         x: group.em
         y: group.em * 0.4
+        // 视口边缘渐隐（commitFrame 逐帧落盘）：触及视口边界前先降为 0，
+        // 消除 clip 硬切分界线
+        opacity: group.edgeFade
         width: group.width - group.em * 2
         height: group.naturalHeight - group.em * 0.8
         // 行缩放弹簧（非活动行播放中 97%，AMLL .lyricLine transform 语义）
@@ -193,6 +197,14 @@ Item {
         // 纵向位置与行缩放：弹簧当前值逐帧落盘
         group.y = g.posY.getCurrentPosition();
         inner.scale = g.mainLine.scaleSpring.getCurrentPosition() / 100;
+        // 视口边缘渐隐：上侧以组顶缘为锚（最先被视口裁掉的部分），下侧以
+        // 底缘对称——顶/底缘进入边缘带（edgeBand）时整体线性降至 0，触及
+        // 视口边界前已完全隐藏，clip 硬切分界线不再出现
+        const vh = view.height;
+        const band = view.edgeBand;
+        edgeFade = band > 0 ? Math.min(1,
+            Math.max(0, group.y / band),
+            Math.max(0, (vh - group.y - group.height) / band)) : 1;
         // 离散目标：revision 变化时应用
         if (g.revision !== lastRevision) {
             lastRevision = g.revision;
@@ -229,9 +241,11 @@ Item {
         } else if (disabledAt < 0) {
             disabledAt = sweepTime >= 0 ? sweepTime : flow.mediaTime - flow.offsetMs - 10000;
         }
-        // 视口外剔除
-        group.visible = group.opacityTarget > 0.005 || group.opacity > 0.005;
+        // 视口外剔除（含边缘渐隐至 0 的组）
+        group.visible = (group.opacityTarget > 0.005 || group.opacity > 0.005) && edgeFade > 0.005;
     }
+    // 视口边缘渐隐系数（0-1）；由 commitFrame 逐帧落盘
+    property real edgeFade: 1
     property real sweepTime: -1
     // 行失活媒体时刻（<0 = 在唱）；由 commitFrame 沿检测捕获
     property real disabledAt: -1

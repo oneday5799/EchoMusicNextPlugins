@@ -73,6 +73,16 @@ Item {
                 c.scrollEngine.cancelTouch();
         }
     }
+    // 视口上下缘淡出：消除歌词移出顶部/进入底部时被 clip 硬切的水平分界
+    // 线。不用 MultiEffect.mask 整层遮罩——遮罩源 Item 必须可见且在视口内
+    // 才能渲染出纹理内容（visible:false / opacity:0 / 摆出视口外经代理渲
+    // 染均为全 0 alpha，整列歌词被遮没；可见时又把白色渐变自绘进场景，
+    // 2026-11-15 五轮实测无解），改为逐组透明度淡出：组上/下缘进入边缘
+    // 渐隐带（edgeBand，≈1 行行距）时整体线性降至 0，触及视口边界前已完
+    // 全隐藏。作用于 item 透明度而非 glyph pose ρ（行链 ρ 不变，扫掠带亮
+    // 度不泄漏），间奏点与未同步列同规则淡出。
+    // 边缘渐隐带高度：视口的 10%（≈1 行行距），上下对称
+    readonly property real edgeBand: height * 0.1
     // 组视图宿主（非滚动歌词时整体隐藏）
     Item {
         id: groupsHost
@@ -118,6 +128,13 @@ Item {
                 width: staticColumn.width
                 height: naturalHeight
                 visible: !filtered
+                // 视口边缘渐隐（同组视图规则）：未同步长列表底部溢出同样
+                // 会被 clip 硬切，按行视口位置线性降透明
+                opacity: {
+                    const band = lyricView.edgeBand
+                    const yv = staticColumn.y + staticRow.y
+                    return band > 0 ? Math.min(1, Math.max(0, yv / band), Math.max(0, (lyricView.height - yv - naturalHeight) / band)) : 1
+                }
                 Rectangle {
                     anchors.fill: parent
                     radius: staticRow.em * 0.25
