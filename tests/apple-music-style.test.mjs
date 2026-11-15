@@ -249,6 +249,17 @@ test('AMLL refactor wiring drives the lyric page through the base core', async (
   );
   assert.ok(flow.includes('setLinePosYSpringParams'), 'posY 弹簧参数 m0.9/d15/k90');
   assert.ok(flow.includes('seekToGroup'));
+  // 短时值接缝裁剪（对照宿主 LyricTimeline::rebuild）：源数据每行尾词时长
+  // 普遍越过下一行开始 ~300ms，不裁会让「唱完不熄灭」的上一行在锚点重建与
+  // 常规更替中都被判为仍在演唱（点击下一行后上一行持续高亮，2026-11-15 实测）
+  assert.ok(
+    flow.includes('overlap < 500'),
+    '接缝判定阈值必须与宿主 LyricTimeline 一致（<500ms 且 ≤100ms 或 ≤后行 10%）',
+  );
+  assert.ok(
+    flow.includes('out[i].endTime = Math.max(out[i].startTime, out[j].startTime)'),
+    '前行呈现区间必须裁到后行开始（词时间不动，不得倒挂）',
+  );
   assert.ok(!flow.includes('ListView'), '排版与滚动交由 base 核心（无 ListView）');
   assert.ok(!flow.includes('EchoWheelScroll'));
   assert.ok(!flow.includes('AmllLineMotion'), '旧组件已删除');

@@ -274,6 +274,7 @@ Item {
     // - 行/词时间统一钳到 ≥0 且 start ≤ end：offsetMs 为负可把行首时间推成
     //   负值，而核心 assertValidLyricTimestamps 对负时间戳/倒挂区间直接抛
     //   TypeError/RangeError，坏值必须在数据边界拦下
+    // - 行尾与后行开始的短时值碰撞按转写接缝裁剪（见函数尾注）
     function collectLines(): var {
         const model = live ? player.lyrics : null;
         const out = [];
@@ -319,6 +320,25 @@ Item {
                     "romanization": String(line.romanization ?? ""),
                     "seekTime": Math.max(0, seekTime)
                 });
+        }
+        // 短时值碰撞按转写接缝规整：源数据每行尾词的时长普遍越过下一行开始
+        // 约 300ms（实测逐行一致），不裁会让「唱完不熄灭」的上一行在锚点重建
+        // 与常规更替中都被判为仍在演唱，点击下一行后上一行持续保持高亮。
+        // 规则对照宿主 LyricTimeline::rebuild：overlap < 500ms 且（≤100ms 或
+        // ≤后行时长 10%）视为接缝而非对唱，仅把前行呈现区间裁到后行开始，
+        // 词时间不动；超出阈值的重叠是真对唱/包裹行，原样保留
+        out.sort(function (a, b) {
+            return a.startTime - b.startTime;
+        });
+        for (let i = 0; i < out.length; ++i) {
+            for (let j = i + 1; j < out.length && out[j].startTime < out[i].endTime; ++j) {
+                const overlap = out[i].endTime - out[j].startTime;
+                if (overlap < 500
+                    && (overlap <= 100 || overlap <= (out[j].endTime - out[j].startTime) * 0.1)) {
+                    out[i].endTime = Math.max(out[i].startTime, out[j].startTime);
+                    break;
+                }
+            }
         }
         return out;
     }
