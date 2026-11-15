@@ -217,6 +217,16 @@ Item {
                 lineStillMin = ny;
             if (ny > lineStillMax)
                 lineStillMax = ny;
+            // 静置期重基线：min/max 只增不减，一次 ~0.65px 的排版重定位事件
+            // （静置中队列目标到点重解算，逐帧 dy ≤0.05 不触发移动分支）会把
+            // 窗口永久撑大，最近邻从此不再接合——当前行整行卡死双线性、恒发糊
+            // （2026-11-16 实测 win=0.654、still=436 帧不接合）。每 30 帧重置
+            // 窗口：只度量近 ~0.5s 位移——慢滑行（≥0.01px/帧）仍超窗保持双线
+            // 性，微蠕动（~0.002px/帧，11s 才走 1 设备像素）正常接合
+            if (lineStillFrames % 30 === 0) {
+                lineStillMin = ny;
+                lineStillMax = ny;
+            }
             if (lineLayerSmooth && lineStillFrames > 12 && lineStillMax - lineStillMin < 0.3)
                 lineLayerSmooth = false;
         }
