@@ -27,21 +27,11 @@
       "ui.composition"
     ]
   },
-  "capabilities": [
-    "lyricsPage",
-    "navigation",
-    "hostSettings"
-  ],
-  "contexts": [
-    "main"
-  ],
-  "tags": [
-    "播放页",
-    "歌词",
-    "皮肤"
-  ],
+  "capabilities": ["lyricsPage", "navigation", "hostSettings"],
+  "contexts": ["main"],
+  "tags": ["播放页", "歌词", "皮肤"],
   "distribution": {
     "artifact": "artifacts/apple-music-style-1.0.0.echomod",
-    "sha256": "9627c96ceef92a9d39ae41ec5422d180ac90f81f04f4a72725a01c6078f1724b"
+    "sha256": "b61f5a01019a6932735ffe69065292f61ac3c55842d4bc55ed5fd22d13fb0c79"
   }
 }

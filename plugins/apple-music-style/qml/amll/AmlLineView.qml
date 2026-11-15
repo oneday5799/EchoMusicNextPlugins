@@ -632,13 +632,19 @@ Item {
             // 簇两端亮度：oL（左缘）≥ oR（右缘，亮度沿 x 递减）
             const oL = 0.5 + (center - x) / fade;
             const oR = 0.5 + (center - x - advance) / fade;
-            // 全亮判定必须与下方切片 break 的原始比较（bandL ≥ x+advance）
-            // 同侧：扫掠终点 center 恰停在 x+advance+fade/2 边界上，(center-x-adv)/fade
-            // 的除法舍入可能得 0.99… 而落入 cross 路径，此时切片对簇内各列全部
-            // break（li ≥ x+advance）、暗基底又只从带右缘 g1（已越过簇右缘）起
-            // 罩——整簇无任何 pose，末字消失直到换行。此处并列原始比较，边界态
-            // 一律全亮。
-            if (oR >= 1 || center - x - advance >= fade * 0.5) {
+            // 全亮判定必须复用与下方切片 break 完全相同的表达式（g0 ≥
+            // x+advance）。三条数学上恒等的判据——oR ≥ 1（除法路径）、
+            // center−x−advance ≥ fade×0.5（减法路径）、g0 ≥ x+advance
+            // （break 路径）——在扫掠终点恰停在 x+advance+fade/2 边界（词
+            // 停驻 X=0 的精确位置）时经各自浮点舍入可能得出不同结果
+            // （2026-11-16 实机插桩捕获：oR=0.9999999999999984、减法比较
+            // false、break 比较 true）。守卫取 false 而 break 取 true 时，
+            // cross 分支 s1 立即 break、暗基底又只从带右缘 g1（已越过簇右
+            // 缘）起罩——整簇无任何 pose 覆盖墨迹，已唱字消失直到换行（间歇
+            // 性：边界位型随词宽/布局的浮点表示而异）。守卫直接复用 g0（与
+            // break 同一变量、同一表达式），跨路径舍入分歧从结构上排除；
+            // oR ≥ 1 保留：除法舍入偏上时先行判全亮，渲染同样正确。
+            if (oR >= 1 || g0 >= x + advance) {
                 // 整簇全亮（右缘未进过渡带）：halo 垫底 + 单层 pose
                 if (halos)
                     list.push(line.__haloPose(halos, start, y, ex, ey, escale));
