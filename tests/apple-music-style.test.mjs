@@ -104,6 +104,45 @@ test('quality badges mirror host quality keys and cloud sources', () => {
   assert.equal(qualityLabel('unknown', false), '');
 });
 
+test('quality badge popup mirrors host popup rows and switches via the quality command', async () => {
+  const pluginRoot = fileURLToPath(new URL('../plugins/apple-music-style/', import.meta.url));
+  const skin = await readFile(pluginRoot + 'qml/Skin.qml', 'utf8');
+
+  // 候选键/徽标/色值逐项对照宿主 PlaybackService::qualities 常量（云盘置顶）
+  for (const [value, tag, color] of [
+    ['cloud', 'CLD', '#0EA5E9'],
+    ['standard', 'SD', '#64748B'],
+    ['higher', 'HQ', '#8B5CF6'],
+    ['flac', 'SQ', '#2563EB'],
+    ['hi_res', 'HR', '#F59E0B'],
+    ['viper_tape', 'VPT', '#E11D48'],
+    ['viper_clear', 'VPC', '#0891B2'],
+    ['viper_atmos', 'VPA', '#7C3AED'],
+  ]) {
+    assert.ok(skin.includes(`"value": "${value}"`), `qualityCatalog 缺少 ${value}`);
+    assert.ok(skin.includes(`"tag": "${tag}"`), `qualityCatalog ${value} 徽标不符`);
+    assert.ok(skin.includes(`"color": "${color}"`), `qualityCatalog ${value} 色值不符`);
+  }
+
+  // 徽标可点开弹层，选中态比对生效音质，选择即切换并收起
+  assert.ok(skin.includes('cursorShape: Qt.PointingHandCursor'), '徽标须有可点提示光标');
+  assert.ok(skin.includes('anchorItem: qualityBadge'), '弹层须锚定音质徽标');
+  assert.ok(skin.includes('root.quality === option.modelData.value'), '选中态须比对生效音质');
+  assert.ok(
+    skin.includes('root.page.command("quality"'),
+    '切换须走 page.command quality 白名单命令',
+  );
+  assert.ok(skin.includes('qualityPopup.close()'), '选择后收起弹层');
+
+  // viper 三档随宿主 playback.viperQualityEnabled 过滤（隐藏而非禁用，同宿主弹层）
+  assert.ok(
+    skin.includes("settings.read('playback')"),
+    'viper 开关经 settings.read(playback) 读取',
+  );
+  assert.ok(skin.includes('viperQualityEnabled !== false'), 'viper 开关语义须为默认开启');
+  assert.ok(skin.includes('startsWith("viper_")'), '关闭时过滤 viper 档');
+});
+
 test('AMLL base modules are dependency-free ES modules consumable from QML and Node', async () => {
   const pluginRoot = fileURLToPath(new URL('../plugins/apple-music-style/', import.meta.url));
   const config = JSON.parse(await readFile(pluginRoot + 'plugin.config.json', 'utf8'));

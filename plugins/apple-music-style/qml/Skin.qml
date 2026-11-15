@@ -25,8 +25,7 @@ Item {
     readonly property bool cloudSource: player.snapshot.sourceKind === "cloud"
     readonly property string quality: player.snapshot.effectiveQuality || player.snapshot.quality
 
-    // 与宿主 PlaybackService::qualities 徽标一致；宿主未向插件公开可切换列表，
-    // 因此徽标只做展示，不提供切换入口
+    // 与宿主 PlaybackService::qualities 徽标一致
     readonly property var qualityTags: ({
             "standard": "SD",
             "higher": "HQ",
@@ -37,6 +36,58 @@ Item {
             "viper_atmos": "VPA"
         })
     readonly property string qualityTag: root.cloudSource ? "CLD" : (root.qualityTags[root.quality] ?? "")
+    // 音质候选（顺序与键/标签/色值逐项对照宿主 PlaybackService::qualities 常量，
+    // 云盘项同宿主置顶）。宿主未向插件公开逐曲可用性（enabled/reason/文件大小）
+    // 与云盘命中信息，因此弹层无禁用态、CLD 恒显示（无云盘文件时宿主 setQuality
+    // 静默忽略）。viper 三档随宿主「蝰蛇音质」开关过滤（playback 域
+    // viperQualityEnabled，白名单键；与 backgroundRhythm 同用 settings.host
+    // 授权，无新增授权流程；授权被拒时不过滤）。切换走 page.command('quality')
+    // ——宿主白名单命令，无需 capability
+    // 弹层 viper 档过滤开关（Component.onCompleted 经 settings.read('playback')
+    // 与 observe 写入，默认开启兜底）
+    property bool viperEnabled: true
+    readonly property var qualityCatalog: [{
+            "value": "cloud",
+            "label": qsTr("云盘文件"),
+            "tag": "CLD",
+            "color": "#0EA5E9"
+        }, {
+            "value": "standard",
+            "label": qsTr("标准"),
+            "tag": "SD",
+            "color": "#64748B"
+        }, {
+            "value": "higher",
+            "label": qsTr("高品质"),
+            "tag": "HQ",
+            "color": "#8B5CF6"
+        }, {
+            "value": "flac",
+            "label": qsTr("无损"),
+            "tag": "SQ",
+            "color": "#2563EB"
+        }, {
+            "value": "hi_res",
+            "label": "Hi-Res",
+            "tag": "HR",
+            "color": "#F59E0B"
+        }, {
+            "value": "viper_tape",
+            "label": qsTr("蝰蛇母带"),
+            "tag": "VPT",
+            "color": "#E11D48"
+        }, {
+            "value": "viper_clear",
+            "label": qsTr("蝰蛇超清"),
+            "tag": "VPC",
+            "color": "#0891B2"
+        }, {
+            "value": "viper_atmos",
+            "label": qsTr("蝰蛇全景声"),
+            "tag": "VPA",
+            "color": "#7C3AED"
+        }]
+    readonly property var qualityModel: root.qualityCatalog.filter(entry => root.viperEnabled || !entry.value.startsWith("viper_"))
 
     function num(value: var, fallback: real, min: real, max: real): real {
         const parsed = Number(value);
@@ -365,6 +416,18 @@ Item {
         applyRead();
         root.plugin.settings.observe('apple-music-style-background-rhythm', 'lyrics', values => {
             root.hostRhythm = values.backgroundRhythm === true;
+        });
+        // 弹层 viper 档过滤开关（宿主 playback.viperQualityEnabled；关闭时宿主
+        // 弹层直接隐藏三档，此处同语义——隐藏而非禁用）
+        const viperRead = root.plugin.settings.read('playback');
+        const applyViperRead = () => {
+            if (viperRead.state === 2)
+                root.viperEnabled = viperRead.result.viperQualityEnabled !== false;
+        };
+        viperRead.completed.connect(applyViperRead);
+        applyViperRead();
+        root.plugin.settings.observe('apple-music-style-viper-quality', 'playback', values => {
+            root.viperEnabled = values.viperQualityEnabled !== false;
         });
         if (root.coverUrl.length > 0)
             coverSampler.loadImage(root.coverUrl);
@@ -908,7 +971,7 @@ Item {
                                 anchors.centerIn: parent
                                 visible: root.qualityTag.length > 0
                                 radius: 4
-                                color: "#26ffffff"
+                                color: qualityClick.containsMouse ? "#40ffffff" : "#26ffffff"
                                 width: qualityText.implicitWidth + 16
                                 height: 20
                                 Label {
@@ -917,6 +980,112 @@ Item {
                                     text: root.qualityTag
                                     font: Theme.font(11, 600)
                                     color: "#ccffffff"
+                                }
+                                MouseArea {
+                                    id: qualityClick
+                                    anchors.fill: parent
+                                    hoverEnabled: true
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: qualityPopup.opened ? qualityPopup.close() : qualityPopup.open()
+                                }
+                            }
+                            // 音质弹层：视觉与交互对照宿主 PlaybackOptionsPopup 的
+                            // quality 行（EchoFloatingSurface 玻璃面板、mutedSurface
+                            // 选中底、EchoTag 彩色徽标、check 勾选），锚定徽标上方
+                            // 居中（旧插件 .amms-quality-popup 同方向）。选择即切换
+                            // page.command('quality') 并收起（旧插件 selectQuality 语义）
+                            EchoAnchoredPopup {
+                                id: qualityPopup
+                                objectName: "amssQualityPopup"
+                                anchorItem: qualityBadge
+                                preferredWidth: 208
+                                maximumHeight: 420
+                                preferAbove: true
+                                alignEnd: false
+                                showArrow: false
+                                sideOffset: 8
+                                padding: 6
+                                implicitHeight: qualityContents.implicitHeight + topPadding + bottomPadding
+                                onOpened: qualityScroll.contentY = 0
+                                contentItem: Flickable {
+                                    id: qualityScroll
+                                    clip: true
+                                    contentWidth: width
+                                    contentHeight: qualityContents.implicitHeight
+                                    boundsBehavior: Flickable.StopAtBounds
+                                    flickableDirection: Flickable.VerticalFlick
+                                    ScrollBar.vertical: EchoPopupScrollBar {
+                                        surface: qualityPopup
+                                        view: qualityScroll
+                                        resourceActive: qualityPopup.visible
+                                    }
+                                    ColumnLayout {
+                                        id: qualityContents
+                                        width: qualityScroll.width
+                                        spacing: 0
+                                        Repeater {
+                                            model: root.qualityModel
+                                            delegate: EchoActionButton {
+                                                id: option
+                                                required property var modelData
+                                                // 选中态 = 生效音质（同宿主 effectiveQuality 比对；
+                                                // 播放云盘时 effectiveQuality='cloud'，目录档全不选）
+                                                readonly property bool selected: root.quality === option.modelData.value
+                                                Layout.fillWidth: true
+                                                implicitHeight: 36
+                                                padding: 0
+                                                leftPadding: 10
+                                                rightPadding: 10
+                                                hoverEnabled: true
+                                                background: Rectangle {
+                                                    radius: Theme.controlRadius
+                                                    color: option.selected ? Theme.floating.mutedSurface : option.hovered ? Theme.floating.hover : "transparent"
+                                                }
+                                                contentItem: RowLayout {
+                                                    spacing: 8
+                                                    EchoTextTagRow {
+                                                        Layout.fillWidth: true
+                                                        Layout.minimumWidth: 0
+                                                        text: option.modelData.label
+                                                        font: Theme.font(13, Theme.semiboldWeight)
+                                                        lineHeight: 20
+                                                        color: option.selected ? Theme.floating.accentText : Theme.floating.text
+                                                    }
+                                                    EchoTag {
+                                                        Layout.fillWidth: false
+                                                        Layout.fillHeight: false
+                                                        Layout.minimumWidth: Math.ceil(implicitWidth)
+                                                        Layout.maximumWidth: Math.ceil(implicitWidth)
+                                                        Layout.alignment: Qt.AlignVCenter
+                                                        colors: Theme.floating
+                                                        text: option.modelData.tag
+                                                        tone: EchoTag.Custom
+                                                        customTone: option.modelData.color
+                                                    }
+                                                    EchoIcon {
+                                                        Layout.fillWidth: false
+                                                        Layout.fillHeight: false
+                                                        name: "check"
+                                                        opacity: option.selected ? 1 : 0
+                                                        Layout.preferredWidth: 14
+                                                        Layout.minimumWidth: 14
+                                                        Layout.maximumWidth: 14
+                                                        Layout.preferredHeight: 14
+                                                        Layout.minimumHeight: 14
+                                                        Layout.maximumHeight: 14
+                                                        color: Theme.floating.accentText
+                                                    }
+                                                }
+                                                onClicked: {
+                                                    root.page.command("quality", {
+                                                        "value": option.modelData.value
+                                                    });
+                                                    qualityPopup.close();
+                                                }
+                                                Accessible.name: option.modelData.label
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
