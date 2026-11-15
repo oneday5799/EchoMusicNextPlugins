@@ -4,8 +4,11 @@ import QtQuick
 // AMLL 间奏点视图（对应 dom/interlude-dots.ts 的渲染端）。
 // 消费 base InterludeDots 的逐帧快照（getSnapshot）与 posY 弹簧。
 // 几何对齐 AMLL CSS：三点盒 padding 0.4em 1em，圆点 0.3em、点距 0.18em
-// （0.48em 步进），内容盒高度 clamp(0.5em, 1vh, 3em)；呼吸缩放原点为
-// 盒中心（AMLL transform-origin: center）。
+// （0.48em 步进），内容盒高度 clamp(0.5em, 1vh, 3em)。
+// 与 AMLL 的差异（宿主要求）：呼吸缩放原点不是盒中心（AMLL
+// transform-origin: center，放大时左右同时外扩），而是首点左缘 = 歌词
+// 文本左对齐线（AmlGroupView.inner.x = em）：缩放只向右展开，左缘始终
+// 钉在歌词左对齐线上，不越出歌词左边范围。
 // 宽高测量经 core.setInterludeMeasured 上报；布局上下边距（dotMargin =
 // 0.4em ×2）由编排核心在 totalInterludeHeight 中计入。
 Item {
@@ -45,14 +48,18 @@ Item {
         dots.y = st.posY.getCurrentPosition();
         dots.visible = snap.isActive || snap.opacity > 0.005;
     }
-    // 内容盒（呼吸缩放/容器透明度宿主）；外层 item 只承担 x/y 定位
+    // 内容盒（呼吸缩放/容器透明度宿主）；外层 item 只承担 x/y 定位。
+    // content.x = em 让圆点坐标系原点落在歌词文本左对齐线上，配合
+    // transformOrigin: Item.Left，呼吸/退场缩放以首点左缘为原点向右展开
     Item {
         id: content
-        width: parent.width
+        x: dots.em
+        width: parent.width - dots.em
         height: parent.height
+        transformOrigin: Item.Left
         Rectangle {
             id: dot0
-            x: dots.em
+            x: 0
             y: dots.em * 0.4 + (dots.contentHeight - height) / 2
             width: dots.dotSize
             height: width
@@ -62,7 +69,7 @@ Item {
         }
         Rectangle {
             id: dot1
-            x: dots.em + dots.dotStep
+            x: dots.dotStep
             y: dot0.y
             width: dot0.width
             height: dot0.height
@@ -72,7 +79,7 @@ Item {
         }
         Rectangle {
             id: dot2
-            x: dots.em + dots.dotStep * 2
+            x: dots.dotStep * 2
             y: dot0.y
             width: dot0.width
             height: dot0.height

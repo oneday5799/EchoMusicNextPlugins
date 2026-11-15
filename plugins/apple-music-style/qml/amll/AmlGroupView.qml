@@ -117,6 +117,9 @@ Item {
                         "t1": Number(word.endTime) || 0
                     })) : []
             timeMs: group.sweepTime
+            // 常走媒体时钟：强调包络与上浮倒放（不随行失活/暂停遮罩冻结）
+            animTimeMs: flow.mediaTime - flow.offsetMs
+            disabledAt: group.disabledAt
             current: group.groupCore ? group.groupCore.mainLine.isEnabled || group.highlight > 0.001 : false
             highlightAmount: group.highlight
             blurAmount: group.blur
@@ -210,10 +213,20 @@ Item {
         }
         if (ml.isEnabled && flow.playing)
             sweepTime = flow.mediaTime - flow.offsetMs;
+        // 行失活捕获：冻结的 sweepTime 即失活媒体时刻，供 AmlLineView 倒放
+        // 持久上浮（AMLL disable 的 float playbackRate=-1 语义）。建给已失活
+        // 行的 delegate（sweepTime 尚未锚定）以 10s 前兜底——倒放视为已走完
+        if (ml.isEnabled) {
+            disabledAt = -1;
+        } else if (disabledAt < 0) {
+            disabledAt = sweepTime >= 0 ? sweepTime : flow.mediaTime - flow.offsetMs - 10000;
+        }
         // 视口外剔除
         group.visible = group.opacityTarget > 0.005 || group.opacity > 0.005;
     }
     property real sweepTime: -1
+    // 行失活媒体时刻（<0 = 在唱）；由 commitFrame 沿检测捕获
+    property real disabledAt: -1
     property int lastRevision: -1
     property int lastLineRevision: -1
 }

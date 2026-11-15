@@ -16,8 +16,9 @@ import "amll/base/player.mjs" as AmlPlayer
 // - 本文件只做宿主桥接：时间源（samplePosition 单调投影）、歌词模型
 //   （只读行模型 → LyricLineData 规范形状）、Skin 设置透传、点击跳转。
 // 与 AMLL 的差异（宿主形态决定）：
-// - 时间以 SDK samplePosition() 推送（暂停拖动/seek 完成也推送），
-//   SeekDetector 依赖推送间隔推导跳转。
+// - 时间来自 SDK samplePosition() 的锚点节拍（暂停拖动/seek 完成也推送），
+//   在此做平滑单调投影后喂给编排核心（见 mediaTime 属性注释），真实跳转
+//   经 seek 事件/大步进透传，SeekDetector 语义与 AMLL 一致。
 // - 歌词偏移（offsetMs）不进词时间（与旧实现一致）：行时间偏移进
 //   startTime/endTime，扫掠时间 = 媒体时间 − 偏移（词时间保持原始值）。
 // - 不做背景人声行/不雅词掩码/底部提示行（无输入源）。
@@ -60,10 +61,31 @@ Item {
     readonly property real offsetMs: live && info ? Number(info.offsetMs) || 0 : 0
     readonly property bool playing: player.playing
 
-    // 媒体时间（SDK samplePosition()，共享锚点的单调投影）：
-    // 锚点 positionMs 与投影混写会相互回跳，造成每拍假 seek
+    // 媒体时间（SDK samplePosition() 的平滑单调投影）。宿主锚点按音频
+    // 后端节拍推送，值量化在 ~250ms 网格上且锚点之间读数不连续（外推被
+    // 每次观测重置），逐拍直喂会让 SeekDetector 在节拍处看到远超 150ms
+    // 抖动容差的假漂移/假回退 → calcLayout(Seek) → setInterlude(forceReset)
+    // → 间奏点每拍重锚，「出现一帧即消失」（2026-11-15 实测根因）。
+    // 此处从最近锚点做墙钟外推 + 限速追赶 + 单调钳制（SeekDetector 把任何
+    // 回退都视为跳转）；真实跳转（seek 事件 / 大步进 / 暂停拖动）一步透传。
     property real mediaTime: 0
     onMediaTimeChanged: flow.pushTime()
+    // ---- 投影状态（仅由 __ingestAnchor/__projectTick/__projResetToCurrent 维护）----
+    property bool __projAnchored: false // 已有有效锚点
+    property real __projAnchorMedia: 0 // 最近锚点媒体时间
+    property real __projAnchorWall: 0 // 最近锚点墙钟（Date.now）
+    property real __projPushed: 0 // 最近推送值（单调基准）
+    property real __projPushedWall: 0 // 最近推送墙钟
+    property bool __projSeekPending: false // 收到 seek 事件后的首拍透传标记
+    // 外推上限（锚点后最多外推的媒体毫秒数）：缓冲停滞时不无限超前，
+    // 同时限定锚点回跳的最大吸收幅度
+    readonly property real __projMaxLeadMs: 500
+    // 追赶限速：每墙钟毫秒最多推进的媒体毫秒。2 倍速消化量化台阶时单帧
+    // 漂移 ≤ 帧间隔（~16ms），远低于 SeekDetector 的 150ms 抖动容差
+    readonly property real __projCatchUpRate: 2
+    // 透传阈值：推送值与锚点偏差超过此值视为真实跳转（seek 事件之外的兜底，
+    // 如切歌/远端同步；阈值需大于外推上限 + 台阶宽度）
+    readonly property real __projSeekToleranceMs: 600
     property int rawRowCount: 0
     // 编排核心（LyricPlayerCore，纯 JS 对象）
     property var core: null
@@ -77,7 +99,7 @@ Item {
             // 仍在播放，恢复首帧推送间隔远超信任跨度会被误判为跳转）
             core.setPageVisible(true);
             core.seekDetectorInvalidateBaseline();
-            mediaTime = page.player.samplePosition();
+            flow.__projResetToCurrent();
             rebuild();
         } else {
             core.setPageVisible(false);
@@ -97,7 +119,7 @@ Item {
 
     Component.onCompleted: {
         createCore();
-        mediaTime = page.player.samplePosition();
+        flow.__projResetToCurrent();
         applyPlaying();
         rebuild();
     }
@@ -141,14 +163,95 @@ Item {
         if (!core)
             return;
         // 暂停停演（间奏点冻结、非活动行恢复原大）与恢复
-        if (playing)
+        if (playing) {
             core.resume();
-        else
+            // 恢复播放：投影重锚（暂停间隔不得计入外推与追赶预算，否则
+            // 恢复首帧会把整段暂停时长外推成媒体时间）
+            if (__projAnchored) {
+                const now = Date.now();
+                __projAnchorMedia = Math.max(page.player.samplePosition(), __projPushed);
+                __projAnchorWall = now;
+                __projPushedWall = now;
+            }
+        } else {
             core.pause();
+        }
     }
     function pushTime(): void {
         if (core)
             core.setCurrentTime(Math.round(mediaTime));
+    }
+    // ---- 媒体时间投影（见 mediaTime 属性注释）----
+    // 投影状态整体重置到当前锚点：页面恢复/初建时用，mediaTime 直接落值
+    //（此时跳转检测基线已被丢弃或尚未建立，回退无副作用）
+    function __projResetToCurrent(): void {
+        const now = Date.now();
+        const raw = page.player.samplePosition();
+        __projAnchored = true;
+        __projAnchorMedia = raw;
+        __projAnchorWall = now;
+        __projPushed = raw;
+        __projPushedWall = now;
+        __projSeekPending = false;
+        if (mediaTime !== raw)
+            mediaTime = raw;
+    }
+    // 锚点节拍入口（onPositionChanged）：平滑路径只重锚不推送——推进由
+    // 帧循环限速追赶承担，节拍直推会把量化台阶原样喂给 SeekDetector
+    function __ingestAnchor(): void {
+        if (!core)
+            return;
+        const now = Date.now();
+        const raw = page.player.samplePosition();
+        if (!playing || !Number.isFinite(raw)) {
+            // 暂停：拖动/seek 直通（回退即真实跳转，保持检测语义）
+            __projSeekPending = false;
+            __projPassThrough(raw, now);
+            return;
+        }
+        const seekPass = __projSeekPending || !__projAnchored
+            || raw - __projPushed > __projSeekToleranceMs
+            || __projPushed - raw > __projSeekToleranceMs;
+        __projSeekPending = false;
+        if (seekPass) {
+            // 真实跳转一步透传（SeekDetector 需要在单次推送里看到大步进）
+            __projPassThrough(raw, now);
+            return;
+        }
+        __projAnchorMedia = raw;
+        __projAnchorWall = now;
+        __projAnchored = true;
+    }
+    function __projPassThrough(raw, now): void {
+        __projAnchorMedia = raw;
+        __projAnchorWall = now;
+        __projAnchored = true;
+        __projPushed = raw;
+        __projPushedWall = now;
+        if (mediaTime !== raw)
+            mediaTime = raw;
+    }
+    // 播放速率（speed ≤ 0 视为无效回退 1）
+    function __projRate(): real {
+        const s = Number(player.speed);
+        return Number.isFinite(s) && s > 0 ? s : 1;
+    }
+    // 帧循环（FrameAnimation）：从最近锚点外推并限速追赶，永不回退
+    function __projectTick(): void {
+        if (!core || !playing || !__projAnchored)
+            return;
+        const now = Date.now();
+        const gap = Math.max(0, now - __projPushedWall);
+        __projPushedWall = now;
+        const lead = Math.min((now - __projAnchorWall) * __projRate(), __projMaxLeadMs);
+        let next = __projAnchorMedia + lead;
+        const budget = __projPushed + gap * __projCatchUpRate;
+        if (next > budget)
+            next = budget;
+        if (next <= __projPushed)
+            return;
+        __projPushed = next;
+        mediaTime = next;
     }
     function rebuild(): void {
         const lines = collectLines();
@@ -234,14 +337,20 @@ Item {
         // 锚点推进（播放节拍/暂停拖动/seek 完成）都到这里；clockChanged 不逐拍通知
         function onPositionChanged(): void {
             if (flow && flow.live)
-                flow.mediaTime = flow.page.player.samplePosition();
+                flow.__ingestAnchor();
+        }
+        // 显式跳转完成先于对应 positionChanged 到达：置透传标记，让下一次
+        // 锚点直通（engine 的 seeked 事件 → seekCompleted → eventOccurred("seek")）
+        function onEventOccurred(kind, payload): void {
+            if (kind === "seek")
+                flow.__projSeekPending = true;
         }
     }
     FrameAnimation {
         // 播放时钟推进的媒体时间刷新（暂停时不推进；滚轮/拖拽滚动由
         // 编排核心的滚动引擎自闭环处理）
         running: flow.live && flow.page.player.clock.isAdvancing === true && flow.scrollable
-        onTriggered: flow.mediaTime = flow.page.player.samplePosition()
+        onTriggered: flow.__projectTick()
     }
     Connections {
         target: flow.live ? flow.page.player.lyrics : null

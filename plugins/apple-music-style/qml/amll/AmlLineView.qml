@@ -38,6 +38,13 @@ Item {
     // [{text, t0, t1}]，原始歌词时间（未含歌词偏移）
     property var words: []
     property real timeMs: -1
+    // 常走媒体时钟（随播放推进、暂停冻结，不随行失活冻结）：强调包络与
+    // 上浮倒放用它——AMLL 的字符动画独立于遮罩（disable 只暂停 maskAnimator，
+    // 字符动画继续自然播完/倒放）
+    property real animTimeMs: -1
+    // 行失活媒体时刻（sweepTime 时钟；<0 = 行在唱）。失活后持久上浮按
+    // AMLL disable 语义以 playbackRate=-1 倒放，按词时长缓慢落回基线
+    property real disabledAt: -1
     property bool current: false
     property real highlightAmount: 1
     // 全局逐行歌词（宿主编排核心 isNonDynamic）：对齐 AMLL 无遮罩形态，
@@ -209,16 +216,42 @@ Item {
     function refreshLifts(): void {
         const count = line.wordSpans.length;
         const list = new Array(count).fill(0);
-        // 宿主 lift 只乘 highlightAmount、无 current 门槛：离场渐隐（current 已
-        // 假、高亮量衰减中）期间上浮保持并随高亮量回落，不瞬间塌落
-        if (animateWords && timeMs >= 0 && hasWordTiming && highlightAmount > 0) {
-            for (let i = 0; i < count; ++i) {
-                const word = line.wordSpans[i];
-                const duration = Math.max(1000, word.t1 - word.t0);
-                list[i] = -em * 0.05 * __ease(Math.min(1, Math.max(0, (timeMs - word.t0) / duration))) * highlightAmount;
+        // AMLL float 语义：词级 fill:both 持久上浮；行失活（disable）时 float
+        // 动画以 playbackRate=-1 倒放——已唱字从各自失活时的进度出发、按词
+        // 时长（≥1s）缓慢落回基线，而非随 450ms 亮度衰减塌落（2026-11-15
+        // 实测「唱完回落」根因：旧实现 lift 乘 highlightAmount，行尾随高亮量
+        // 一起归零）。倒放进度冻结于暂停（animTimeMs 随播放推进）
+        if (animateWords && animTimeMs >= 0 && hasWordTiming && count > 0) {
+            // 未唱行（未失活且尚未到首词）：上浮恒 0，跳过逐词计算
+            if (disabledAt >= 0 || animTimeMs > line.wordSpans[0].t0) {
+                for (let i = 0; i < count; ++i) {
+                    const word = line.wordSpans[i];
+                    const duration = Math.max(1000, word.t1 - word.t0);
+                    let p;
+                    if (disabledAt < 0) {
+                        p = (animTimeMs - word.t0) / duration;
+                    } else {
+                        p = Math.min(1, Math.max(0, (disabledAt - word.t0) / duration)) -
+                                (animTimeMs - disabledAt) / duration;
+                    }
+                    list[i] = -em * 0.05 * __ease(Math.min(1, Math.max(0, p)));
+                }
             }
         }
-        lifts = list;
+        // 仅在变化时写回：未唱行/倒放已走完的长眠行每帧重算结果恒定，
+        // 跳过赋值避免 lifts 通知触发 poses 绑定逐帧重算
+        const old = lifts;
+        let same = old.length === count;
+        if (same) {
+            for (let i = 0; i < count; ++i) {
+                if (old[i] !== list[i]) {
+                    same = false;
+                    break;
+                }
+            }
+        }
+        if (!same)
+            lifts = list;
     }
     function __graphemeAt(graphemes, position: int): int {
         // 覆盖 utf16 位置的首个词元簇；位置落在簇中间时返回该簇
@@ -395,7 +428,7 @@ Item {
             };
         if (ex !== 0 || ey !== 0 || escale !== 1) {
             pose.x = ex;
-            pose.y = ey;
+            pose.y = y + ey;
             pose.scale = escale;
         }
         return pose;
@@ -424,8 +457,9 @@ Item {
         const seen = new Set();
         const edge = line.edge, fade = line.fade;
         const em = line.em;
-        // 宿主强调变换无 current 门槛，量值乘 highlightAmount：渐隐期间随高亮衰减
-        const empActive = line.animateWords && line.highlightAmount > 0;
+        // 强调变换不随高亮量衰减（AMLL disable 只倒放 float，辉光/缩放动画
+        // 继续自然播完）：包络走常走时钟 animTimeMs，失活后仍走完各自弧线
+        const empActive = line.animateWords;
         // GlyphRun 缩放围绕簇锚点（中点 x、基线 y），
         // AMLL 围绕字盒中心：需 (1−scale)×(盒中心−基线) 补偿
         const centerDy = m.height / 2 - m.baseline;
@@ -478,27 +512,31 @@ Item {
                 if (charIndex >= 0 && charIndex < span.ec) {
                     const rawDu = span.t1 - span.t0;
                     const length = Math.max(1000, rawDu) * (span.last ? 1.2 : 1);
-                    const t = line.timeMs - span.t0;
+                    const t = line.animTimeMs - span.t0;
                     const stagger = length / 2.5 / span.ec * charIndex;
                     const phase = Math.min(1, Math.max(0, (t - stagger) / length));
                     const env = phase < 0.5 ? line.__bez(phase * 2, 0.2, 0.4, 0.58)
                                             : 1 - line.__bez((phase - 0.5) * 2, 0.3, 0, 0.58);
                     const amount = Math.min(
                                 1.2, line.__intensity(rawDu / 2000) * 0.6 * (span.last ? 1.6 : 1)) *
-                            env * line.highlightAmount;
+                            env;
                     escale = 1 + 0.1 * amount;
                     ex = -em * 0.03 * amount * (span.ec / 2 - charIndex) * escale;
-                    // 宿主强调字的 lift 整体替换基础上浮（非叠加）：正弦浮动随字
-                    // 交错时刻起浮、带 400ms 提前量（(t−stagger+400)/(length×1.4)），
-                    // 另加 .025×amount×scale 的包络推抬；随高亮量衰减
+                    // 强调字浮动 = 持久上浮 + 正弦弹跳（AMLL 语义：词级
+                    // createFloatAnimation fill:both 持久保持，字符级
+                    // emphasize-word-float composite:add 叠加其上，弹跳落点 =
+                    // 持久上浮位而非基线——覆盖式写法会让弹跳结束后停留在
+                    // 基线，已唱强调字「上浮后回落」）。正弦随字交错时刻起
+                    // 浮、带 400ms 提前量（(t−stagger+400)/(length×1.4)），
+                    // 另加 .025×amount×scale 的包络推抬（glow offsetY 同式）
                     const floatPhase = Math.min(1, Math.max(0, (t - stagger + 400) / (length * 1.4)));
-                    ey = -em * (0.05 * Math.sin(floatPhase * Math.PI) * line.highlightAmount
+                    ey = -em * (0.05 * Math.sin(floatPhase * Math.PI)
                                 + 0.025 * amount * escale)
                             + (1 - escale) * centerDy;
                     const blurBase = Math.min(
                                 0.8, line.__intensity(rawDu / 3000) * 0.5 * (span.last ? 1.5 : 1));
                     // 宿主 shader 合成把 halo 乘 bright.a：辉光随亮色 alpha 渐入渐出
-                    const haloOpacity = blurBase * env * line.highlightAmount * line.brightColor.a;
+                    const haloOpacity = blurBase * env * line.brightColor.a;
                     if (haloOpacity > 0.01)
                         halos = [{
                                 // 宿主 mask 烘焙半径 max(1, ceil(em·dpr·strength·.15))：
@@ -531,7 +569,7 @@ Item {
                     };
                 if (ex !== 0 || ey !== 0 || escale !== 1) {
                     pose.x = ex;
-                    pose.y = ey;
+                    pose.y = y + ey;
                     pose.scale = escale;
                 }
                 list.push(pose);
@@ -552,7 +590,7 @@ Item {
                     };
                 if (ex !== 0 || ey !== 0 || escale !== 1) {
                     pose.x = ex;
-                    pose.y = ey;
+                    pose.y = y + ey;
                     pose.scale = escale;
                 }
                 list.push(pose);
@@ -585,7 +623,7 @@ Item {
                     };
                 if (ex !== 0 || ey !== 0 || escale !== 1) {
                     pose.x = ex;
-                    pose.y = ey;
+                    pose.y = y + ey;
                     pose.scale = escale;
                 }
                 list.push(pose);
@@ -644,7 +682,7 @@ Item {
                     };
                 if (ex !== 0 || ey !== 0 || escale !== 1) {
                     pose.x = ex;
-                    pose.y = ey;
+                    pose.y = y + ey;
                     pose.scale = escale;
                 }
                 list.push(pose);
@@ -704,10 +742,9 @@ Item {
     // 塑形结果异步晚于 words 到达（换行/宽度变化都会触发重排）：
     // metrics 落地时必须重建几何，否则 clusterBases/wordSpans 永远停在旧文本上
     onRunMetricsChanged: __refreshGeometry()
-    onCurrentChanged: refreshLifts()
-    onTimeMsChanged: refreshLifts()
+    onAnimTimeMsChanged: refreshLifts()
+    onDisabledAtChanged: refreshLifts()
     onAnimateWordsChanged: refreshLifts()
-    onHighlightAmountChanged: refreshLifts()
     Component.onCompleted: __refreshGeometry()
 
     GlyphRun {
