@@ -14,7 +14,7 @@
 
 - 音质徽标点击弹出音质列表并切换（复用宿主 `EchoAnchoredPopup` 弹层与 `PlaybackOptionsPopup` 的 quality 行样式，候选键/标签/色值对照 `PlaybackService::qualities` 常量，选择经 `page.command('quality')` 白名单命令切换，无需 capability）；与旧插件的剩余差异源于宿主未向插件公开逐曲可用性——旧插件由宿主 `qualityOptions` 提供 `disabled` 态、`hasCloudSource` 门控与文件大小，本插件弹层无禁用态与大小详情，CLD 云盘项恒显示（无云盘文件时宿主 `setQuality` 静默忽略）；viper 三档随宿主「蝰蛇音质」开关过滤（`settings.read('playback')` 读取 `viperQualityEnabled`，与背景律动共用 `settings.host` 授权）。
 - 皮肤注册后不自动选中，由用户在换肤抽屉中选择；宿主皮肤模型的候选/选择协议不允许插件静默替用户做决定。
-- 旧版悬浮在宿主工具区的评论/分享按钮改为左栏操作按钮行；分享与评论直接走宿主命令。
+- 旧版悬浮在宿主工具区的评论/分享按钮改为注入宿主右缘歌词工具列（entry 经 `ctx.ui.parts.contribute` 在 playback surface 挂载 `qml/SideActions.qml`）；分享与评论直接走宿主命令。
 - Ruby（音译注音到字上方）暂以副行形式显示；宿主未向插件公开逐字注音排版能力。
 
 命令（管理页/`executeCommand` 可用）：`open-detail` 参数 `{ name, resourceId }`，导航到宿主详情页，供皮肤内部使用。

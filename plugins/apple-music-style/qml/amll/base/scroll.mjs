@@ -343,9 +343,4 @@ export class ScrollInteractionEngine {
   clearTimers() {
     this.inertiaActive = false;
   }
-
-  dispose() {
-    this.clearTimers();
-    this.scrollEndTime = undefined;
-  }
 }

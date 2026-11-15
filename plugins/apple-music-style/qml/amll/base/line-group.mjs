@@ -92,7 +92,9 @@ export class LyricLineCore {
       this.scaleSpring.setPosition(scale);
     }
 
-    this.revision++;
+    // revision 只标记 enable/disable 边沿（渲染层唯一经版本号消费的状态，
+    // AmlGroupView 启用沿块）。setTransform 的离散目标由渲染层独立推导或
+    // 逐帧直读，不 bump——否则每次排版事件都会重置扫掠锚点并重启强调包络
   }
 
   /**
@@ -198,6 +200,12 @@ export class LyricLineGroupCore {
    * @param {boolean} inBrightnessWindow
    */
   setTransform(top, immediate, delayMs, isActive, opacity, blur, inBrightnessWindow) {
+    // 离散目标（组透明度/模糊/高亮量）经版本号被渲染层消费，仅在值真正
+    // 变化时 bump：排版事件（滚动/测量/尺寸变化）每帧重算布局，无差别
+    // bump 会让 AmlGroupView 的 Behavior 过渡反复从当前值重启
+    const discreteChanged =
+      this.isActive !== isActive || this.opacity !== opacity || this.blur !== blur;
+
     this.delay = delayMs;
     this.isActive = isActive;
     this.opacity = opacity;
@@ -213,7 +221,7 @@ export class LyricLineGroupCore {
       this.posY.setTargetPosition(top, delayMs);
     }
 
-    this.revision++;
+    if (discreteChanged) this.revision++;
   }
 
   /**

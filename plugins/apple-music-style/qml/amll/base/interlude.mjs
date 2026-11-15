@@ -289,11 +289,6 @@ export class InterludeDots {
     }
   }
 
-  /** 释放演出状态 */
-  dispose() {
-    this.dismiss(true);
-  }
-
   /** 获取当前帧快照（内部复用引用，当帧消费） */
   getSnapshot() {
     return this.snapshot;

@@ -800,6 +800,7 @@ Item {
                         AmActionButton {
                             glyph: "list"
                             label: qsTr("更多外观")
+                            enabled: root.page.active
                             onClicked: root.plugin.ui.lyricsPage.openSkins()
                         }
                     }
@@ -921,8 +922,10 @@ Item {
                         }
 
                         function fractionAt(x: real): real {
-                            // MouseArea 上下左右各扩 8px 命中区，换算回轨道坐标
-                            return Math.min(1, Math.max(0, (x - anchors.margins) / track.width));
+                            // MouseArea 以 anchors.margins: -8 外扩命中区（负 margin
+                            // 把填充矩形向外扩），原点在轨道左缘外 8px：换算回轨道
+                            // 坐标需先减掉外扩量，x + margins = x - 8
+                            return Math.min(1, Math.max(0, (x + anchors.margins) / track.width));
                         }
                         onPressed: mouse => {
                             progressSection.dragging = true;
@@ -1189,7 +1192,6 @@ Item {
             fontSize: root.lyricFontSize
             baseFont: root.lyricFont
             secondaryFont: root.secondaryLyricFont
-            // 演唱行 #fff，未唱行 rgba(255,255,255,0.92)，与旧版一致
             // 演唱行 #fff；未唱部分对照宿主 LyricColors 默认 20% 白（AMLL 明暗比），
             // 扫掠前沿才有可感知的明暗对比
             textColor: "#ffffff"

@@ -1,6 +1,7 @@
 /**
  * 播放器共享常量。
- * 移植自 AMLL base/consts.ts（不雅词掩码相关条目按范围决策不移植）。
+ * 移植自 AMLL base/consts.ts（不雅词掩码与布局对齐锚点相关条目按范围
+ * 决策不移植——锚点恒为居中）。
  */
 
 /**
@@ -11,13 +12,6 @@ export const LyricLineRenderMode = {
   SOLID: 0,
   /** 渐变渲染：活动行逐词扫掠（已唱亮/未唱暗 + 软边渐变带） */
   GRADIENT: 1,
-};
-
-/** 布局对齐锚点 */
-export const LayoutAlignAnchor = {
-  Top: 'top',
-  Center: 'center',
-  Bottom: 'bottom',
 };
 
 /**

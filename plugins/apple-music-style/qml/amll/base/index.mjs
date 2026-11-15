@@ -4,13 +4,12 @@
  */
 
 export {
-  LayoutAlignAnchor,
   LayoutReason,
   LayoutReasonStrategyMap,
   LyricLineRenderMode,
   MAX_FRAME_DELTA,
 } from './consts.mjs';
-export { bezier, clamp01, clampPositive } from './easing.mjs';
+export { bezier, clamp01 } from './easing.mjs';
 export { FocusController } from './focus.mjs';
 export { isCJK } from './is-cjk.mjs';
 export { InterludeDots } from './interlude.mjs';

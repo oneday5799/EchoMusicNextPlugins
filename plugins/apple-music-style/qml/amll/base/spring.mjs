@@ -124,7 +124,11 @@ export class Spring {
     if (this.queueParams) {
       this.queueParams.time -= dt;
       if (this.queueParams.time <= 0) {
-        this.updateParams(Object.assign({}, this.queueParams));
+        // 先摘队再生效：无延迟分支不触碰 queueParams，留队会让后续每帧
+        // 重复触发参数生效并重建解算器（AMLL 上游同位置漏清队，此处修正）
+        const queued = this.queueParams;
+        this.queueParams = undefined;
+        this.updateParams(Object.assign({}, queued));
       }
     }
     if (this.queuePosition) {
@@ -145,7 +149,10 @@ export class Spring {
    */
   updateParams(params, delayMs = 0) {
     if (delayMs > 0) {
-      this.queueParams = Object.assign(Object.assign({}, this.queuePosition), params, {
+      // 延迟参数并入参数队列（queueParams），不得并入目标位置队列
+      //（queuePosition）：AMLL 上游误用 queuePosition 作合并源，会丢失
+      // 先前排队的参数并混入 position 键（此处修正）
+      this.queueParams = Object.assign(Object.assign({}, this.queueParams), params, {
         time: delayMs / 1000,
       });
     } else {

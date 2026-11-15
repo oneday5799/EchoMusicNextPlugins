@@ -7,13 +7,7 @@
  * 视觉应用由 QML 渲染层完成。
  */
 
-import {
-  LayoutAlignAnchor,
-  LayoutReason,
-  LayoutReasonStrategyMap,
-  MAX_FRAME_DELTA,
-} from './consts.mjs';
-import { clampPositive } from './easing.mjs';
+import { LayoutReason, LayoutReasonStrategyMap, MAX_FRAME_DELTA } from './consts.mjs';
 import { FocusController } from './focus.mjs';
 import { InterludeDots } from './interlude.mjs';
 import { LayoutCalculator } from './layout.mjs';
@@ -160,7 +154,6 @@ export class LyricPlayerCore {
     this.seekDetector = new SeekDetector(this.now);
     this.enableAutoSeekDetection = true;
 
-    this.hasBottomContent = false;
     this.disableSpring = false;
 
     this.dataManager = new LyricDataManager();
@@ -169,7 +162,6 @@ export class LyricPlayerCore {
     this.layoutState = { interludeDotsSize: [0, 0] };
 
     this.layoutConfig = {
-      alignAnchor: LayoutAlignAnchor.Center,
       alignPosition: 0.35,
       overscanPx: 300,
     };
@@ -186,8 +178,6 @@ export class LyricPlayerCore {
     this.visualFrame = {
       /** 最靠后的高亮行，无高亮时回退到 scrollToIndex */
       latestIndex: 0,
-      /** 已播放行的分界，hidePassedLines 启用时此行之前的歌词被隐藏 */
-      passedBoundary: 0,
       /** 是否为窄视口，窄视口下模糊强度打折 */
       isNarrowViewport: false,
     };
@@ -196,7 +186,6 @@ export class LyricPlayerCore {
     this.interludeDots = new InterludeDots();
     this.enableBlur = true;
     this.enableScale = true;
-    this.hidePassedLines = false;
 
     this.scrollState = {
       isAutoAlignSuspended: false,
@@ -231,9 +220,6 @@ export class LyricPlayerCore {
     this.size = [0, 0];
     this.isPageVisible = true;
 
-    /** 文字扫掠渐变带宽度（相对主文字字体大小倍数，AMLL 默认 0.5） */
-    this.wordFadeWidth = 0.5;
-
     this.posYSpringParams = {
       mass: 0.9,
       damping: 15,
@@ -267,11 +253,6 @@ export class LyricPlayerCore {
     return this.dataManager.getRawLines();
   }
 
-  /** @returns {ReadonlyArray<LyricLineData>} 处理后的歌词数组 */
-  get processedLines() {
-    return this.dataManager.getProcessedLines();
-  }
-
   /** 歌词是否为非动态歌词（逐行歌词） */
   get isNonDynamic() {
     return this.dataManager.getIsNonDynamic();
@@ -284,18 +265,6 @@ export class LyricPlayerCore {
   //#endregion
 
   //#region 配置
-  /**
-   * 设置文字动画的渐变带宽度（相对主文字字体大小倍数），默认 0.5。
-   * 近乎禁用渐变可设 0.0001，不可为 0
-   */
-  setWordFadeWidth(value = 0.5) {
-    this.wordFadeWidth = Math.max(0.0001, value);
-  }
-
-  getWordFadeWidth() {
-    return this.wordFadeWidth;
-  }
-
   /** 是否启用歌词行缩放效果，默认启用 */
   setEnableScale(enable = true) {
     this.enableScale = enable;
@@ -312,25 +281,9 @@ export class LyricPlayerCore {
     this.calcLayout(LayoutReason.ConfigChange);
   }
 
-  /** 设置是否隐藏已经播放过的歌词行，默认不隐藏 */
-  setHidePassedLines(hide) {
-    this.hidePassedLines = hide;
-    this.calcLayout(LayoutReason.ConfigChange);
-  }
-
-  /** 设置对齐锚点（默认 center） */
-  setAlignAnchor(alignAnchor) {
-    this.layoutConfig.alignAnchor = alignAnchor;
-  }
-
   /** 设置对齐位置，组件高度 [0,1] 比例，默认 0.35 */
   setAlignPosition(alignPosition) {
     this.layoutConfig.alignPosition = alignPosition;
-  }
-
-  /** 设置 overscan 视口缓冲距离（像素），默认 300 */
-  setOverscanPx(px) {
-    this.layoutConfig.overscanPx = clampPositive(px | 0);
   }
 
   getOverscanPx() {
@@ -352,10 +305,6 @@ export class LyricPlayerCore {
     if (this.enableAutoSeekDetection === enable) return;
     this.enableAutoSeekDetection = enable;
     this.seekDetector.reset();
-  }
-
-  getEnableAutoSeekDetection() {
-    return this.enableAutoSeekDetection;
   }
 
   setBaseFontSize(px) {
@@ -636,7 +585,6 @@ export class LyricPlayerCore {
     // 确定这一帧焦点应该对齐谁
     const focalTarget = this.focusController.resolve(snapshot, this.currentLyricGroups.length, {
       isAutoAlignSuspended: this.scrollState.isAutoAlignSuspended,
-      hasBottomContent: this.hasBottomContent,
       canDisplayInterlude,
     });
 
@@ -690,7 +638,6 @@ export class LyricPlayerCore {
     // 刷新本帧的视觉推导派生值
     const visual = this.visualFrame;
     visual.latestIndex = snapshot.latestHighlightedIndex ?? snapshot.scrollToIndex;
-    visual.passedBoundary = interlude ? interlude.anchorLineIndex + 1 : snapshot.scrollToIndex;
     visual.isNarrowViewport = this.size[0] <= 1024;
 
     // 计算亮度层副本的保留区间。该区间需完整覆盖当前焦点行与所有高亮行，并向前后各扩展 2 行。
@@ -755,11 +702,6 @@ export class LyricPlayerCore {
   resolveOpacity(index, isInViewport, snapshot) {
     // 在视口外则剔除渲染
     if (!isInViewport) return 0;
-
-    if (this.hidePassedLines && this.isPlaying && index < this.visualFrame.passedBoundary) {
-      // 为了避免优化器吞掉，这里使用了一个极小但不为零的值（几乎不可见）
-      return 1e-4;
-    }
 
     if (snapshot.highlightedGroups.has(index)) return 0.85;
 
@@ -866,10 +808,4 @@ export class LyricPlayerCore {
     this.scrollState.isTouchScrolled = false;
   }
   //#endregion
-
-  dispose() {
-    this.scrollEngine.dispose();
-    this.interludeDots.dispose();
-    this.currentLyricGroups = [];
-  }
 }

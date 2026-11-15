@@ -5,14 +5,13 @@
  * 滚动边界与逐行渲染指令（Y 坐标 / 是否在视口内）。
  * 两阶段接口：`beginFrame` 解析焦点度量并给出滚动安全边界，
  * 由调用方把边界交给滚动引擎钳制后，`commit` 生成最终渲染指令。
+ * 对齐锚点恒为居中（AMLL LayoutAlignAnchor.Center），Top/Bottom
+ * 分支与底栏目标按范围决策不移植。
  */
-
-import { LayoutAlignAnchor } from './consts.mjs';
 
 /**
  * 布局对齐的静态配置项
  * @typedef {object} LayoutConfig
- * @property {string} alignAnchor 自动对齐的锚点（LayoutAlignAnchor）
  * @property {number} alignPosition 0.0 - 1.0 的视口相对位置
  * @property {number} overscanPx 视口上下额外保留的预渲染距离（像素）
  */
@@ -360,13 +359,7 @@ export class LayoutCalculator {
       return this.resolvedMetrics;
     }
 
-    this.updateFocalMetrics(
-      ctx.target,
-      interludeTotalHeight,
-      activeInterludeAnchor,
-      ctx.bottomLineHeight,
-      config,
-    );
+    this.updateFocalMetrics(ctx.target, interludeTotalHeight, activeInterludeAnchor);
 
     this.resolvedMetrics.isValid = true;
     return this.resolvedMetrics;
@@ -375,13 +368,7 @@ export class LayoutCalculator {
   /**
    * 测量对齐目标的几何信息
    */
-  updateFocalMetrics(
-    target,
-    interludeTotalHeight,
-    activeInterludeAnchor,
-    bottomLineHeight,
-    config,
-  ) {
+  updateFocalMetrics(target, interludeTotalHeight, activeInterludeAnchor) {
     let focalTopY = 0;
     let targetHeight = 0;
 
@@ -395,47 +382,20 @@ export class LayoutCalculator {
     } else if (target.type === 'interlude') {
       focalTopY = this.prefixSums[target.anchorIndex + 1];
       targetHeight = interludeTotalHeight;
-    } else if (target.type === 'bottom') {
-      focalTopY = this.totalLyricHeight;
-      if (activeInterludeAnchor !== undefined) {
-        focalTopY += interludeTotalHeight;
-      }
-      targetHeight = bottomLineHeight;
     }
 
     this.resolvedMetrics.focalTopY = focalTopY;
-    this.resolvedMetrics.anchorOffset = this.calculateAnchorOffset(
-      config.alignAnchor,
-      targetHeight,
-    );
+    // 锚点恒为居中：偏移 = 目标高度的一半（无测量值时高度为 0，偏移同为 0）
+    this.resolvedMetrics.anchorOffset = targetHeight / 2;
   }
 
   /**
-   * 根据锚点与目标高度计算内部相对偏移
-   */
-  calculateAnchorOffset(alignAnchor, targetHeight) {
-    if (targetHeight <= 0) return 0;
-
-    switch (alignAnchor) {
-      case LayoutAlignAnchor.Top:
-        return 0;
-      case LayoutAlignAnchor.Center:
-        return targetHeight / 2;
-      case LayoutAlignAnchor.Bottom:
-        return targetHeight;
-    }
-    return 0;
-  }
-
-  /**
-   * 重置排版结果为安全干净的状态（全部不可见/无底栏）
+   * 重置排版结果为安全干净的状态（全部不可见）
    */
   resetLayoutResult() {
     this.layoutResult.lineCount = 0;
     this.layoutResult.hasInterlude = false;
     this.layoutResult.interludeY = 0;
-    this.layoutResult.bottomLineY = 0;
-    this.layoutResult.isBottomLineInViewport = false;
 
     for (let i = 0; i < this.instructionPool.length; i++) {
       this.instructionPool[i].isInViewport = false;

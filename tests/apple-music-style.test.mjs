@@ -243,7 +243,10 @@ test('AMLL refactor wiring drives the lyric page through the base core', async (
   assert.ok(flow.includes('core.setCurrentTime'), '媒体时间必须推送进编排核心');
   assert.ok(flow.includes('core.setLyricLines'), '歌词数据必须进编排核心');
   assert.ok(flow.includes('setAlignPosition(focusPosition)'));
-  assert.ok(flow.includes('setWordFadeWidth(wordFade)'));
+  assert.ok(
+    group.includes('fadeWidth: flow.wordFade'),
+    '软边宽度必须直达 AmlGroupView（核心不再持有 wordFadeWidth）',
+  );
   assert.ok(flow.includes('setLinePosYSpringParams'), 'posY 弹簧参数 m0.9/d15/k90');
   assert.ok(flow.includes('seekToGroup'));
   assert.ok(!flow.includes('ListView'), '排版与滚动交由 base 核心（无 ListView）');

@@ -11,14 +11,13 @@
 
 /**
  * 对齐焦点目标
- * @typedef {{ type: "line", index: number } | { type: "interlude", anchorIndex: number } | { type: "bottom" }} FocalTarget
+ * @typedef {{ type: "line", index: number } | { type: "interlude", anchorIndex: number }} FocalTarget
  */
 
 /**
  * 焦点推导所依赖的播放器交互状态
  * @typedef {object} FocusResolveFlags
  * @property {boolean} isAutoAlignSuspended 是否处于用户滚动过、尚未回归自动对齐的状态
- * @property {boolean} hasBottomContent 底栏当前是否有内容
  * @property {boolean} canDisplayInterlude 当前命中的间奏点是否具备可展示的时长
  */
 
@@ -72,9 +71,6 @@ export class FocusController {
         }
         return target;
       }
-
-      case 'bottom':
-        return target;
     }
   }
 
@@ -97,12 +93,8 @@ export class FocusController {
       };
     }
 
-    // 播放完了，如果有底栏则对齐底栏，没有则对齐最后一行歌词
-    // （本插件不做底栏，hasBottomContent 恒为 false，分支保留以镜像 AMLL）
+    // 播放完了对齐最后一行歌词（本插件无底栏内容，AMLL 的底栏焦点分支不移植）
     if (snapshot.isEndOfSong) {
-      if (flags.hasBottomContent) {
-        return { type: 'bottom' };
-      }
       return {
         type: 'line',
         index: this.clampLineIndex(lineCount - 1, lineCount),

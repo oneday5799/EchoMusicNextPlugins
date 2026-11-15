@@ -32,7 +32,8 @@ Item {
     property font baseFont: Theme.store.lyricBaseFont
     property font secondaryFont: Theme.store.lyricBaseFont
     property color textColor: "#ffffff"
-    property color unplayedColor: "#ebffffff"
+    // 未唱色对照宿主 LyricColors 默认 20% 白（Skin 传入同值）
+    property color unplayedColor: Qt.rgba(1, 1, 1, 0.2)
     // 背景均色估计（Skin 复刻宿主模糊封面合成链算出）：扫掠切片色注入背景项
     property color backdropColor: "#000000"
     // v10 逐像素背景估计（Skin.backdropSample）；null 时行视图回退均色
@@ -131,7 +132,6 @@ Item {
         c.setEnableBlur(blurEnabled);
         c.setEnableScale(scaleEnabled);
         c.setEnableSpring(springEnabled);
-        c.setWordFadeWidth(wordFade);
         c.setBaseFontSize(fontSize);
         c.setSize(width, height);
         // AMLL 默认弹簧参数：posY 质量 0.9（区间策略在此基础上调 k/c），
@@ -156,7 +156,6 @@ Item {
         core.setEnableBlur(blurEnabled);
         core.setEnableScale(scaleEnabled);
         core.setEnableSpring(springEnabled);
-        core.setWordFadeWidth(wordFade);
         core.setBaseFontSize(fontSize);
     }
     function applyPlaying(): void {
@@ -203,7 +202,11 @@ Item {
             return;
         const now = Date.now();
         const raw = page.player.samplePosition();
-        if (!playing || !Number.isFinite(raw)) {
+        if (!Number.isFinite(raw)) {
+            // 异常读数：忽略本拍，保持既有锚点/推送状态
+            return;
+        }
+        if (!playing) {
             // 暂停：拖动/seek 直通（回退即真实跳转，保持检测语义）
             __projSeekPending = false;
             __projPassThrough(raw, now);
@@ -260,9 +263,6 @@ Item {
             return;
         core.setLyricLines(lines, Math.round(mediaTime));
     }
-    function rebuildFromModel(): void {
-        rebuild();
-    }
     // 只读歌词模型 → AMLL LyricLineData 规范形状。
     // - filtered 行跳过
     // - 逐词行：startTime/endTime = 首末词时间 + 偏移；words 保持原始
@@ -271,6 +271,9 @@ Item {
     //   SOLID 点亮路径）
     // - 单词零时值行回退行边界（转写占位词）
     // - seekTime：不含偏移的演唱时间戳（点击跳转用）
+    // - 行/词时间统一钳到 ≥0 且 start ≤ end：offsetMs 为负可把行首时间推成
+    //   负值，而核心 assertValidLyricTimestamps 对负时间戳/倒挂区间直接抛
+    //   TypeError/RangeError，坏值必须在数据边界拦下
     function collectLines(): var {
         const model = live ? player.lyrics : null;
         const out = [];
@@ -282,8 +285,8 @@ Item {
             const line = model.row(row);
             if (line.filtered === true)
                 continue;
-            let start = Number(line.startMs) || 0;
-            let end = start + (Number(line.durationMs) || 0);
+            let start = Math.max(0, Number(line.startMs) || 0);
+            let end = Math.max(start, start + (Number(line.durationMs) || 0));
             let seekTime = start - offset;
             const words = [];
             const rawWords = line.words || [];
@@ -291,15 +294,16 @@ Item {
                 const untimedSingle = rawWords.length === 1 && Number(rawWords[0].start_ms) === 0 && Number(rawWords[0].duration_ms) === 0;
                 if (!untimedSingle) {
                     const first = rawWords[0], last = rawWords[rawWords.length - 1];
-                    start = Number(first.start_ms) + offset;
-                    end = Number(last.start_ms) + Number(last.duration_ms) + offset;
+                    start = Math.max(0, Number(first.start_ms) + offset);
+                    end = Math.max(start, Number(last.start_ms) + Number(last.duration_ms) + offset);
                     seekTime = Number(first.start_ms);
                 }
                 for (let i = 0; i < rawWords.length; ++i) {
                     const w = rawWords[i];
+                    const wordStart = Math.max(0, Number(w.start_ms) || 0);
                     words.push({
-                            "startTime": Number(w.start_ms) || 0,
-                            "endTime": (Number(w.start_ms) || 0) + (Number(w.duration_ms) || 0),
+                            "startTime": wordStart,
+                            "endTime": Math.max(wordStart, wordStart + (Number(w.duration_ms) || 0)),
                             "word": String(w.text ?? "")
                         });
                 }
@@ -355,16 +359,16 @@ Item {
     Connections {
         target: flow.live ? flow.page.player.lyrics : null
         function onDataChanged(): void {
-            flow.rebuildFromModel();
+            flow.rebuild();
         }
         function onModelReset(): void {
-            flow.rebuildFromModel();
+            flow.rebuild();
         }
         function onRowsInserted(): void {
-            flow.rebuildFromModel();
+            flow.rebuild();
         }
         function onRowsRemoved(): void {
-            flow.rebuildFromModel();
+            flow.rebuild();
         }
     }
     AmlLyricView {

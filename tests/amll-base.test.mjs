@@ -236,12 +236,10 @@ test('FocusController freezes during suspension and follows playback otherwise',
   // 先在未挂起状态跟随到 index 1，再挂起 → 冻结保持
   focus.resolve({ ...baseSnapshot, scrollToIndex: 1 }, 5, {
     isAutoAlignSuspended: false,
-    hasBottomContent: false,
     canDisplayInterlude: false,
   });
   let target = focus.resolve(baseSnapshot, 5, {
     isAutoAlignSuspended: true,
-    hasBottomContent: false,
     canDisplayInterlude: false,
   });
   assert.deepEqual(target, { type: 'line', index: 1 });
@@ -249,7 +247,6 @@ test('FocusController freezes during suspension and follows playback otherwise',
   // 未挂起时常规跟随 scrollToIndex
   target = focus.resolve(baseSnapshot, 5, {
     isAutoAlignSuspended: false,
-    hasBottomContent: false,
     canDisplayInterlude: false,
   });
   assert.deepEqual(target, { type: 'line', index: 2 });
@@ -264,7 +261,6 @@ test('FocusController freezes during suspension and follows playback otherwise',
     5,
     {
       isAutoAlignSuspended: false,
-      hasBottomContent: false,
       canDisplayInterlude: true,
     },
   );
@@ -280,7 +276,6 @@ test('FocusController freezes during suspension and follows playback otherwise',
     5,
     {
       isAutoAlignSuspended: false,
-      hasBottomContent: false,
       canDisplayInterlude: false,
     },
   );
@@ -289,7 +284,6 @@ test('FocusController freezes during suspension and follows playback otherwise',
   // 曲末 → 最后一行（无底栏）
   target = focus.resolve({ ...baseSnapshot, isEndOfSong: true }, 5, {
     isAutoAlignSuspended: false,
-    hasBottomContent: false,
     canDisplayInterlude: false,
   });
   assert.deepEqual(target, { type: 'line', index: 4 });
@@ -395,10 +389,9 @@ test('LayoutCalculator prefix sums, focal metrics and interlude shift', () => {
     containerHeight: 1000,
     scrollOffset: 0,
     target: { type: 'line', index: 1 },
-    bottomLineHeight: 0,
     interlude: undefined,
   };
-  const config = { alignAnchor: 'center', alignPosition: 0.5, overscanPx: 0 };
+  const config = { alignPosition: 0.5, overscanPx: 0 };
 
   const { bounds, session } = layout.beginFrame(ctx, config);
   // focalTopY = 100，anchorOffset = 125
@@ -420,7 +413,6 @@ test('LayoutCalculator prefix sums, focal metrics and interlude shift', () => {
     containerHeight: 1000,
     scrollOffset: 0,
     target: { type: 'line', index: 1 },
-    bottomLineHeight: 0,
     interlude: { totalHeight: 200, anchorIndex: 0 },
   };
   const withInterlude = layout.beginFrame(interludeCtx, config);
@@ -803,8 +795,22 @@ test('Spring defers parameter updates behind a delay', () => {
   assert.equal(spring.params.stiffness, undefined, '50ms 后仍未到期');
   spring.update(60);
   assert.equal(spring.params.stiffness, 90, '累计 110ms > 100ms，参数应生效');
+  // 回归（AMLL 上游同位置漏清队）：参数生效后必须摘队，否则后续每帧
+  // 重复触发参数生效并重建解算器
+  assert.equal(spring.queueParams, undefined, '参数生效后应摘除参数队列');
+  assert.equal(spring.queuePosition, undefined, '参数无延迟生效应清掉待生效位置队列');
   for (let i = 0; i < 300; i++) spring.update(16);
   approx(spring.getCurrentPosition(), 100, 0.05, '参数生效后应继续收敛到目标');
+
+  // 回归：延迟参数并入参数队列而非位置队列（不得混入 position 键，
+  // 也不得覆盖先前排队的参数）
+  spring.updateParams({ stiffness: 120 }, 150);
+  assert.ok(!('position' in spring.queueParams), '参数队列不得混入 position 键');
+  assert.equal(spring.queueParams.stiffness, 120);
+  spring.update(150);
+  assert.equal(spring.params.stiffness, 120, '150ms 到期参数生效');
+  assert.equal(spring.queueParams, undefined, '参数生效后应摘除参数队列');
+  assert.equal(spring.targetPosition, 100, '参数生效不改变目标位置');
 });
 
 test('SeekDetector trusts at most 800ms of wall time per verdict', () => {

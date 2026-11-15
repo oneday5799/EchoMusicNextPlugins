@@ -10,11 +10,6 @@ export function clamp01(value) {
   return value < 0 ? 0 : value > 1 ? 1 : value;
 }
 
-/** 将值钳制到非负数 */
-export function clampPositive(value) {
-  return value < 0 ? 0 : value;
-}
-
 const NEWTON_MIN_SLOPE = 0.001;
 const SUBDIVISION_PRECISION = 1e-7;
 const SUBDIVISION_MAX_ITERATIONS = 24;
