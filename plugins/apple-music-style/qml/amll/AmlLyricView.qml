@@ -73,6 +73,15 @@ Item {
                 c.scrollEngine.cancelTouch();
         }
     }
+    // AMLL :hover 语义（lyric-player.module.css:304）：鼠标悬停播放器容器
+    // 时所有行 filter: unset !important——悬停歌词区期间暂时禁用远行模糊
+    // 便于阅读，离开后经组级 blur Behavior 0.4s ease 平滑恢复（CSS wrapper
+    // transition filter 0.4s 双向同值）。不门控 interactive：悬停与滚动输入
+    // 无关，未同步静态列本就无模糊
+    HoverHandler {
+        id: viewHover
+    }
+    readonly property bool hoverBlurOff: viewHover.hovered
     // 视口上下缘淡出：消除歌词移出顶部/进入底部时被 clip 硬切的水平分界
     // 线。不用 MultiEffect.mask 整层遮罩——遮罩源 Item 必须可见且在视口内
     // 才能渲染出纹理内容（visible:false / opacity:0 / 摆出视口外经代理渲

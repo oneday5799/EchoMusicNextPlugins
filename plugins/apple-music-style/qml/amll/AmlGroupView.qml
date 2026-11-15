@@ -50,7 +50,9 @@ Item {
             easing.type: Easing.OutQuad
         }
     }
-    property real blur: blurTarget
+    // 应用值 = AMLL :hover 门控（lyric-player.module.css:304 悬停容器 →
+    // filter unset）：悬停歌词视口时归零，Behavior 0.4s 双向过渡恢复
+    property real blur: view.hoverBlurOff ? 0 : blurTarget
     Behavior on blur {
         // AMLL wrapper CSS transition filter 0.4s
         NumberAnimation {

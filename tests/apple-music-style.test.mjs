@@ -220,6 +220,15 @@ test('AMLL refactor wiring drives the lyric page through the base core', async (
   assert.ok(view.includes('scrollEngine.beginTouch('));
   assert.ok(view.includes('notifyGroupsChanged'));
 
+  // AMLL :hover → 所有行 filter unset（lyric-player.module.css:304）：
+  // 悬停歌词视口暂时禁用远行模糊，经组级 blur Behavior 0.4s 双向过渡
+  assert.ok(view.includes('HoverHandler'), '歌词视口必须有悬停处理器');
+  assert.ok(view.includes('hoverBlurOff'), '悬停禁模糊状态必须暴露给组视图');
+  assert.ok(
+    group.includes('view.hoverBlurOff ? 0 : blurTarget'),
+    '悬停时组模糊必须归零（Behavior 0.4s 双向过渡恢复）',
+  );
+
   // AmlGroupView：弹簧落盘 + AMLL 过渡时长 + 测量上报
   assert.ok(group.includes('g.posY.getCurrentPosition()'), '组 y 由 posY 弹簧逐帧落盘');
   assert.ok(group.includes('setGroupMeasured'), '自然高度必须上报布局计算器');
