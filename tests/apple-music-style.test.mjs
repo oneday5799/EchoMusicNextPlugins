@@ -20,7 +20,9 @@ test('skin settings defaults mirror the AMLL alignment default', () => {
     enableBlur: true,
     enableScale: true,
     enableSpring: true,
-    fadeWidth: 50,
+    // AMLL wordFadeWidth 默认 0.5；本皮肤收窄至 0.3（慢音节尾字宽灰带，
+    // 2026-11-16 用户确认的形态调校；设置面板 0..100 可调回）
+    fadeWidth: 30,
     alignPosition: 35,
   });
 });
@@ -215,6 +217,14 @@ test('AMLL refactor wiring drives the lyric page through the base core', async (
     entry.includes('alignPosition: 35'),
     'entry.mjs 捆绑 DEFAULT_SETTINGS 须与 config.ts 同步',
   );
+  // 渐变宽度默认 0.3（AMLL 0.5 收窄，2026-11-16 用户确认的形态调校）：
+  // QML 兜底与 entry.mjs 捆绑须与 config.ts 同步
+  assert.ok(skin.includes('values.fadeWidth, 30, 0, 100'), 'Skin.qml 兜底默认须为 30');
+  assert.ok(
+    skinSettings.includes('values.fadeWidth, 30, 0, 100'),
+    'SkinSettings.qml 兜底默认须为 30',
+  );
+  assert.ok(entry.includes('fadeWidth: 30'), 'entry.mjs 捆绑 DEFAULT_SETTINGS 须与 config.ts 同步');
   // 恢复默认入口由宿主抽屉统一渲染（LyricSkinDrawer 底部 EchoSoftButton），
   // 插件设置面板不得自带——否则抽屉里出现两个重置按钮（忽略注释里的字样）
   const skinSettingsCode = skinSettings.replace(/^\s*\/\/.*$/gm, '');
@@ -348,7 +358,15 @@ test('AMLL refactor wiring drives the lyric page through the base core', async (
     line.includes('line.highlightAmount <= 0'),
     '行静息态必须整行走半透明暗墨（切片背景项不随高亮量收敛，静止冻结带会把估计残差/回退常量烘进字迹）',
   );
-  assert.ok(line.includes('dimColor'), '未唱样必须随高亮量提亮（宿主 0.2 → 0.4）');
+  assert.ok(line.includes('dimColor'), '未唱样必须随高亮量提亮（当前行 0.2 → 0.6）');
+  assert.ok(
+    line.includes('unplayedColor.a * (1 + 2 * highlightAmount)'),
+    '暗端提亮必须为 ×(1+2×高亮量)（对比度校准：91 级亮度浪在慢音节尾字上驻留读作灰带，2026-11-16 对照宿主等亮度边带收窄到 61 级）',
+  );
+  assert.ok(
+    line.includes('tauLin * tauLin * (3 - 2 * tauLin)'),
+    '带内颜色映射必须过 smoothstep（可见过渡压成窄边，慢音节上不再形成线性灰面）',
+  );
   assert.ok(line.includes('brightColor'), '已唱样必须从未唱色渐入');
   assert.ok(
     line.includes('layer.enabled: current && hasWordTiming'),

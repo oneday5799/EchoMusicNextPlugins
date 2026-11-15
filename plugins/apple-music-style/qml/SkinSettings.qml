@@ -202,7 +202,7 @@ ColumnLayout {
         suffix: "%"
         from: 0
         to: 100
-        current: settingsRoot.num(settingsRoot.configuration.values.fadeWidth, 50, 0, 100)
+        current: settingsRoot.num(settingsRoot.configuration.values.fadeWidth, 30, 0, 100)
         onCommitted: nextValue => settingsRoot.patch("fadeWidth", nextValue)
     }
 

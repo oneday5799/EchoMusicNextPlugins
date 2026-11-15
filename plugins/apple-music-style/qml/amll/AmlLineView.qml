@@ -14,10 +14,13 @@ import "base/mask-animator.mjs" as MaskAnimator
 // 宿主 clip 软边窗，窗内 = 满覆盖左色 × 递减右色的精确线性插值）铺满
 // 软边段；暗墨基底只从带右缘起罩、不进带内 —— 任何叠层都会复利字形
 // 抗锯齿边缘（变粗、偏亮），带内每像素至多一次满覆盖字形 + 一次递减形。
-// 亮暗色模型对齐 AMLL 亮度层（亮 1/暗 0.4，随高亮量交叉淡化 300ms 入 /
-// 450ms 出，由 AmlGroupView 的 Behavior 驱动）：未唱样（暗：未唱色 alpha ×
-// （1 + 高亮量），当前行 0.2 → 0.4 提亮）与已唱样（亮：未唱色 lerp 播放色，
-// 随高亮量渐入）。全局逐行歌词（isNonDynamic）对齐 AMLL 无遮罩形态：
+// 亮暗色模型源自 AMLL 亮度层（亮 1，随高亮量交叉淡化 300ms 入 / 450ms 出，
+// 由 AmlGroupView 的 Behavior 驱动）：未唱样（暗：未唱色 alpha ×（1 + 2×高亮量），
+// 当前行 0.2 → 0.6 提亮——AMLL 原式 ×(1+高亮量) 得 0.4，暗端与平台差 91 级
+// 亮度，在慢音节尾字上驻留十几秒读作一条灰带；宿主同构渲染链上主题已唱/未唱
+// 墨的亮度差仅 15 级（琥珀 138 vs 灰 123）故无此观感。0.6 把对比降到 61 级，
+// karaoke 可读性保留）与已唱样（亮：未唱色 lerp 播放色，随高亮量渐入）。
+// 全局逐行歌词（isNonDynamic）对齐 AMLL 无遮罩形态：
 // 整行全 alpha，0.2/0.85 由组透明度承担。
 // 播放中的词上浮 em × 5%；未逐词的行激活时整行点亮。
 // 强调词（时长 ≥1s 且全 CJK 或 2–7 字符）按宿主 LyricLine::pose：
@@ -72,8 +75,11 @@ Item {
     // 调整进度、滚轮滚动后非当前行颜色不对的根因）。绑定经此读取锚点，
     // 移动超过量化步长即整体重烘焙，静止时零开销。
     property real poseAnchor: 0
-    // 0..1，软边宽度系数（AMLL wordFadeWidth，无钳制，下限 0.0001）
-    property real fadeWidth: 0.5
+    // 0..1，软边宽度系数（AMLL wordFadeWidth，无钳制，下限 0.0001）。
+    // 本皮肤默认 0.3：AMLL 默认 0.5 的 0.6 字宽线性软边在慢音节尾字上
+    // 形成宽灰带（2026-11-16 实机逐点测量确认渲染=设计=AMLL，属形态
+    // 调校），用户确认收窄——调用方未绑定时兜底值与配置默认同步
+    property real fadeWidth: 0.3
     // 活动行离屏合成：Qt 对非分层子树的 item opacity 逐 draw 相乘，扫掠带
     // 「前片外伸 + 本片」叠画在 ρ<1 时底层亮墨以 (1−ρ) 泄漏（带比平台亮
     // +20~28、亮端窗口 +17 斑）；抵消用的 pose.opacity=1/ρ 被宿主
@@ -117,8 +123,11 @@ Item {
     property real rowHeight: em * 1.2
     readonly property bool hasWordTiming: words.some(w => Number(w.t1) !== Number(w.t0))
     // 宿主 LyricLine 的颜色模型：亮色随高亮量从未唱色渐入，
-    // 暗色随高亮量提亮（当前行未唱部分 0.2 → 0.4），静止行保持未唱色
-    readonly property color dimColor: Qt.rgba(unplayedColor.r, unplayedColor.g, unplayedColor.b, Math.min(1, unplayedColor.a * (1 + highlightAmount)))
+    // 暗色随高亮量提亮。系数 2 为对比度校准（AMLL 原式 ×(1+高亮量) 的暗端
+    // 0.4 与平台差 91 级亮度，慢音节尾字上驻留读作灰带，2026-11-16 对照宿主
+    // 主题等亮度边带后确认收窄到 61 级）：当前行未唱部分 0.2 → 0.6，
+    // 静止行保持未唱色
+    readonly property color dimColor: Qt.rgba(unplayedColor.r, unplayedColor.g, unplayedColor.b, Math.min(1, unplayedColor.a * (1 + 2 * highlightAmount)))
     readonly property color brightColor: Qt.rgba(
         unplayedColor.r + (playedColor.r - unplayedColor.r) * highlightAmount,
         unplayedColor.g + (playedColor.g - unplayedColor.g) * highlightAmount,
@@ -701,9 +710,14 @@ Item {
                 const ri = li + pitch + F;              // 右缘多伸 F：残尾没入下级内部
                 if (s > 1 && ri <= x)
                     continue;   // 切片整体在簇左侧（切片 1 向左无限延伸，不受此限）
-                const tau = s === 1
+                // 线性 τ 过 smoothstep：可见过渡压成窄边（两缘斜率归零，中段
+                // 最陡），带不再是一片线性灰面——线性 ramp 在 61 级对比下仍会
+                // 在慢音节上形成可辨的灰带（2026-11-16 实测）；两端值不变，
+                // 平台/未唱墨衔接不受影响
+                const tauLin = s === 1
                         ? 1
                         : Math.min(1, Math.max(0, 0.5 + (center - (li + pitch * 0.5)) / fade));
+                const tau = tauLin * tauLin * (3 - 2 * tauLin);
                 if (tau <= 0.005)
                     break;      // 余下切片与暗基底同观感
                 // 每片自己的背景项：切片中心行局部 x（= clip 坐标系）取样；

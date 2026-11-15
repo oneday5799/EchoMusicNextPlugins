@@ -40,8 +40,10 @@ Item {
     property var backdropSampler: null
     // 0..1，歌词对齐高度比例（AMLL alignPosition，默认 0.35）
     property real focusPosition: 0.35
-    // 0..1，软边宽度系数（AMLL wordFadeWidth）
-    property real wordFade: 0.5
+    // 0..1，软边宽度系数（AMLL wordFadeWidth 默认 0.5；本皮肤默认 0.3——
+    // 0.6 字宽软边在慢音节尾字上形成宽灰带，2026-11-16 用户确认收窄，
+    // 与 src/config.ts DEFAULT_SETTINGS 同步）
+    property real wordFade: 0.3
     property bool blurEnabled: true
     property bool scaleEnabled: true
     property bool springEnabled: true

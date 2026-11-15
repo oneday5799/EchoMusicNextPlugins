@@ -16,7 +16,11 @@ export const DEFAULT_SETTINGS: SkinSettings = {
   enableBlur: true,
   enableScale: true,
   enableSpring: true,
-  fadeWidth: 50,
+  // AMLL wordFadeWidth 默认 0.5；本皮肤默认 0.3：0.6 字宽的线性软边在慢音节
+  // 尾字上让整个字 60% 处于渐变中间态（拖长音时驻留十几秒），读作一条宽灰带
+  // （2026-11-16 实机逐点测量确认渲染=设计=AMLL，属形态调校；用户确认收窄）。
+  // 设置面板可调回 0..100 全域
+  fadeWidth: 30,
   alignPosition: 35,
 };
 

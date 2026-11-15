@@ -147,7 +147,9 @@ Item {
             "enableBlur": root.configuration.values.enableBlur !== false,
             "enableScale": root.configuration.values.enableScale !== false,
             "enableSpring": root.configuration.values.enableSpring !== false,
-            "fadeWidth": root.num(root.configuration.values.fadeWidth, 50, 0, 100),
+            // 默认 30：AMLL wordFadeWidth 0.5 收窄至 0.3（慢音节尾字宽灰带，
+            // 2026-11-16 用户确认；与 src/config.ts DEFAULT_SETTINGS 同步）
+            "fadeWidth": root.num(root.configuration.values.fadeWidth, 30, 0, 100),
             "alignPosition": root.num(root.configuration.values.alignPosition, 35, 0, 100)
         })
 

@@ -26,7 +26,11 @@ var DEFAULT_SETTINGS = {
   enableBlur: true,
   enableScale: true,
   enableSpring: true,
-  fadeWidth: 50,
+  // AMLL wordFadeWidth 默认 0.5；本皮肤默认 0.3：0.6 字宽的线性软边在慢音节
+  // 尾字上让整个字 60% 处于渐变中间态（拖长音时驻留十几秒），读作一条宽灰带
+  // （2026-11-16 实机逐点测量确认渲染=设计=AMLL，属形态调校；用户确认收窄）。
+  // 设置面板可调回 0..100 全域
+  fadeWidth: 30,
   alignPosition: 35
 };
 var NUMBER_SETTINGS = {
@@ -38,12 +42,12 @@ var NUMBER_SETTINGS = {
 var BOOLEAN_SETTINGS = ["enableBlur", "enableScale", "enableSpring"];
 function validateSettings(values) {
   if (!values || typeof values !== "object" || Array.isArray(values)) {
-    return { errors: ["\u76AE\u80A4\u8BBE\u7F6E\u5FC5\u987B\u662F JSON \u5BF9\u8C61"] };
+    return { errors: ["皮肤设置必须是 JSON 对象"] };
   }
   const errors = [];
   for (const key of BOOLEAN_SETTINGS) {
     if (values[key] !== void 0 && typeof values[key] !== "boolean") {
-      errors.push(`${key} \u5FC5\u987B\u662F\u5E03\u5C14\u503C`);
+      errors.push(`${key} 必须是布尔值`);
     }
   }
   for (const key of Object.keys(NUMBER_SETTINGS)) {
@@ -51,7 +55,7 @@ function validateSettings(values) {
     const value = values[key];
     if (value === void 0) continue;
     if (typeof value !== "number" || !Number.isFinite(value) || value < min || value > max) {
-      errors.push(`${key} \u5FC5\u987B\u662F ${min}..${max} \u4E4B\u95F4\u7684\u6570\u503C`);
+      errors.push(`${key} 必须是 ${min}..${max} 之间的数值`);
     }
   }
   return errors.length === 0 ? true : { errors };
@@ -62,7 +66,7 @@ function activate(ctx) {
   const skin = ctx.ui.lyricsPage.registerSkin({
     id: SKIN_ID,
     title: "Apple Music Style",
-    description: "\u53CC\u680F\u5E03\u5C40\uFF1A\u5DE6\u4FA7\u5C01\u9762\u4E0E\u64AD\u653E\u63A7\u5236\uFF0C\u53F3\u4FA7\u63D2\u4EF6\u81EA\u7ED8\u7684 AMLL \u98CE\u683C\u9010\u5B57\u6B4C\u8BCD\u3002",
+    description: "双栏布局：左侧封面与播放控制，右侧插件自绘的 AMLL 风格逐字歌词。",
     component: "qml/Skin.qml",
     titlebar: "host",
     tools: "host",
