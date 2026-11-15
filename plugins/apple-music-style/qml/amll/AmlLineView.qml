@@ -16,13 +16,16 @@ import "base/mask-animator.mjs" as MaskAnimator
 // 抗锯齿边缘（变粗、偏亮），带内每像素至多一次满覆盖字形 + 一次递减形。
 // 亮暗色模型源自 AMLL 亮度层（亮 1，随高亮量交叉淡化 300ms 入 / 450ms 出，
 // 由 AmlGroupView 的 Behavior 驱动）：未唱样（暗：未唱色 alpha ×（1 + 2×高亮量），
-// 当前行 0.2 → 0.6 提亮——AMLL 原式 ×(1+高亮量) 得 0.4，暗端与平台差 91 级
-// 亮度，在慢音节尾字上驻留十几秒读作一条灰带；宿主同构渲染链上主题已唱/未唱
-// 墨的亮度差仅 15 级（琥珀 138 vs 灰 123）故无此观感。0.6 把对比降到 61 级，
-// karaoke 可读性保留）与已唱样（亮：未唱色 lerp 播放色，随高亮量渐入）。
+// 当前行 0.15 → 0.45 提亮——AMLL 原式 ×(1+高亮量) 的暗端与平台差 91 级
+// 亮度，在慢音节尾字上驻留十几秒读作一条灰带，故系数 2 收窄可见过渡（τ
+// smoothstep 压边，2026-11-16 对照宿主同构渲染链确认——宿主主题已唱/未唱
+// 墨的亮度差仅 15 级故无此观感）；未唱墨本体同日按观感自 20% 白调暗到
+// 15%，非播放行与当前行未唱部分同步变暗）与已唱样（亮：未唱色 lerp 播放
+// 色，随高亮量渐入）。
 // 全局逐行歌词（isNonDynamic）对齐 AMLL 无遮罩形态：
 // 整行全 alpha，0.2/0.85 由组透明度承担。
-// 播放中的词上浮 em × 5%；未逐词的行激活时整行点亮。
+// 播放中的词上浮 em × 10%（2026-11-16 按观感翻倍；宿主/AMLL 默认 5%）；
+// 未逐词的行激活时整行点亮。
 // 强调词（时长 ≥1s 且全 CJK 或 2–7 字符）按宿主 LyricLine::pose：
 // 逐字交错 rise(.2,.4,.58,1)/fall(.3,0,.58,1) 包络，缩放 1+.1×amount、
 // 推移 −em×.03×amount×(字数/2−序)×scale；lift 整体替换为
@@ -124,9 +127,9 @@ Item {
     readonly property bool hasWordTiming: words.some(w => Number(w.t1) !== Number(w.t0))
     // 宿主 LyricLine 的颜色模型：亮色随高亮量从未唱色渐入，
     // 暗色随高亮量提亮。系数 2 为对比度校准（AMLL 原式 ×(1+高亮量) 的暗端
-    // 0.4 与平台差 91 级亮度，慢音节尾字上驻留读作灰带，2026-11-16 对照宿主
-    // 主题等亮度边带后确认收窄到 61 级）：当前行未唱部分 0.2 → 0.6，
-    // 静止行保持未唱色
+    // 与平台差 91 级亮度，慢音节尾字上驻留读作灰带，2026-11-16 对照宿主
+    // 主题等亮度边带后收窄）：当前行未唱部分 0.15 → 0.45（未唱墨本体
+    // 同日自 20% 白调暗到 15%），静止行保持未唱色
     readonly property color dimColor: Qt.rgba(unplayedColor.r, unplayedColor.g, unplayedColor.b, Math.min(1, unplayedColor.a * (1 + 2 * highlightAmount)))
     readonly property color brightColor: Qt.rgba(
         unplayedColor.r + (playedColor.r - unplayedColor.r) * highlightAmount,
@@ -249,7 +252,7 @@ Item {
                         p = Math.min(1, Math.max(0, (disabledAt - word.t0) / duration)) -
                                 (animTimeMs - disabledAt) / duration;
                     }
-                    list[i] = -em * 0.05 * __ease(Math.min(1, Math.max(0, p)));
+                    list[i] = -em * 0.10 * __ease(Math.min(1, Math.max(0, p)));
                 }
             }
         }

@@ -1206,10 +1206,10 @@ Item {
             fontSize: root.lyricFontSize
             baseFont: root.lyricFont
             secondaryFont: root.secondaryLyricFont
-            // 演唱行 #fff；未唱部分对照宿主 LyricColors 默认 20% 白（AMLL 明暗比），
-            // 扫掠前沿才有可感知的明暗对比
+            // 演唱行 #fff；未唱部分 15% 白（宿主默认 20%，2026-11-16 按观感调暗，
+            // AMLL 明暗比），扫掠前沿才有可感知的明暗对比
             textColor: "#ffffff"
-            unplayedColor: Qt.rgba(1, 1, 1, 0.2)
+            unplayedColor: Qt.rgba(1, 1, 1, 0.15)
             // 背景均色估计：渐变带切片色注入背景项（消除带端明暗边界）
             backdropColor: root.backdropColor
             // v9 逐像素背景估计器（null 时 AmlLineView 回退 backdropColor 均色）

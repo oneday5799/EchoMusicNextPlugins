@@ -241,7 +241,11 @@ test('AMLL refactor wiring drives the lyric page through the base core', async (
   assert.ok(skin.includes('PlaybackBlurredBackground'), '背景必须复用宿主模糊封面渲染器');
   assert.ok(skin.includes('lyricBackground'), '底色必须走宿主 lyricBackground(封面主色)');
   assert.ok(!skin.includes('blurMax: 64'), '不再手搓封面模糊');
-  assert.ok(skin.includes('Qt.rgba(1, 1, 1, 0.2)'), '未唱色必须用宿主默认 20% 白');
+  assert.ok(
+    skin.includes('Qt.rgba(1, 1, 1, 0.15)'),
+    '未唱色必须用调暗后的 15% 白（2026-11-16 观感校准）',
+  );
+  assert.ok(!skin.includes('Qt.rgba(1, 1, 1, 0.2)'), '未唱色不得回退宿主默认 20% 白');
   // 背景律动跟随宿主 backgroundRhythm：read/observe 同步 + 30fps 相位推进
   assert.ok(skin.includes("settings.read('lyrics')"));
   assert.ok(skin.includes('settings.observe('));
@@ -358,10 +362,14 @@ test('AMLL refactor wiring drives the lyric page through the base core', async (
     line.includes('line.highlightAmount <= 0'),
     '行静息态必须整行走半透明暗墨（切片背景项不随高亮量收敛，静止冻结带会把估计残差/回退常量烘进字迹）',
   );
-  assert.ok(line.includes('dimColor'), '未唱样必须随高亮量提亮（当前行 0.2 → 0.6）');
+  assert.ok(line.includes('dimColor'), '未唱样必须随高亮量提亮（当前行 0.15 → 0.45）');
   assert.ok(
     line.includes('unplayedColor.a * (1 + 2 * highlightAmount)'),
-    '暗端提亮必须为 ×(1+2×高亮量)（对比度校准：91 级亮度浪在慢音节尾字上驻留读作灰带，2026-11-16 对照宿主等亮度边带收窄到 61 级）',
+    '暗端提亮必须为 ×(1+2×高亮量)（对比度校准：91 级亮度浪在慢音节尾字上驻留读作灰带，2026-11-16 对照宿主等亮度边带收窄可见过渡）',
+  );
+  assert.ok(
+    line.includes('-em * 0.10 * __ease'),
+    '已唱词持久上浮必须为 em×10%（2026-11-16 按观感翻倍，宿主/AMLL 默认 5%）',
   );
   assert.ok(
     line.includes('tauLin * tauLin * (3 - 2 * tauLin)'),

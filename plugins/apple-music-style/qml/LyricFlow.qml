@@ -32,8 +32,9 @@ Item {
     property font baseFont: Theme.store.lyricBaseFont
     property font secondaryFont: Theme.store.lyricBaseFont
     property color textColor: "#ffffff"
-    // 未唱色对照宿主 LyricColors 默认 20% 白（Skin 传入同值）
-    property color unplayedColor: Qt.rgba(1, 1, 1, 0.2)
+    // 未唱色：宿主 LyricColors 默认 20% 白，2026-11-16 按观感调暗到 15%
+    // （非播放行与当前行未唱部分同源此色，Skin 传入同值）
+    property color unplayedColor: Qt.rgba(1, 1, 1, 0.15)
     // 背景均色估计（Skin 复刻宿主模糊封面合成链算出）：扫掠切片色注入背景项
     property color backdropColor: "#000000"
     // v10 逐像素背景估计（Skin.backdropSample）；null 时行视图回退均色
