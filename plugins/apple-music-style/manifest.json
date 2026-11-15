@@ -32,6 +32,6 @@
   "tags": ["播放页", "歌词", "皮肤"],
   "distribution": {
     "artifact": "artifacts/apple-music-style-1.0.0.echomod",
-    "sha256": "86dab9c964e56fe720bcf44908c4a92180640ecc1aa9f1ac186fd157b833ddb4"
+    "sha256": "8ad6cd6a4b54511040b2efe3a654992a6505739cd220bb89ec3d9054a81bac88"
   }
 }

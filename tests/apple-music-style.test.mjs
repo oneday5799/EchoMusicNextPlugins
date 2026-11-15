@@ -157,6 +157,7 @@ test('AMLL base modules are dependency-free ES modules consumable from QML and N
     'is-cjk',
     'layout',
     'line-group',
+    'mask-animator',
     'player',
     'scroll',
     'seek-detector',
@@ -236,6 +237,21 @@ test('AMLL refactor wiring drives the lyric page through the base core', async (
   assert.ok(skin.includes('settings.observe('));
   assert.ok(skin.includes('backgroundRhythm'));
   assert.ok(skin.includes('hostPhase'));
+  // 背景估计 LUT 抓取链必须自愈：pacer 心跳不再以「脏位‖律动‖淡化」为运行
+  // 条件（一次性读回失败会把淡化中间态定格到会话结束，切片烘进旧封面色），
+  // 且 getImageData 与 drawImage 同在 try 守卫内（读回抛出不得夭折填充回调）
+  assert.ok(
+    skin.includes('onIntervalChanged: if (running)'),
+    'bgGrabPacer 心跳必须随条件切换间隔（脏位/律动/淡化 400ms，静息 1.5s 自愈）',
+  );
+  assert.ok(
+    /running: root\.visible && root\.hostBlurActive(?!\s*&&)/.test(skin),
+    'bgGrabPacer 必须常驻可见期（不得再以脏位为运行前提）',
+  );
+  assert.ok(
+    /try \{[^}]*__fillBgLut\(ctx\.getImageData/s.test(skin),
+    'getImageData 必须在 try 守卫内（抛出不得夭折 LUT 填充）',
+  );
 
   // LyricFlow 瘦身为宿主适配器：核心创建/时间推送/歌词数据/跳转
   assert.ok(flow.includes('import "amll/base/player.mjs" as AmlPlayer'));
@@ -311,7 +327,27 @@ test('AMLL refactor wiring drives the lyric page through the base core', async (
   assert.ok(line.includes('clusterStart'));
   assert.ok(line.includes('maxWidth'));
   assert.ok(line.includes('__sweepPoses'), '扫掠必须按词元簇求值');
-  assert.ok(line.includes('0.5 + (edge - x) / fade'), '簇透明度必须由前沿与软边求值');
+  // 扫掠时间线来自 AMLL WebMaskAnimator 移植层（base/mask-animator.mjs）：
+  // 逐词钳制关键帧 + 逐帧词带心求值，QML 不再手写前沿累积
+  assert.ok(
+    line.includes('import "base/mask-animator.mjs" as MaskAnimator'),
+    'AmlLineView 必须导入 mask-animator（扫掠时间线来自 base 层）',
+  );
+  assert.ok(
+    line.includes('MaskAnimator.generateWordKeyframes'),
+    '遮罩关键帧必须由 mask-animator 生成（词间停顿/钳制驻停/越界折点）',
+  );
+  assert.ok(line.includes('MaskAnimator.evaluateMaskPosition'), '带心必须逐帧从关键时间线求值');
+  assert.ok(
+    !line.includes('rawEdge') && !line.includes('line.edge'),
+    '手写前沿累积必须移除（AMLL 架构镜像）',
+  );
+  assert.ok(line.includes('span.blank'), '纯空白词的词元簇必须跳过（无墨迹且不入游标）');
+  assert.ok(line.includes('0.5 + (center - x) / fade'), '簇透明度必须由词带心与软边求值');
+  assert.ok(
+    line.includes('line.highlightAmount <= 0'),
+    '行静息态必须整行走半透明暗墨（切片背景项不随高亮量收敛，静止冻结带会把估计残差/回退常量烘进字迹）',
+  );
   assert.ok(line.includes('dimColor'), '未唱样必须随高亮量提亮（宿主 0.2 → 0.4）');
   assert.ok(line.includes('brightColor'), '已唱样必须从未唱色渐入');
   assert.ok(

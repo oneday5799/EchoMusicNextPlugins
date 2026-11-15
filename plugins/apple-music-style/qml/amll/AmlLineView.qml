@@ -1,12 +1,14 @@
 pragma ComponentBehavior: Bound
 import QtQuick
 import EchoMusic.PluginSdk
+import "base/mask-animator.mjs" as MaskAnimator
 
 // AMLL 风格逐词歌词行（参照 AMLL 完全重构后的渲染层，由 AmllLine.qml 演化）。
-// 扫掠语义对齐 AMLL WebMaskAnimator：一条连续亮度前沿按词时长推进（时值间隙
-// 停留），软边宽度 = 行盒高度 × fadeWidth（AMLL word.height × wordFadeWidth，
-// 无上下钳制，下限 0.0001；实测换行时按检测行数折算单行高）；行程首词
-// +1.5×fade、末词 +0.5×fade（revealDistance 与 AMLL 关键帧一致）。
+// 扫掠时间线对齐 AMLL WebMaskAnimator（base/mask-animator.mjs 纯数据移植）：
+// 每词一条钳制关键帧时间线（游标按词序推进、间隙停驻、越界折点），QML 逐帧
+// 求值各词带心；软边宽度 = 行盒高度 × fadeWidth（AMLL word.height ×
+// wordFadeWidth，无上下钳制，下限 0.0001；实测换行时按检测行数折算单行高）；
+// 行程首词 +1.5×fade、末词 +0.5×fade（与 AMLL 关键帧一致）。
 // 渲染对照宿主的单层逐像素渐变：pose 颜色整簇均匀，改用 1px 互斥
 // 亮度切片（pose.clip 以 run 局部坐标裁剪，右缘外伸 1.5 footprint 压住
 // 宿主 clip 软边窗，窗内 = 满覆盖左色 × 递减右色的精确线性插值）铺满
@@ -132,7 +134,9 @@ Item {
     implicitHeight: runMetrics ? runMetrics.height : 0
     // 每个词的上浮位移，随播放逐帧更新
     property var lifts: []
-    // [{t0, t1, x0, x1, u0, u1, poseStart}]，x 为连续文本坐标（跨行累计前缀），u 为 utf16 区间
+    // [{t0, t1, x0, x1, u0, u1, poseStart, idx, blank, maskFrames}]，x 为连续
+    // 文本坐标（跨行累计前缀），u 为 utf16 区间；maskFrames = 该词的钳制
+    // 关键帧时间线（mask-animator.mjs 生成，空白词为空）
     property var wordSpans: []
     // 每个词元簇的连续 x（与 wordSpans 同源）
     property var clusterBases: []
@@ -140,24 +144,10 @@ Item {
     // __sweepPoses 经它取 graphemes/height/baseline，避免 poses 绑定直接依赖
     // run.metrics——metrics 随 pose 应用重建并再通知，会让 poses 绑定成环
     property var __metricsCache: null
-    readonly property real rawEdge: {
-        if (timeMs < 0 || highlightAmount <= 0)
-            return -2 * fade;
-        if (!hasWordTiming)
-            return textWidth + textHeight + 4 * fade;
-        const spans = line.wordSpans;
-        if (spans.length === 0)
-            return -2 * fade;
-        let position = spans[0].x0 - 1.5 * fade;
-        for (let i = 0; i < spans.length; ++i) {
-            const word = spans[i];
-            const duration = word.t1 - word.t0;
-            const progress = duration > 0 ? Math.min(1, Math.max(0, (timeMs - word.t0) / duration)) : (timeMs >= word.t0 ? 1 : 0);
-            position += (word.x1 - word.x0 + (i === 0 ? 1.5 * fade : 0) + (i + 1 === spans.length ? 0.5 * fade : 0)) * progress;
-        }
-        return position;
-    }
-    readonly property real edge: rawEdge
+    // 逐词遮罩关键帧的行时间窗（__refreshGeometry 时随词时序更新；
+    // 窗外分数钳制，词间停顿由游标停驻帧承担）
+    property real maskLineStart: 0
+    property real maskLineEnd: 0
 
     readonly property var runDefinition: text.length > 0 ? [{
                 "key": "line",
@@ -358,6 +348,10 @@ Item {
                     "u1": start + content.length,
                     // 词首所在词元簇的起点是 pose 的合法锚点（跨词连字时共享簇）
                     "poseStart": Number(graphemes[first].clusterStart) || 0,
+                    // 带心数组下标（__sweepPosesCore 逐帧求值用）
+                    "idx": spans.length,
+                    // 纯空白词：无墨迹，不参与遮罩游标（mask-animator.mjs）
+                    "blank": trimmed.length === 0,
                     "em": __emphasized(content, (Number(word.t1) || 0) - (Number(word.t0) || 0)),
                     "eg": eg,
                     "ec": ec,
@@ -369,6 +363,31 @@ Item {
             spans[lastContent].last = true;
         for (let i = 0; i < spans.length; ++i)
             spans[i].x1 = i + 1 < spans.length ? spans[i + 1].x0 : (rows.length > 0 ? rows[rows.length - 1].end : 0);
+        // AMLL WebMaskAnimator：逐词钳制关键帧时间线（纯空白词不入游标）。
+        // 行时间窗取词时序包络——分数在窗外钳制，行首前/行尾后的驻停由
+        // 钳制端点承担，词间停顿由游标停驻帧承担。fadeWidth/换行数变化
+        // 都会走到本函数（onFadeWidthChanged 显式触发）
+        let maskStart = -1, maskEnd = -1;
+        for (let i = 0; i < spans.length; ++i) {
+            if (maskStart < 0 || spans[i].t0 < maskStart)
+                maskStart = spans[i].t0;
+            if (maskEnd < 0 || spans[i].t1 > maskEnd)
+                maskEnd = spans[i].t1;
+        }
+        maskLineStart = maskStart < 0 ? 0 : maskStart;
+        maskLineEnd = maskEnd < maskLineStart ? maskLineStart + 1 : maskEnd;
+        const keyframes = MaskAnimator.generateWordKeyframes(
+            spans.map(s => ({
+                    "width": Math.max(0, s.x1 - s.x0),
+                    "t0": s.t0,
+                    "t1": s.t1,
+                    "blank": s.blank
+                })),
+            maskLineStart,
+            maskLineEnd,
+            fade);
+        for (let i = 0; i < spans.length; ++i)
+            spans[i].maskFrames = keyframes[i].frames;
         wordSpans = spans;
         clusterBases = bases;
         refreshLifts();
@@ -459,7 +478,32 @@ Item {
             return line.__transitionalPoses();
         const list = [];
         const seen = new Set();
-        const edge = line.edge, fade = line.fade;
+        const fade = line.fade;
+        // 每帧按词求值一次带心（AMLL setCurrentTime 逐词求值 maskPosition 的
+        // 等价）：带心 = x0 + 词局部 X + 词宽 + fade/2；timeMs < 0 时分数钳 0，
+        // 各词带心停在 x0 - fade/2（带右缘恰在文本起点，整行全暗）
+        const spans = line.wordSpans;
+        // 行静息态（高亮量归零）整行走半透明暗墨：不透明外观切片的背景项
+        // 不随高亮量收敛——静息态 bg 权重 = 1−dimA → 0.8，估计器残差或回退
+        // 常量（封面均色）会整片烘进字迹（2026-11-15 实测：上一行行尾词的
+        // 冻结带把封面暖色留在字上，用户报「行末字变成主题色」）。AMLL 的
+        // SOLID 静息态 = 亮度层整体归 0.2 均色、遮罩位置无关（setRenderMode
+        // (SOLID)），带心统一取「未入场」位即等价：o ≤ 0 全簇走 dimColor
+        // 半透明路径，真实背景透出，与旧前沿公式的 highlightAmount≤0 守卫
+        // （edge = −2f）同语义。行尾词时值越过下一行开始（转写接缝）时
+        // sweepTime 冻结在词中，静止行若继续走切片路径就会永久带色
+        const rest = line.highlightAmount <= 0;
+        const centers = [];
+        for (let i = 0; i < spans.length; ++i) {
+            const s = spans[i];
+            centers.push(rest
+                ? s.x0 - fade * 0.5
+                : MaskAnimator.maskBandCenter(
+                    s.x0, s.x1 - s.x0,
+                    MaskAnimator.evaluateMaskPosition(
+                        s.maskFrames, line.timeMs, line.maskLineStart, line.maskLineEnd),
+                    fade));
+        }
         const em = line.em;
         // 强调变换不随高亮量衰减（AMLL disable 只倒放 float，辉光/缩放动画
         // 继续自然播完）；且仅在行启用后起跑（AMLL 字符动画 enable 时才
@@ -491,7 +535,6 @@ Item {
         const dpr = Screen.devicePixelRatio || 1;
         const PITCH = 1.0;
         const F = 1.5 / dpr;
-        const g0 = edge - fade * 0.5, g1 = edge + fade * 0.5;
         const K = Math.max(1, Math.ceil(fade / PITCH));
         const pitch = fade / K;
         const dimA = line.dimColor.a, brightA = line.brightColor.a;
@@ -513,6 +556,12 @@ Item {
             const rowPrefix = x - gx;             // 所在行的行前缀（clip 用行内局部坐标）
             const y = line.__clusterLift(start);
             const span = line.__clusterSpan(start);
+            // 纯空白词的簇无墨迹且无遮罩时间线：不发 pose（宿主按空墨渲染）
+            if (!span || span.blank)
+                continue;
+            // 本词的渐变带（AMLL 逐词遮罩）：带心 = 词带位置，带宽 = fade
+            const center = centers[span.idx];
+            const g0 = center - fade * 0.5, g1 = center + fade * 0.5;
             // 强调词逐字动画（宿主 LyricLine::pose 同式，包络 rise/fall 分段）
             let ex = 0, ey = 0, escale = 1, halos = null;
             if (empActive && span && span.em && span.ec > 0) {
@@ -565,15 +614,15 @@ Item {
                 }
             }
             // 簇两端亮度：oL（左缘）≥ oR（右缘，亮度沿 x 递减）
-            const oL = 0.5 + (edge - x) / fade;
-            const oR = 0.5 + (edge - x - advance) / fade;
+            const oL = 0.5 + (center - x) / fade;
+            const oR = 0.5 + (center - x - advance) / fade;
             // 全亮判定必须与下方切片 break 的原始比较（bandL ≥ x+advance）
-            // 同侧：扫掠终点 edge 恰停在 x+advance+fade/2 边界上，(edge-x-adv)/fade
+            // 同侧：扫掠终点 center 恰停在 x+advance+fade/2 边界上，(center-x-adv)/fade
             // 的除法舍入可能得 0.99… 而落入 cross 路径，此时切片对簇内各列全部
             // break（li ≥ x+advance）、暗基底又只从带右缘 g1（已越过簇右缘）起
             // 罩——整簇无任何 pose，末字消失直到换行。此处并列原始比较，边界态
             // 一律全亮。
-            if (oR >= 1 || edge - x - advance >= fade * 0.5) {
+            if (oR >= 1 || center - x - advance >= fade * 0.5) {
                 // 整簇全亮（右缘未进过渡带）：halo 垫底 + 单层 pose
                 if (halos)
                     list.push(line.__haloPose(halos, start, y, ex, ey, escale));
@@ -654,7 +703,7 @@ Item {
                     continue;   // 切片整体在簇左侧（切片 1 向左无限延伸，不受此限）
                 const tau = s === 1
                         ? 1
-                        : Math.min(1, Math.max(0, 0.5 + (edge - (li + pitch * 0.5)) / fade));
+                        : Math.min(1, Math.max(0, 0.5 + (center - (li + pitch * 0.5)) / fade));
                 if (tau <= 0.005)
                     break;      // 余下切片与暗基底同观感
                 // 每片自己的背景项：切片中心行局部 x（= clip 坐标系）取样；
@@ -696,7 +745,7 @@ Item {
                             // 切片 1 的 width 以连续坐标 ri 表达右缘：clip 矩形
                             // 是行局部空间，右缘 = −100000 + width 必须落在
                             // ri − rowPrefix。行 1（rowPrefix=0）下二者相等故
-                            // 旧写法侥幸正确；换行后连续 ri（≈edge，数百 px）
+                            // 旧写法侥幸正确；换行后连续 ri（≈带心，数百 px）
                             // 恒大于行 2 局部任意 x → τ=1 亮片罩满整个跨越簇
                             // 的字形四边形，带右侧出现全亮墨——渐变观感反向
                             // （2026-11-15 换行第二行渐变反向根因，冻结态实测）
@@ -733,6 +782,9 @@ Item {
     }
 
     onWordsChanged: __refreshGeometry()
+    // 软边宽进入遮罩关键帧（+1.5f/+0.5f 行程补偿与 minOffset 都含 f）：
+    // 设置变更时随几何一并重建
+    onFadeWidthChanged: __refreshGeometry()
     // 塑形结果异步晚于 words 到达（换行/宽度变化都会触发重排）：
     // metrics 落地时必须重建几何，否则 clusterBases/wordSpans 永远停在旧文本上
     onRunMetricsChanged: __refreshGeometry()

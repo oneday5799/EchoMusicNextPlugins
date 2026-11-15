@@ -16,6 +16,7 @@
     "qml/amll/base/is-cjk.mjs",
     "qml/amll/base/layout.mjs",
     "qml/amll/base/line-group.mjs",
+    "qml/amll/base/mask-animator.mjs",
     "qml/amll/base/player.mjs",
     "qml/amll/base/scroll.mjs",
     "qml/amll/base/seek-detector.mjs",

@@ -15,6 +15,7 @@ export { isCJK } from './is-cjk.mjs';
 export { InterludeDots } from './interlude.mjs';
 export { LayoutCalculator } from './layout.mjs';
 export { LyricLineCore, LyricLineGroupCore } from './line-group.mjs';
+export { evaluateMaskPosition, generateWordKeyframes, maskBandCenter } from './mask-animator.mjs';
 export { LyricPlayerCore } from './player.mjs';
 export { ScrollInteractionEngine } from './scroll.mjs';
 export { SeekDetector } from './seek-detector.mjs';

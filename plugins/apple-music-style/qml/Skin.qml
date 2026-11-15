@@ -533,12 +533,14 @@ Item {
             ctx.clearRect(0, 0, 48, 24);
             try {
                 ctx.drawImage(bgGrabImg, 0, 0, 48, 24);
+                root.__fillBgLut(ctx.getImageData(0, 0, 48, 24).data);
+                root.__bgGrabResult = null;
             } catch (e) {
-                console.warn('[bg-grab] drawImage 异常: ' + e);
-                return;
+                // getImageData 一并守卫：此前只有 drawImage 在 try 内，读回
+                // 抛出会让本回调夭折——脏位未清、LUT 永不填充，切片永久回退
+                // 均色常量。保留 __bgGrabResult 供 pacer 下一拍重试
+                console.warn('[bg-grab] 读回异常: ' + e);
             }
-            root.__fillBgLut(ctx.getImageData(0, 0, 48, 24).data);
-            root.__bgGrabResult = null;
         }
     }
     // 抓取节奏：30ms 合并窗处理突发失效；400ms 步进跟进律动相位与换曲淡化
@@ -549,10 +551,20 @@ Item {
     }
     Timer {
         id: bgGrabPacer
-        interval: 400
+        // 心跳自愈：脏位/律动/换曲淡化期间 400ms 跟进，其余可见期每 1.5s
+        // 重抓一次（48×24 GPU 读回开销可忽略）。没有心跳时任何一次性链路
+        // 失败都会把错误内容定格到会话结束：pacer 以「脏位‖律动‖淡化」为
+        // 运行条件，若淡化窗内末次抓取读回失败，脏位虽留但淡化窗关闭且无
+        // 律动时定时器停摆，LUT 永久停在淡化中间态/旧封面——2026-11-15
+        // 实测长会话切片把陈旧估计烘进字迹（用户报「渐变带出现主题色」、
+        // 静止行行尾染成封面暖色），全新会话即恢复，与此结构洞吻合。
+        // 不再要求 !!__blurTex：LUT 抓的是宿主合成四边形，与皮肤自有模糊
+        // 链无关（coverSampler 失败不应连带禁掉逐像素估计）
+        interval: root.__bgGrabDirty || root.__bgRhythmMoving || root.__bgFadeActive ? 400 : 1500
+        onIntervalChanged: if (running)
+            restart()
         repeat: true
-        running: root.visible && root.hostBlurActive && !!root.__blurTex
-                 && (root.__bgGrabDirty || root.__bgRhythmMoving || root.__bgFadeActive)
+        running: root.visible && root.hostBlurActive
         onTriggered: root.__captureBg()
     }
     // 换曲交叉淡化补抓窗口（500ms 淡化 + 余量）
