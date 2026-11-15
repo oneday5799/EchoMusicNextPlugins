@@ -73,10 +73,9 @@ test('resource and presentation bindings retain native return types and state', 
 });
 
 test('manifest compatibility, source-only index and comparator intersections', async () => {
-  assert.deepEqual(
-    (await localPackages(root)).map(({ manifest }) => manifest.id),
-    ['spectrum-visualizer', 'dynamic-themes', 'webdav-backup'],
-  );
+  // local 分支的构建清单含本地特有插件，通用计数断言与清单驱动，避免硬编码 id 列表
+  const build = JSON.parse(await readFile(path.join(root, 'echo-plugin.build.json'), 'utf8'));
+  assert.equal((await localPackages(root)).length, build.plugins.length);
   assert.equal(rangeContains('>=0.1.0 <1.0.0', '0.1.0'), true);
   assert.equal(rangeContains('>=1.0.0', '0.1.0'), false);
   assert.equal(rangeContains('^1.0.0', '1.0.0'), false);
@@ -268,8 +267,19 @@ export function activate(ctx: EchoPluginContext) { ctx.player.volume = 9; }
 test('validator rejects incompatible syntax, missing activation and native QML plugins', async (t) => {
   const { source, output } = await author(t);
   const built = await buildPackage(source, output);
+  // QML V4 引擎不支持的语法（qml.exe 实测）逐一拒绝
   await writeFile(path.join(built, 'entry.mjs'), 'export async function activate(ctx) {}');
-  await assert.rejects(validatePackage(built), /Unexpected token/);
+  await assert.rejects(validatePackage(built), /async function/);
+  await writeFile(
+    path.join(built, 'entry.mjs'),
+    'class A { field = 1 }\nexport function activate(ctx) { return A; }',
+  );
+  await assert.rejects(validatePackage(built), /class field/);
+  await writeFile(
+    path.join(built, 'entry.mjs'),
+    'export function activate(ctx) { return { ...ctx, a: 1 }; }',
+  );
+  await assert.rejects(validatePackage(built), /object spread/);
   await writeFile(path.join(built, 'entry.mjs'), 'export function deactivate(ctx) {}');
   await assert.rejects(validatePackage(built), /export activate/);
   await writeFile(path.join(built, 'entry.mjs'), 'export function activate(ctx) {}');

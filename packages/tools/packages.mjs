@@ -136,6 +136,47 @@ async function inventory(root) {
   return files;
 }
 
+/**
+ * QML V4 引擎（Qt 6.12 实测）不支持的 JS 语法：async/await、class fields、
+ * 静态块与对象展开字面量。命中即拒绝发布，错误信息指明文件与行号。
+ */
+function assertV4Compatible(ast, file) {
+  const unsupportedTypes = new Map([
+    ['AwaitExpression', 'await'],
+    ['PropertyDefinition', 'class field'],
+    ['StaticBlock', 'static class block'],
+  ]);
+  const visit = (node, parent) => {
+    if (!node || typeof node !== 'object') return;
+    if (Array.isArray(node)) {
+      for (const child of node) visit(child, parent);
+      return;
+    }
+    if (typeof node.type === 'string') {
+      let feature = unsupportedTypes.get(node.type);
+      // acorn 用 FunctionDeclaration/Expression + async 标记表示异步函数
+      if (!feature && node.async === true) feature = 'async function';
+      if (feature)
+        throw new Error(
+          `QML engine does not support ${feature} (file: ${file}, line: ${
+            (node.loc && node.loc.start && node.loc.start.line) || '?'
+          })`,
+        );
+      if (node.type === 'SpreadElement' && parent && parent.type === 'ObjectExpression')
+        throw new Error(
+          `QML engine does not support object spread (file: ${file}, line: ${
+            (node.loc && node.loc.start && node.loc.start.line) || '?'
+          })`,
+        );
+    }
+    for (const key of Object.keys(node)) {
+      if (key === 'loc' || key === 'range' || key === 'start' || key === 'end') continue;
+      visit(node[key], node);
+    }
+  };
+  visit(ast, null);
+}
+
 export async function validatePackage(root) {
   if (root.toLowerCase().endsWith('.echomod')) {
     const temporary = await mkdtemp(path.join(os.tmpdir(), 'echomod-check-'));
@@ -164,11 +205,17 @@ export async function validatePackage(root) {
     )
       throw new Error('UI packages cannot load native QML plugins');
     if (file.endsWith('.mjs')) {
+      // 按 Qt 6 QML V4 引擎的真实能力校验（qml.exe 实测，Qt 6.12.0）：
+      // 支持 ?. / ?? / ** / rest / 数组展开 / generator，不支持
+      // async/await、class fields、对象展开字面量。先用较新的
+      // ecmaVersion 保证可解析，再按 AST 拒绝引擎不支持的特性，
+      // 避免包在宿主 QML 引擎里加载失败。
       const ast = parse(await readFile(path.join(root, file), 'utf8'), {
-        ecmaVersion: 2016,
+        ecmaVersion: 2022,
         sourceType: 'module',
       });
       entries.set(file, ast);
+      await assertV4Compatible(ast, file);
       for (const node of ast.body) {
         if (!node.source) continue;
         const specifier = node.source.value;
@@ -205,6 +252,9 @@ function typecheck(entry) {
     types: [],
     allowJs: true,
     checkJs: true,
+    // Relative .ts imports keep `node --test` type-stripping resolvable; esbuild
+    // handles them natively and noEmit makes the extension-only import legal.
+    allowImportingTsExtensions: true,
   });
   const diagnostics = ts.getPreEmitDiagnostics(program);
   if (diagnostics.length)
