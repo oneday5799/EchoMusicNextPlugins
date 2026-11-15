@@ -120,6 +120,7 @@ Item {
             // 常走媒体时钟：强调包络与上浮倒放（不随行失活/暂停遮罩冻结）
             animTimeMs: flow.mediaTime - flow.offsetMs
             disabledAt: group.disabledAt
+            enabledAt: group.enabledAt
             current: group.groupCore ? group.groupCore.mainLine.isEnabled || group.highlight > 0.001 : false
             highlightAmount: group.highlight
             blurAmount: group.blur
@@ -208,11 +209,18 @@ Item {
         const ml = g.mainLine;
         if (ml.revision !== lastLineRevision) {
             lastLineRevision = ml.revision;
+            // 行重建：等待下一次启用沿再起跑字符动画（AMLL 重建后同样
+            // 处于未启用态，enable 时才 setCurrentTime 起跑）
+            enabledAt = -1;
             if (ml.isEnabled)
                 sweepTime = flow.mediaTime - flow.offsetMs;
         }
         if (ml.isEnabled && flow.playing)
             sweepTime = flow.mediaTime - flow.offsetMs;
+        // 启用沿捕获：强调包络仅在行启用后起跑（未启用的 upcoming 行不浮起）。
+        // 失活不清除——失活后包络继续自然播完（AMLL disable 不动辉光动画）
+        if (ml.isEnabled && enabledAt < 0)
+            enabledAt = flow.mediaTime - flow.offsetMs;
         // 行失活捕获：冻结的 sweepTime 即失活媒体时刻，供 AmlLineView 倒放
         // 持久上浮（AMLL disable 的 float playbackRate=-1 语义）。建给已失活
         // 行的 delegate（sweepTime 尚未锚定）以 10s 前兜底——倒放视为已走完
@@ -227,6 +235,8 @@ Item {
     property real sweepTime: -1
     // 行失活媒体时刻（<0 = 在唱）；由 commitFrame 沿检测捕获
     property real disabledAt: -1
+    // 行首次启用媒体时刻（<0 = 尚未启用）；重建后复位，等待启用沿
+    property real enabledAt: -1
     property int lastRevision: -1
     property int lastLineRevision: -1
 }

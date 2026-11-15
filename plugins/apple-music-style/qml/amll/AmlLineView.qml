@@ -45,6 +45,9 @@ Item {
     // 行失活媒体时刻（sweepTime 时钟；<0 = 行在唱）。失活后持久上浮按
     // AMLL disable 语义以 playbackRate=-1 倒放，按词时长缓慢落回基线
     property real disabledAt: -1
+    // 行首次启用的媒体时刻（<0 = 尚未启用）。AMLL 字符动画 enable 时才
+    // setCurrentTime 起跑——未启用的 upcoming 行无任何浮起
+    property real enabledAt: -1
     property bool current: false
     property real highlightAmount: 1
     // 全局逐行歌词（宿主编排核心 isNonDynamic）：对齐 AMLL 无遮罩形态，
@@ -458,8 +461,11 @@ Item {
         const edge = line.edge, fade = line.fade;
         const em = line.em;
         // 强调变换不随高亮量衰减（AMLL disable 只倒放 float，辉光/缩放动画
-        // 继续自然播完）：包络走常走时钟 animTimeMs，失活后仍走完各自弧线
-        const empActive = line.animateWords;
+        // 继续自然播完）；且仅在行启用后起跑（AMLL 字符动画 enable 时才
+        // setCurrentTime 起跑，未启用的 upcoming 行无任何浮起——2026-11-15
+        // 实测「下一句的字提前上浮」根因：包络走全局媒体时钟，行未启用就
+        // 按 400ms 提前量起浮）
+        const empActive = line.animateWords && line.enabledAt >= 0;
         // GlyphRun 缩放围绕簇锚点（中点 x、基线 y），
         // AMLL 围绕字盒中心：需 (1−scale)×(盒中心−基线) 补偿
         const centerDy = m.height / 2 - m.baseline;
