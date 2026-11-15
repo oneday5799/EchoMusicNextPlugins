@@ -605,6 +605,7 @@ test('LyricPlayerCore end-to-end: highlight lifecycle, opacity, blur, stagger', 
     true,
   );
   assert.equal(g2.opacity, 1, '高亮清空后回到非高亮透明度');
+  assert.equal(g2.blur, 0, '高亮清空后最后演唱行仍是当前行（latestIndex），不得留 1 档模糊');
 
   // 逐行歌词：非高亮行 0.2 透明度
   const linePlayer = new LyricPlayerCore({}, { now: () => 0 });

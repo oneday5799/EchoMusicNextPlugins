@@ -84,7 +84,26 @@ Item {
     // item 矩形（行被压扁、右移，2026-11-12 实测），lift/halo 的越界裁剪
     // 由字体行盒的 ascent/descent 余量吸收。
     layer.enabled: current && hasWordTiming
-    layer.smooth: true
+    // 采样滤波随运动状态切换（lineSmooth 由组视图按弹簧运动逐帧驱动）。
+    // 层显示四边形落在亚像素设备原点（弹簧 y 分数 + em=30 在 dpr1.25 下
+    // x=37.5）时，静止态双线性会把 1:1 纹理按半纹素混合——当前行整体发糊，
+    // 悬停禁模糊后与非当前行直绘对比尤其明显（2026-11-15 实测）→ 静止用
+    // 最近邻。但 nearest 的运动是 1 设备像素步进：换行后 posY 弹簧欠阻尼
+    // 振荡 ~1-2s，步进的当前行与直绘邻行的亚像素平滑形成相对抖动（同日
+    // 实测）→ 运动中回双线性。静止判定带 200ms 迟滞 + 12 帧位移窗
+    // （<0.3 逻辑 px 才算静止）。宿主 EchoFloatingSurface 对亚像素 origin
+    // 的既有结论：「layer.textureSize alone cannot preserve the subpixel
+    // origin of Qt's layer display quad」
+    property bool lineSmooth: false
+    layer.smooth: lineSmooth
+    // 纹理必须按设备像素建：Qt 默认按 item 逻辑尺寸建层 FBO，dpr1.25 下
+    // 显示时放大 1.25×，即使 nearest 也有周期性像素重复（当前行残余发糊，
+    // 2026-11-15 实测）。宿主所有 layer（EchoCover/EchoFloatingSurface）
+    // 均显式设置 textureSize 同因。尺寸取 ceil：FBO 比显示矩形最多大 1
+    // 纹素，整幅亚纹素拉伸仅在最右/底缘产生 1 列重复，不可见
+    layer.textureSize: Qt.size(
+        Math.ceil(width * Screen.devicePixelRatio),
+        Math.ceil(height * Screen.devicePixelRatio))
     property bool animateWords: true
     // 远离焦点行的模糊（AMLL blur 语义：CSS filter blur 的 px 值，焦点行 0，
     // 其余 min(5, 1+距离)（窄视口 ×0.8）由编排核心算好经动画驱动）。仅作

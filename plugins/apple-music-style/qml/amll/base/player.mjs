@@ -748,6 +748,12 @@ export class LyricPlayerCore {
     // 用户触摸滑动期间和对焦目标不施加模糊
     if (this.scrollState.isTouchScrolled || isFocused) return 0;
 
+    // 当前行（最近高亮行；高亮被间奏/曲末清空后回退到 scrollToIndex =
+    // 最后演唱行）任何时候都不得模糊：清空态下 isFocused 不再覆盖它，
+    // 1 + distance 在 distance=0 时会给它留下 1 档模糊（2026-11-15 浏览态
+    // 实测当前行发虚）。有意偏离 AMLL 同名公式（其保留该 1 档）
+    if (index === this.visualFrame.latestIndex) return 0;
+
     const scrollToIndex = snapshot.scrollToIndex;
     const distance =
       index < scrollToIndex

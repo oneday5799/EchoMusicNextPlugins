@@ -130,6 +130,7 @@ Item {
             current: group.groupCore ? group.groupCore.mainLine.isEnabled || group.highlight > 0.001 : false
             highlightAmount: group.highlight
             blurAmount: group.blur
+            lineSmooth: lineLayerSmooth
             nonDynamicLyric: view.core ? view.core.isNonDynamic : false
             font: flow.baseFont
             playedColor: flow.textColor
@@ -196,8 +197,31 @@ Item {
         const g = group.groupCore;
         if (!g)
             return;
-        // 纵向位置与行缩放：弹簧当前值逐帧落盘
-        group.y = g.posY.getCurrentPosition();
+        // 纵向位置与行缩放：弹簧当前值逐帧落盘。
+        // 行层采样滤波随运动状态切换（AmlLineView layer.smooth 注释）：帧间
+        // 位移 >0.05 逻辑 px 即回双线性（亚像素滑移平滑），连续 12 帧（~200ms）
+        // 且窗口总位移 <0.3 逻辑 px 才回最近邻（静态锐利）。换行弹簧欠阻尼
+        // 振荡 ~1-2s，恒 nearest 会使当前行 1 设备像素步进、与直绘邻行的
+        // 亚像素平滑形成相对抖动（2026-11-15 实测），恒 bilinear 则静态发糊
+        const ny = g.posY.getCurrentPosition();
+        const dy = Math.abs(ny - lineLayerLastY);
+        if (dy > 0.05) {
+            lineLayerLastY = ny;
+            lineStillFrames = 0;
+            lineStillMin = ny;
+            lineStillMax = ny;
+            lineLayerSmooth = true;
+        } else {
+            lineStillFrames++;
+            lineLayerLastY = ny;
+            if (ny < lineStillMin)
+                lineStillMin = ny;
+            if (ny > lineStillMax)
+                lineStillMax = ny;
+            if (lineLayerSmooth && lineStillFrames > 12 && lineStillMax - lineStillMin < 0.3)
+                lineLayerSmooth = false;
+        }
+        group.y = ny;
         inner.scale = g.mainLine.scaleSpring.getCurrentPosition() / 100;
         // 视口边缘渐隐：上侧以组顶缘为锚（最先被视口裁掉的部分），下侧以
         // 底缘对称——顶/底缘进入边缘带（edgeBand）时整体线性降至 0，触及
@@ -249,6 +273,13 @@ Item {
     // 视口边缘渐隐系数（0-1）；由 commitFrame 逐帧落盘
     property real edgeFade: 1
     property real sweepTime: -1
+    // 行层采样滤波状态（commitFrame 逐帧驱动 mainView.lineSmooth，见
+    // AmlLineView layer.smooth 注释）
+    property bool lineLayerSmooth: false
+    property real lineLayerLastY: 0
+    property int lineStillFrames: 0
+    property real lineStillMin: 0
+    property real lineStillMax: 0
     // 行失活媒体时刻（<0 = 在唱）；由 commitFrame 沿检测捕获
     property real disabledAt: -1
     // 行首次启用媒体时刻（<0 = 尚未启用）；重建后复位，等待启用沿

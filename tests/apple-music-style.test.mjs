@@ -235,6 +235,14 @@ test('AMLL refactor wiring drives the lyric page through the base core', async (
   assert.ok(group.includes('duration: 400'), 'wrapper 透明度/模糊 0.4s（AMLL CSS）');
   assert.ok(group.includes('? 300 : 450'), '亮层点亮 0.3s / 熄灭 0.45s（AMLL 亮度层）');
 
+  // 行层采样滤波随运动状态切换：恒 bilinear 静态发糊（亚像素 origin 半纹素
+  // 混合），恒 nearest 换行弹簧振荡期 1 设备像素步进抖动
+  assert.ok(line.includes('layer.smooth: lineSmooth'), '行层采样必须由 lineSmooth 驱动');
+  assert.ok(
+    group.includes('lineLayerSmooth') && group.includes('lineStillFrames > 12'),
+    '组必须按弹簧运动状态（200ms 迟滞 + 位移窗）驱动行层采样',
+  );
+
   // AmlInterludeDots：快照消费 + 测量上报
   assert.ok(dots.includes('getSnapshot()'));
   assert.ok(dots.includes('setInterludeMeasured'));
