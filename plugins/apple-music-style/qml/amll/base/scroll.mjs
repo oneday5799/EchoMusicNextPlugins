@@ -105,7 +105,7 @@ export class ScrollInteractionEngine {
 
   //#region 输入入口（由 QML 输入处理器调用）
   /**
-   * 触摸开始。多指时由调用方改用 {@link reanchorTouch}
+   * 触摸开始。宿主 DragHandler 为单指针，不涉及多指重锚定
    * @param {number} x 屏幕坐标
    * @param {number} y 屏幕坐标
    * @param {number} ts 事件时间戳（毫秒）
@@ -129,19 +129,6 @@ export class ScrollInteractionEngine {
     state.lastTimestamp = ts;
     state.speed = 0;
     state.isIntentConfirmed = false;
-  }
-
-  /**
-   * 多指触摸时把基准点重锚定到最新/剩余的手指，不重置交互状态
-   */
-  reanchorTouch(x, y, ts) {
-    const state = this.touchState;
-    state.startY = y;
-    state.startX = x;
-    state.lastY = y;
-    state.startOffset = this.offset;
-    state.lastTimestamp = ts;
-    state.speed = 0;
   }
 
   /**

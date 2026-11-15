@@ -129,7 +129,6 @@ Item {
             enabledAt: group.enabledAt
             current: group.groupCore ? group.groupCore.mainLine.isEnabled || group.highlight > 0.001 : false
             highlightAmount: group.highlight
-            blurAmount: group.blur
             lineSmooth: lineLayerSmooth
             nonDynamicLyric: view.core ? view.core.isNonDynamic : false
             font: flow.baseFont

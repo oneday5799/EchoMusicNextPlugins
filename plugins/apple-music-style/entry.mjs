@@ -62,7 +62,7 @@ function activate(ctx) {
   const skin = ctx.ui.lyricsPage.registerSkin({
     id: SKIN_ID,
     title: "Apple Music Style",
-    description: "\u53CC\u680F\u5E03\u5C40\uFF1A\u5DE6\u4FA7\u5C01\u9762\u4E0E\u64AD\u653E\u63A7\u5236\uFF0C\u53F3\u4FA7\u5BBF\u4E3B\u539F\u751F\u9010\u5B57\u6B4C\u8BCD\u3002",
+    description: "\u53CC\u680F\u5E03\u5C40\uFF1A\u5DE6\u4FA7\u5C01\u9762\u4E0E\u64AD\u653E\u63A7\u5236\uFF0C\u53F3\u4FA7\u63D2\u4EF6\u81EA\u7ED8\u7684 AMLL \u98CE\u683C\u9010\u5B57\u6B4C\u8BCD\u3002",
     component: "qml/Skin.qml",
     titlebar: "host",
     tools: "host",

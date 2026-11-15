@@ -7,7 +7,7 @@ export function activate(ctx: EchoPluginContext) {
   const skin = ctx.ui.lyricsPage.registerSkin({
     id: SKIN_ID,
     title: 'Apple Music Style',
-    description: '双栏布局：左侧封面与播放控制，右侧宿主原生逐字歌词。',
+    description: '双栏布局：左侧封面与播放控制，右侧插件自绘的 AMLL 风格逐字歌词。',
     component: 'qml/Skin.qml',
     titlebar: 'host',
     tools: 'host',

@@ -100,7 +100,7 @@ test('quality badges mirror host quality keys and cloud sources', () => {
   assert.equal(qualityTag('cloud', true), 'CLD');
   assert.equal(qualityTag('unknown', false), '');
   assert.equal(qualityLabel('flac', false), '无损');
-  assert.equal(qualityLabel('anything', true), '云盘');
+  assert.equal(qualityLabel('anything', true), '云盘文件');
   assert.equal(qualityLabel('unknown', false), '');
 });
 

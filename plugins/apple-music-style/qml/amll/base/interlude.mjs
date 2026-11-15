@@ -40,6 +40,9 @@ const EXIT_PHASE2_MS = 250;
 const EXIT_TOTAL_MS = EXIT_PHASE1_MS + EXIT_PHASE2_MS;
 const EXIT_FADE_MS = 250;
 const DISMISS_FADE_MS = 150;
+// writeDotOpacities 的 fractions 入参复用缓冲：主演出路径逐帧调用（QML V4
+// 无逃逸分析，字面量每次进新生代），写后即读、无留存，共享安全
+const scratchFractions = [0, 0, 0];
 
 /**
  * 非前奏或 Seek 时的入场延迟，用于给歌词行上移或跳转排版腾出视觉缓冲时间
@@ -373,6 +376,9 @@ export class InterludeDots {
     // 保持进入淡出瞬间已冻结的 scale 与 dotOpacities，仅对 opacity 执行缓出衰减
     this.snapshot.opacity = this.fadeInitialOpacity * (1 - exitFadeEasing(progress));
     this.snapshot.isActive = true;
+    // AMLL 在淡出期间仍推进 posY 弹簧（interlude-dots.ts:459）：dismiss 打断
+    // 飞行中的弹簧时，位置应继续收敛而非冻结在半路坐标淡完
+    this.posY.update(deltaMs);
   }
 
   /**
@@ -434,11 +440,10 @@ export class InterludeDots {
       // fallback-hold 下 dot3Target 为 1.0，计算自然退化为恒定全亮
       const trailing = clamp01(exitElapsedMs / DOT3_TRAILING_MS);
 
-      this.writeDotOpacities(internalMs, [
-        1,
-        1,
-        this.dot3Target + (1 - this.dot3Target) * trailing,
-      ]);
+      scratchFractions[0] = 1;
+      scratchFractions[1] = 1;
+      scratchFractions[2] = this.dot3Target + (1 - this.dot3Target) * trailing;
+      this.writeDotOpacities(internalMs, scratchFractions);
 
       return this.snapshot;
     }
@@ -455,7 +460,10 @@ export class InterludeDots {
     if (this.mode === 'fallback-hold') {
       // 缩放恒为 1.0，三颗圆点各自保留 80ms 错峰淡入至全亮，随后维持全亮
       this.snapshot.scale = 1;
-      this.writeDotOpacities(internalMs, [1, 1, 1]);
+      scratchFractions[0] = 1;
+      scratchFractions[1] = 1;
+      scratchFractions[2] = 1;
+      this.writeDotOpacities(internalMs, scratchFractions);
       return this.snapshot;
     }
 
@@ -467,11 +475,15 @@ export class InterludeDots {
         : BREATHE_MAX_SCALE - ((progress - 0.5) / 0.5) * (BREATHE_MAX_SCALE - 1);
 
     // 三颗圆点依次开始点亮，前两颗全亮，第三颗只点亮部分，剩余由退场动画进行补充
-    this.writeDotOpacities(internalMs, [
-      computeDotFraction(0, this.segmentMs, internalMs, 1),
-      computeDotFraction(this.segmentMs, this.segmentMs, internalMs, 1),
-      computeDotFraction(this.segmentMs * 2, this.dot3DurationMs, internalMs, this.dot3Target),
-    ]);
+    scratchFractions[0] = computeDotFraction(0, this.segmentMs, internalMs, 1);
+    scratchFractions[1] = computeDotFraction(this.segmentMs, this.segmentMs, internalMs, 1);
+    scratchFractions[2] = computeDotFraction(
+      this.segmentMs * 2,
+      this.dot3DurationMs,
+      internalMs,
+      this.dot3Target,
+    );
+    this.writeDotOpacities(internalMs, scratchFractions);
 
     return this.snapshot;
   }

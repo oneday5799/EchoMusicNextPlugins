@@ -98,6 +98,6 @@ export function qualityTag(quality: string, cloudSource: boolean): string {
 
 /** Full quality description for tooltips and accessibility. */
 export function qualityLabel(quality: string, cloudSource: boolean): string {
-  if (cloudSource) return '云盘';
+  if (cloudSource) return '云盘文件';
   return QUALITY_LABELS[quality] ?? '';
 }

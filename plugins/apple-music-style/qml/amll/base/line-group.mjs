@@ -30,25 +30,26 @@ export class LyricLineCore {
     /** 行内缩放弹簧，值域为百分比（100 = 原大），AMLL 同款 */
     this.scaleSpring = new Spring(100);
 
-    this.top = 0;
     this.scale = 100;
     this.blur = 0;
     this.opacity = 1;
     this.delay = 0;
 
+    // AMLL 镜像字段（LyricLineRenderMode）：渲染层由 current/words 独立推导
+    // GRADIENT/SOLID，此字段当前仅测试断言消费
     /** @type {number} LyricLineRenderMode */
     this.renderMode = LyricLineRenderMode.SOLID;
 
+    // AMLL 镜像字段：亮度层窗口（焦点行 ±2 行）。渲染层的亮层由 isActive/
+    // highlight 驱动，此字段当前仅测试断言消费
     this.inBrightnessWindow = true;
 
     /** 行是否处于高亮（启用）状态 */
     this.isEnabled = false;
-    /** 启用时携带的媒体时间，供扫掠定位相对时间 */
+    // AMLL 镜像字段：启用时携带的媒体时间。QML 扫掠用组级 sweepTime 时钟，
+    // 此字段当前仅测试断言消费
     this.enabledAtTime = 0;
-    /** 启用时是否应播放（暂停中启用则扫掠静止） */
-    this.enabledShouldPlay = false;
 
-    this.isUiDirty = true;
     /** 离散视觉目标的版本号，渲染层用于变更检测 */
     this.revision = 0;
   }
@@ -91,7 +92,6 @@ export class LyricLineCore {
       this.scaleSpring.setPosition(scale);
     }
 
-    this.isUiDirty = true;
     this.revision++;
   }
 
@@ -102,23 +102,19 @@ export class LyricLineCore {
   update(deltaMs = 0) {
     if (!(this.player?.getEnableSpring() ?? true)) return;
 
-    const scaleMoving = !this.scaleSpring.arrived();
     this.scaleSpring.update(deltaMs);
-
-    if (scaleMoving) {
-      this.isUiDirty = true;
-    }
   }
 
   /**
-   * 启用（高亮）行，携带当前媒体时间供扫掠定位
+   * 启用（高亮）行，携带当前媒体时间供扫掠定位。
+   * AMLL 还记录 enabledShouldPlay（暂停中启用则扫掠静止）；本移植的扫掠
+   * 由 QML 侧以播放状态门控（AmlGroupView sweepTime），无需存储
    * @param {number} [maskAnimationTime] 媒体时间，扫掠取相对行起点的正数部分
-   * @param {boolean} [shouldPlay] 是否播放扫掠动画
+   * @param {boolean} [shouldPlay] 是否播放扫掠动画（未存储，见上）
    */
   enable(maskAnimationTime, shouldPlay) {
     this.isEnabled = true;
     this.enabledAtTime = maskAnimationTime ?? this.player?.getCurrentTime() ?? 0;
-    this.enabledShouldPlay = shouldPlay ?? this.player?.getIsPlaying() ?? true;
     this.revision++;
   }
 
@@ -165,18 +161,17 @@ export class LyricLineGroupCore {
 
     this.posY = new Spring(0);
 
-    this.top = 0;
     this.delay = 0;
     this.isActive = false;
     this.opacity = 1;
     this.blur = 0;
 
     /**
-     * 指示当前歌词组是否处于亮度层活跃窗口内（焦点行与高亮行向前后各扩展 2 行）
+     * AMLL 镜像字段：指示当前歌词组是否处于亮度层活跃窗口内（焦点行与高亮行
+     * 向前后各扩展 2 行）。渲染层的亮层由 isActive/highlight 驱动，仅测试消费
      */
     this.inBrightnessWindow = true;
 
-    this.isUiDirty = true;
     /** 离散视觉目标的版本号 */
     this.revision = 0;
 
@@ -203,7 +198,6 @@ export class LyricLineGroupCore {
    * @param {boolean} inBrightnessWindow
    */
   setTransform(top, immediate, delayMs, isActive, opacity, blur, inBrightnessWindow) {
-    this.top = top;
     this.delay = delayMs;
     this.isActive = isActive;
     this.opacity = opacity;
@@ -219,7 +213,6 @@ export class LyricLineGroupCore {
       this.posY.setTargetPosition(top, delayMs);
     }
 
-    this.isUiDirty = true;
     this.revision++;
   }
 
@@ -267,12 +260,7 @@ export class LyricLineGroupCore {
    */
   update(deltaMs = 0) {
     if (this.player.getEnableSpring()) {
-      const posMoving = !this.posY.arrived();
       this.posY.update(deltaMs);
-
-      if (posMoving) {
-        this.isUiDirty = true;
-      }
     }
 
     this.mainLine.update(deltaMs);

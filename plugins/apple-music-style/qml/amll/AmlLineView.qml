@@ -65,7 +65,7 @@ Item {
     // 背景在空间上大幅变化（封面映射+网格形变），均色无法锚定带端。
     property var backdropAt: null
     // 行视口锚点（调用方按 4px 量化喂入）：雾色在烘焙时按行的当前屏幕位置
-    // 采样背景，而 poses 绑定的其余依赖（timeMs/blurAmount/current）在纯滚动
+    // 采样背景，而 poses 绑定的其余依赖（timeMs/current）在纯滚动
     // 期间都不变——行被滚到新背景区域后雾色会停留在旧位置采的值上（手动
     // 调整进度、滚轮滚动后非当前行颜色不对的根因）。绑定经此读取锚点，
     // 移动超过量化步长即整体重烘焙，静止时零开销。
@@ -105,12 +105,6 @@ Item {
         Math.ceil(width * Screen.devicePixelRatio),
         Math.ceil(height * Screen.devicePixelRatio))
     property bool animateWords: true
-    // 远离焦点行的模糊（AMLL blur 语义：CSS filter blur 的 px 值，焦点行 0，
-    // 其余 min(5, 1+距离)（窄视口 ×0.8）由编排核心算好经动画驱动）。仅作
-    // 信息量暴露（probe 诊断打印）；实际模糊由 AmlGroupView 的组级
-    // layer.effect（MultiEffect）承担——不走 GlyphPose.blur，原因见
-    // __sweepPoses 注释。
-    property real blurAmount: 0
 
     readonly property real em: font.pixelSize
     // AMLL WebMaskAnimator：fadeWidth = word.height × wordFadeWidth。
@@ -423,18 +417,6 @@ Item {
     // 与切片数无关；亚像素切片间距还会与像素网格混叠成宽条纹）。
     // 切片 rgb 取基底渲染值↔亮预乘的外观插值、a=1：与半透明渲染逐像素同值
     // （背景项由 Skin 的 backdropColor 估计）。强调变换所有层共享。
-    // 行链不透明度（诊断用）：Qt 对非分层子树的 item opacity 逐 draw 相乘。
-    // 扫掠带「前片外伸 + 本片」双重绘制因此在 ρ<1 时打不穿单层等价——底层
-    // 亮墨以 (1−ρ) 泄漏（带比平台亮 +20~28、亮端窗口 +17 斑）；而抵消用的
-    // pose.opacity=1/ρ 又被宿主 finiteRange(opacity, 0, 1) 拒收。两难待解：
-    // 要么宿主放宽校验，要么 GlyphRun 支持 layer 抓取（现注释称会丢内容）。
-    // 从本项向上累乘全部祖先 opacity，供诊断与未来方案使用。
-    function __inheritedOpacity(): real {
-        let o = 1;
-        for (let it = parent; it; it = it.parent)
-            o *= it.opacity;
-        return o;
-    }
     // 强调辉光独立层（形体透明只留 halo），垫在所有字迹层之下——canvas
     // shadowBlur 语义（辉光在字后）。挂在不透明字迹之上会把 228 墨色抬向
     // 255，形成渐变带亮端比已唱平台亮 +18 的竖向亮带。
@@ -504,8 +486,9 @@ Item {
         // 亮端 brightPr+bg(1−brightA)，bg 逐片取样）：宿主像素 = mix(dim,bright,p)
         // 以逐像素 alpha 合成到真实背景，两端锚定后带内与宿主逐像素同值
         // （unplayed/played 同 rgb 时精确相等）；bg 估计残差只表现为中心段
-        // ≤ ±8/255 的平滑倾斜（无周期结构）。
-        const dpr = (line.Window && line.Window.window && line.Window.window.devicePixelRatio) || 1;
+        // ≤ ±8/255 的平滑倾斜（无周期结构）。dpr 与行层 textureSize（见
+        // layer.textureSize 注释）同用 Screen.devicePixelRatio 口径
+        const dpr = Screen.devicePixelRatio || 1;
         const PITCH = 1.0;
         const F = 1.5 / dpr;
         const g0 = edge - fade * 0.5, g1 = edge + fade * 0.5;
@@ -713,36 +696,6 @@ Item {
                 list.push(pose);
             }
         }
-        // [probe-v10] 临时诊断：带端背景估计 vs 回退均色（用户要求保留至另行通知）
-        try {
-            const __now = Date.now();
-            if (!line.__sweepPoses.__lastDump || __now - line.__sweepPoses.__lastDump >= 150) {
-                line.__sweepPoses.__lastDump = __now;
-                let __bg = 'null';
-                try {
-                    const __c = line.backdropColor;
-                    __bg = __c.r.toFixed(2) + '/' + __c.g.toFixed(2) + '/' + __c.b.toFixed(2);
-                } catch (e) {}
-                let __bs = 'null';
-                try {
-                    if (line.backdropAt) {
-                        const __parts = [];
-                        const __fxs = [0.2, 0.5, 0.8];
-                        for (let __k = 0; __k < 3; ++__k) {
-                            const __s = line.backdropAt(line.width * __fxs[__k], 0);
-                            __parts.push(__s ? __s[0].toFixed(2) + ',' + __s[1].toFixed(2) + ',' + __s[2].toFixed(2) : 'null');
-                        }
-                        __bs = __parts.join(' ');
-                    }
-                } catch (e) {}
-                let __dump = '[probe-poses] t=' + (__now % 1000000) + ' edge=' + Math.round(edge) + ' w=' + Math.round(line.width) + ' blur=' + (line.blurAmount !== undefined ? Number(line.blurAmount).toFixed(2) : 'NA') + ' bg=' + __bg + ' bs=' + __bs + ' rho=' + Number(line.__inheritedOpacity()).toFixed(3) + ' n=' + list.length;
-                for (let __i = 0; __i < Math.min(4, list.length); ++__i) {
-                    const __q = list[__i];
-                    __dump += ' | @' + __i + ' op=' + Number(__q.opacity).toFixed(2) + ' st=' + (__q.start ?? -1) + ' c=' + Math.round(__q.color.r * 255) + ',' + Math.round(__q.color.g * 255) + ',' + Math.round(__q.color.b * 255) + ' a=' + Number(__q.color.a).toFixed(2) + ' bl=' + (__q.blur !== undefined ? Number(__q.blur).toFixed(2) : '-') + ' clip=' + (__q.clip ? Math.round(__q.clip.x) + '+' + Math.round(__q.clip.width) : '-');
-                }
-                console.warn(__dump);
-            }
-        } catch (e) {}
         return list;
     }
     // 远行模糊不在此注入 GlyphPose.blur：宿主 pose quad = inkBounds ±

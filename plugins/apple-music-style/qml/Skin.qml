@@ -165,7 +165,6 @@ Item {
 
     // 旧版 AMLL 字号：clamp(24px, 4.2vh × 缩放, 52px)，vh 取整个页面高度
     readonly property real lyricFontSize: Math.min(52, Math.max(24, root.height * 0.042 * root.s.fontScale / 100))
-    // 旧版 AMLL 字号：clamp(24px, 4.2vh × 缩放, 52px)，vh 取整个页面高度。
     // 字体必须经宿主 styledFont 构建：宿主引擎里对 QFont 属性读取的副本
     // 直接赋 pixelSize/weight 不生效，会静默回落到 13px/400 的宿主默认字号
     readonly property font lyricFont: Theme.store.styledFont(Theme.store.lyricBaseFont, Math.round(root.lyricFontSize), Math.round(root.s.fontWeight), 0, false, false)
@@ -409,7 +408,7 @@ Item {
         root.findPageMotion();
         const read = root.plugin.settings.read('lyrics');
         const applyRead = () => {
-            if (read.state === 2)
+            if (read.state === EchoPluginOperation.Succeeded)
                 root.hostRhythm = read.result.backgroundRhythm === true;
         };
         read.completed.connect(applyRead);
@@ -421,7 +420,7 @@ Item {
         // 弹层直接隐藏三档，此处同语义——隐藏而非禁用）
         const viperRead = root.plugin.settings.read('playback');
         const applyViperRead = () => {
-            if (viperRead.state === 2)
+            if (viperRead.state === EchoPluginOperation.Succeeded)
                 root.viperEnabled = viperRead.result.viperQualityEnabled !== false;
         };
         viperRead.completed.connect(applyViperRead);

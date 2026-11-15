@@ -6,11 +6,12 @@
  */
 
 /**
- * 数值求导构造速度函数（中心差分，步长 0.001s）
+ * 数值求导构造速度函数（中心差分，步长 0.001s）。模块私有：仅 solveSpring
+ * 的解算器重建使用，不进 index.mjs 统一出口
  * @param {(t: number) => number} f 位移-时间函数
  * @returns {(t: number) => number} 速度-时间函数
  */
-export function getVelocity(f) {
+function getVelocity(f) {
   const h = 0.001;
   return (x) => (f(x + h) - f(x - h)) / (2 * h);
 }

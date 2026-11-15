@@ -41,6 +41,34 @@ const defaultWallClock = () =>
  */
 
 /**
+ * 校验歌词时间戳满足基本数值约束（非负有限、start ≤ end），
+ * 移植自 AMLL utils/validate-lyric.ts assertValidLyricTimestamps（本数据形状
+ * 无 ruby，行与词两级足够）。坏数据抛出 TypeError/RangeError 早失败，
+ * 而非静默流入时间线产生错乱排版
+ * @param {LyricLineData[]} lines
+ */
+function assertValidLyricTimestamps(lines) {
+  const assertTimestamp = (value, path) => {
+    if (typeof value !== 'number' || !Number.isFinite(value) || value < 0)
+      throw new TypeError(`Invalid lyric timestamp at ${path}: ${String(value)}`);
+  };
+  const assertRange = (value, path) => {
+    assertTimestamp(value.startTime, `${path}.startTime`);
+    assertTimestamp(value.endTime, `${path}.endTime`);
+    if (value.startTime > value.endTime)
+      throw new RangeError(
+        `Invalid lyric timestamp range at ${path}: startTime ${value.startTime} > endTime ${value.endTime}`,
+      );
+  };
+  for (let i = 0; i < lines.length; ++i) {
+    const line = lines[i];
+    assertRange(line, `lines[${i}]`);
+    const words = line.words || [];
+    for (let w = 0; w < words.length; ++w) assertRange(words[w], `lines[${i}].words[${w}]`);
+  }
+}
+
+/**
  * 歌词数据管理器（AMLL LyricDataManager 的瘦身版）：
  * 掩码与优化管线按范围决策不移植，保留非动态歌词与对唱行检测。
  */
@@ -56,6 +84,10 @@ class LyricDataManager {
   }
 
   setOriginalLines(lines) {
+    // AMLL 在克隆前校验时间戳（lyric-data-manager.ts:46 assertValidLyricTimestamps）：
+    // 坏数据早失败而非静默产生错乱排版。本宿主歌词模型经 collectLines 构造，
+    // 校验常态恒过，仅作防御
+    assertValidLyricTimestamps(lines);
     // 数据来自宿主播放器，形状为纯 JSON；深拷贝阻断外部修改
     this.rawLines = JSON.parse(JSON.stringify(lines));
     this.isDirty = true;
@@ -87,7 +119,10 @@ class LyricDataManager {
   }
 
   processPipeline() {
-    this.processedLines = JSON.parse(JSON.stringify(this.rawLines));
+    // 管线只读（isNonDynamic/hasDuetLine 判定），与 rawLines 共享引用即可；
+    // AMLL 同位置再做一次 structuredClone（lyric-data-manager.ts:109）属冗余，
+    // 本移植省去每轮切歌的第二次全量序列化
+    this.processedLines = this.rawLines;
 
     let checkNonDynamic = true;
     let checkDuet = false;
@@ -144,7 +179,6 @@ export class LyricPlayerCore {
       containerHeight: 0,
       scrollOffset: 0,
       target: { index: 0, type: 'line' },
-      bottomLineHeight: 0,
       interlude: undefined,
     };
 
@@ -614,7 +648,6 @@ export class LyricPlayerCore {
     const ctx = this.frameContext;
     ctx.containerHeight = this.size[1];
     ctx.target = focalTarget;
-    ctx.bottomLineHeight = 0;
 
     // 设置间奏相关的上下文参数
     const activeInterludeForLayout = canDisplayInterlude ? interlude : undefined;

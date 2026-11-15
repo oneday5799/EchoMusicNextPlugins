@@ -23,7 +23,6 @@ import { LayoutAlignAnchor } from './consts.mjs';
  * @property {number} containerHeight 播放器容器当前总高度
  * @property {number} scrollOffset 被滚动引擎钳制后的安全滚动量
  * @property {import("./focus.mjs").FocalTarget} target 当前视口焦点目标
- * @property {number} bottomLineHeight 底栏高度（本插件恒为 0）
  * @property {{ totalHeight: number, anchorIndex: number } | undefined} interlude
  *   间奏点状态：高度与挂载锚点行；无间奏时为 undefined
  */
@@ -43,14 +42,12 @@ import { LayoutAlignAnchor } from './consts.mjs';
  * @property {ReadonlyArray<RenderInstruction>} lineInstructions 渲染指令池（复用，遍历以 lineCount 为界）
  * @property {boolean} hasInterlude 是否需要显示间奏点
  * @property {number} interludeY 间奏点的 Y 轴绝对坐标
- * @property {number} bottomLineY 底栏的 Y 轴绝对坐标
- * @property {boolean} isBottomLineInViewport 底栏是否在可视范围内
  */
 
 /** @typedef {{ isValid: boolean, focalTopY: number, anchorOffset: number, interludeTotalHeight: number, activeInterludeAnchor: number | undefined }} ResolvedLayoutMetrics */
 
 /** 单帧排版会话句柄（beginFrame 产出，commit 消费）
- * @typedef {ResolvedLayoutMetrics & { containerHeight: number, alignPosition: number, overscanPx: number, bottomLineHeight: number }} LayoutFrameSession
+ * @typedef {ResolvedLayoutMetrics & { containerHeight: number, alignPosition: number, overscanPx: number }} LayoutFrameSession
  */
 
 export class LayoutCalculator {
@@ -88,11 +85,25 @@ export class LayoutCalculator {
     this.layoutResult = {
       lineCount: 0,
       lineInstructions: this.instructionPool,
-      bottomLineY: 0,
-      isBottomLineInViewport: false,
       hasInterlude: false,
       interludeY: 0,
     };
+
+    // beginFrame 返回容器复用：session/bounds 及外层包装每帧原位覆写，
+    // 调用方同步消费（player.calcLayout 在当帧内用完），不跨帧留存
+    /** @type {LayoutFrameSession} */
+    this.frameSession = {
+      isValid: false,
+      focalTopY: 0,
+      anchorOffset: 0,
+      interludeTotalHeight: 0,
+      activeInterludeAnchor: undefined,
+      containerHeight: 0,
+      alignPosition: 0,
+      overscanPx: 0,
+    };
+    this.frameBounds = { min: 0, max: 0 };
+    this.frame = { bounds: this.frameBounds, session: this.frameSession };
 
     /** 缓存的歌词行数 */
     this.lyricCount = 0;
@@ -198,25 +209,27 @@ export class LayoutCalculator {
 
     const metrics = this.resolveLayoutMetrics(ctx, config);
 
-    const session = {
-      isValid: metrics.isValid,
-      focalTopY: metrics.focalTopY,
-      anchorOffset: metrics.anchorOffset,
-      interludeTotalHeight: metrics.interludeTotalHeight,
-      activeInterludeAnchor: metrics.activeInterludeAnchor,
-      containerHeight: ctx.containerHeight,
-      alignPosition: config.alignPosition,
-      overscanPx: config.overscanPx,
-      bottomLineHeight: ctx.bottomLineHeight,
-    };
+    const session = this.frameSession;
+    session.isValid = metrics.isValid;
+    session.focalTopY = metrics.focalTopY;
+    session.anchorOffset = metrics.anchorOffset;
+    session.interludeTotalHeight = metrics.interludeTotalHeight;
+    session.activeInterludeAnchor = metrics.activeInterludeAnchor;
+    session.containerHeight = ctx.containerHeight;
+    session.alignPosition = config.alignPosition;
+    session.overscanPx = config.overscanPx;
+
+    const bounds = this.frameBounds;
 
     if (!metrics.isValid) {
-      return { bounds: { min: 0, max: 0 }, session };
+      bounds.min = 0;
+      bounds.max = 0;
+      return this.frame;
     }
 
     const { focalTopY, anchorOffset, interludeTotalHeight, activeInterludeAnchor } = metrics;
 
-    const minOffset = Math.min(0, -focalTopY);
+    bounds.min = Math.min(0, -focalTopY);
 
     const basePosWithoutScroll =
       -focalTopY + ctx.containerHeight * config.alignPosition - anchorOffset;
@@ -227,9 +240,9 @@ export class LayoutCalculator {
     }
 
     const rawMaxOffset = basePosWithoutScroll + totalContentHeight - ctx.containerHeight / 2;
-    const maxOffset = Math.max(0, rawMaxOffset);
+    bounds.max = Math.max(0, rawMaxOffset);
 
-    return { bounds: { min: minOffset, max: maxOffset }, session };
+    return this.frame;
   }
 
   /**
@@ -255,7 +268,6 @@ export class LayoutCalculator {
       containerHeight,
       alignPosition,
       overscanPx,
-      bottomLineHeight,
     } = session;
 
     const viewportStartY =
@@ -286,15 +298,6 @@ export class LayoutCalculator {
       this.layoutResult.hasInterlude = false;
       this.layoutResult.interludeY = 0;
     }
-
-    let bottomY = viewportStartY + this.totalLyricHeight;
-    if (activeInterludeAnchor !== undefined) {
-      bottomY += interludeTotalHeight;
-    }
-
-    this.layoutResult.bottomLineY = bottomY;
-    this.layoutResult.isBottomLineInViewport =
-      bottomY <= viewportBottomBound && bottomY + bottomLineHeight >= viewportTopBound;
 
     return this.layoutResult;
   }

@@ -790,3 +790,302 @@ test('LayoutReasonStrategyMap and line core mirrors AMLL semantics', () => {
   assert.equal(isCJK('你好'), true);
   assert.equal(isCJK('hello'), false);
 });
+
+test('Spring defers parameter updates behind a delay', () => {
+  const spring = new Spring(0);
+  spring.setTargetPosition(100);
+
+  // 延迟参数：到期前保持原轨迹与原参数，到期后生效并继续收敛
+  spring.updateParams({ stiffness: 90, damping: 15 }, 100);
+  assert.ok(spring.queueParams, '延迟参数应进入队列');
+  assert.equal(spring.params.stiffness, undefined, '到期前参数不得生效');
+  spring.update(50);
+  assert.equal(spring.params.stiffness, undefined, '50ms 后仍未到期');
+  spring.update(60);
+  assert.equal(spring.params.stiffness, 90, '累计 110ms > 100ms，参数应生效');
+  for (let i = 0; i < 300; i++) spring.update(16);
+  approx(spring.getCurrentPosition(), 100, 0.05, '参数生效后应继续收敛到目标');
+});
+
+test('SeekDetector trusts at most 800ms of wall time per verdict', () => {
+  let clock = 0;
+  const detector = new SeekDetector(() => clock);
+
+  // 长挂起（2s）后媒体超量推进：wallDelta 钳到 800，drift = 1300 − 800 = 500
+  // 仍超过 max(150, 800×0.5) → 跳转。若不钳制，drift 为负将漏判
+  detector.detect(1000, true);
+  clock += 2000;
+  assert.equal(detector.detect(2300, true), true, '挂起 2s 后推进 1300ms 应判跳转');
+
+  // 对照：同样挂起 2s，但媒体推进 700ms ≤ 钳制后的期望推进 → 不判跳转
+  detector.reset();
+  detector.detect(10000, true);
+  clock += 2000;
+  assert.equal(detector.detect(10700, true), false, 'wallDelta 钳制后 700ms 推进在容差内');
+});
+
+test('ScrollInteractionEngine wheel line/page mode scales deltas by 50x', () => {
+  let clock = 0;
+  const engine = new ScrollInteractionEngine(
+    { onScrollUpdate: () => {}, onInteractionStart: () => {} },
+    () => clock,
+  );
+  engine.updateBoundary(-50, 50);
+
+  // 行/页模式：每次 +2 行 = +100px（AMLL 语义放大 50 倍），50 次连续输入
+  // 不产生 NaN/越界，最终钳到上边界
+  for (let i = 0; i < 50; i++) engine.wheel(2, false);
+  assert.equal(engine.offset, 50);
+  assert.equal(engine.isInteracting, true);
+
+  // 150ms 空闲后交互结束
+  clock += 150;
+  engine.tick();
+  assert.equal(engine.isInteracting, false);
+});
+
+test('ScrollInteractionEngine cancelTouch stops inertia and honours interrupted state', () => {
+  let clock = 0;
+  const engine = new ScrollInteractionEngine(
+    { onScrollUpdate: () => {}, onInteractionStart: () => {} },
+    () => clock,
+  );
+  engine.updateBoundary(-1000, 1000);
+
+  // 无既有交互且意图未确认：取消是空操作
+  engine.beginTouch(0, 0, clock);
+  engine.cancelTouch();
+  assert.equal(engine.isInteracting, false, '无交互时取消不得触发结束回调');
+
+  // 有既有交互（滚轮进行中）但触摸意图未确认：按打断既有状态处理
+  engine.wheel(100, true);
+  clock += 10;
+  engine.beginTouch(0, 0, clock);
+  engine.cancelTouch();
+  assert.equal(engine.isInteracting, false, '未确认意图的取消应结束被打断的交互');
+
+  // 意图已确认：立即静止，不进入惯性
+  engine.beginTouch(0, 0, clock);
+  engine.moveTouch(0, 40, clock + 50);
+  assert.equal(engine.isInteracting, true);
+  engine.cancelTouch();
+  assert.equal(engine.inertiaActive, false, '取消后不得进入惯性');
+  assert.equal(engine.touchState.speed, 0, '取消应清零触摸速度');
+  assert.equal(engine.isInteracting, false);
+});
+
+test('LyricPlayerCore rejects invalid lyric timestamps early', () => {
+  const player = new LyricPlayerCore({}, { now: () => 0 });
+
+  // 非负有限校验（TypeError），行与词两级都查
+  assert.throws(
+    () => player.setLyricLines([{ startTime: -1, endTime: 1000, words: [] }]),
+    TypeError,
+  );
+  assert.throws(
+    () => player.setLyricLines([{ startTime: 0, endTime: Number.POSITIVE_INFINITY, words: [] }]),
+    TypeError,
+  );
+  assert.throws(
+    () =>
+      player.setLyricLines([
+        { startTime: 0, endTime: 1000, words: [{ startTime: 500, endTime: 200, word: 'x' }] },
+      ]),
+    RangeError,
+  );
+  // start ≤ end 校验（RangeError）
+  assert.throws(
+    () => player.setLyricLines([{ startTime: 2000, endTime: 1000, words: [] }]),
+    RangeError,
+  );
+
+  // 合法数据正常构建；坏数据不得流入时间线
+  player.setLyricLines([{ startTime: 0, endTime: 1000, words: [] }], 0);
+  assert.equal(player.currentLyricGroups.length, 1);
+});
+
+test('LyricPlayerCore accepts empty lyric lines', () => {
+  const player = new LyricPlayerCore({}, { now: () => 0 });
+  player.setSize(800, 1000);
+  player.resume();
+
+  player.setLyricLines([], 0);
+  assert.equal(player.currentLyricGroups.length, 0);
+  // 空时间线上推送进度与逐帧更新不得抛错
+  player.setCurrentTime(5000);
+  player.update(16);
+  const snapshot = player.timelineController.getSnapshot();
+  assert.equal(snapshot.scrollToIndex, 0);
+  assert.equal(snapshot.isEndOfSong, false, '无歌词时不应判定曲末');
+  assert.equal(snapshot.latestHighlightedIndex, undefined);
+});
+
+test('LyricPlayerCore auto-detects seeks from wall-clock gaps', () => {
+  let wall = 0;
+  const player = new LyricPlayerCore({}, { now: () => wall });
+  player.setSize(800, 1000);
+  player.setBaseFontSize(30);
+  player.resume();
+  player.setLyricLines(
+    [
+      { startTime: 1000, endTime: 4000, words: [{ startTime: 1000, endTime: 4000, word: 'a' }] },
+      { startTime: 4000, endTime: 8000, words: [{ startTime: 4000, endTime: 8000, word: 'b' }] },
+    ],
+    0,
+  );
+
+  // 先让物理时钟与媒体同幅推进，避免基线建立被误判
+  wall += 1000;
+  player.setCurrentTime(1000);
+  player.scrollEngine.updateBoundary(-500, 500);
+  player.scrollEngine.wheel(200, true);
+  assert.equal(player.scrollState.isAutoAlignSuspended, true);
+  const wheelOffset = player.scrollEngine.offset;
+  assert.ok(wheelOffset > 0, '滚轮应产生实际偏移');
+
+  // 连续推送（推送间隔与物理时钟一致）→ 不误判跳转，用户滚动不被打断
+  for (let i = 1; i <= 4; i++) {
+    wall += 250;
+    player.setCurrentTime(1000 + i * 250);
+  }
+  assert.equal(player.scrollState.isAutoAlignSuspended, true, '连续推送不得误判为跳转');
+  assert.equal(player.scrollEngine.offset, wheelOffset, '未跳转不得清空用户滚动偏移');
+
+  // 长挂起后媒体超量推进（wall +2s，media +1300ms）→ 自动判跳转：
+  // 滚动归位、恢复自动对齐、切慢速弹簧
+  wall += 2000;
+  player.setCurrentTime(3300);
+  assert.equal(player.scrollState.isAutoAlignSuspended, false, '跳转后应恢复自动对齐');
+  assert.equal(player.scrollEngine.offset, 0, '跳转应清空滚动偏移');
+  approx(player.posYSpringParams.stiffness, 90, 1e-9, '跳转应使用慢速弹簧');
+});
+
+test('LyricPlayerCore freezes groups while hidden and clamps frame delta', () => {
+  const player = new LyricPlayerCore({}, { now: () => 0 });
+  player.setEnableAutoSeekDetection(false);
+  player.setSize(800, 1000);
+  player.setBaseFontSize(30);
+  player.resume();
+  player.setLyricLines(
+    [
+      { startTime: 0, endTime: 4000, words: [{ startTime: 0, endTime: 4000, word: 'a' }] },
+      { startTime: 4000, endTime: 8000, words: [{ startTime: 4000, endTime: 8000, word: 'b' }] },
+    ],
+    0,
+  );
+  player.setCurrentTime(500);
+  pump(player, 30);
+  const g1 = player.currentLyricGroups[1];
+  const frozenAt = g1.posY.getCurrentPosition();
+
+  // 挂起期间组弹簧完全冻结（update 在可见性检查后返回）
+  player.setPageVisible(false);
+  player.update(500);
+  assert.equal(g1.posY.getCurrentPosition(), frozenAt, '挂起期间组弹簧不得推进');
+
+  // 恢复首帧强制重推当前时间，弹簧继续推进
+  player.setPageVisible(true);
+  pump(player, 60);
+  assert.notEqual(g1.posY.getCurrentPosition(), frozenAt, '恢复后弹簧应继续推进');
+
+  // 间奏演出中：update 的 delta 钳制到 MAX_FRAME_DELTA=100，
+  // 页面挂起恢复后间奏时钟不会因单次大 delta 跳变
+  const gapPlayer = new LyricPlayerCore({}, { now: () => 0 });
+  gapPlayer.setEnableAutoSeekDetection(false);
+  gapPlayer.setSize(800, 1000);
+  gapPlayer.setInterludeMeasured(60, 24);
+  gapPlayer.resume();
+  gapPlayer.setLyricLines(
+    [
+      { startTime: 0, endTime: 4000, words: [{ startTime: 0, endTime: 4000, word: 'a' }] },
+      {
+        startTime: 15000,
+        endTime: 19000,
+        words: [{ startTime: 15000, endTime: 19000, word: 'b' }],
+      },
+    ],
+    0,
+  );
+  gapPlayer.setCurrentTime(8000);
+  assert.equal(gapPlayer.interludeDots.phase, 'performing', '间奏点应处于演出中');
+  gapPlayer.update(500);
+  assert.equal(
+    gapPlayer.interludeDots.currentTime,
+    8100,
+    '单帧 500ms 应被钳制为 100ms 推进间奏时钟',
+  );
+});
+
+test('performSeek skips zero-duration lines with index-0 fallback', () => {
+  const timeline = new TimelineController();
+  timeline.setTimeBounds([
+    { startTime: 0, endTime: 0 },
+    { startTime: 1000, endTime: 5000 },
+    { startTime: 5000, endTime: 5000 },
+    { startTime: 6000, endTime: 9000 },
+  ]);
+
+  // seek 到 3000：跳过零时长行 0，锚点 = 行 1
+  timeline.sync(3000, true);
+  let snapshot = timeline.getSnapshot();
+  assert.deepEqual([...snapshot.playingGroups], [1]);
+  assert.deepEqual([...snapshot.highlightedGroups], [1]);
+  assert.equal(snapshot.scrollToIndex, 1);
+
+  // seek 到 5500：行 1 已唱完保持高亮（零时长行 2 不接续），无新播放行
+  timeline.sync(5500, true);
+  snapshot = timeline.getSnapshot();
+  assert.deepEqual([...snapshot.playingGroups], []);
+  assert.deepEqual([...snapshot.highlightedGroups], [1]);
+  assert.equal(snapshot.scrollToIndex, 1);
+
+  // seek 回开头：此前全部为已开始行且均零时长 → scrollToIndex 回退 0
+  timeline.sync(0, true);
+  snapshot = timeline.getSnapshot();
+  assert.deepEqual([...snapshot.highlightedGroups], []);
+  assert.equal(snapshot.scrollToIndex, 0);
+});
+
+test('InterludeDots exit trailing tops up the third dot over 750ms', () => {
+  const dots = new InterludeDots();
+  // body = 4500 − 500（入场）− 1000（退场）= 3000ms：segment 1250，dot3 500ms
+  assert.equal(dots.setInterlude([0, 4500]), true);
+  assert.equal(dots.mode, 'breathe');
+  approx(dots.dot3Target, 0.4, 1e-9, 'dot3Target = 500/1250');
+
+  dots.syncClock(0);
+  dots.update(0);
+
+  // body 末（退场起点）：第三颗只亮到 dot3Target
+  dots.syncClock(3500);
+  dots.update(0);
+  approx(dots.getSnapshot().dotOpacities[2], 0.2 + 0.7 * 0.4, 1e-6, '退场起点应停在 dot3Target');
+
+  // 退场 750ms 内线性补齐剩余亮度
+  dots.syncClock(3875);
+  dots.update(0);
+  approx(dots.getSnapshot().dotOpacities[2], 0.2 + 0.7 * 0.7, 1e-6, '退场中点应补齐一半');
+  dots.syncClock(4250);
+  dots.update(0);
+  approx(dots.getSnapshot().dotOpacities[2], 0.9, 1e-6, '退场末第三颗应补齐到全亮');
+});
+
+test('InterludeDots keeps advancing posY spring during dismiss fade', () => {
+  const dots = new InterludeDots();
+  dots.setInterlude([0, 60000]);
+  dots.syncClock(0);
+  dots.update(600);
+  assert.ok(dots.getSnapshot().opacity > 0);
+
+  // 首次定位吸附，再次定位驱动弹簧飞行
+  dots.setTransform(0, 200);
+  dots.setTransform(0, 300);
+  const before = dots.posY.getCurrentPosition();
+
+  // dismiss 打断飞行中的弹簧：淡出期间位置应继续收敛而非冻结
+  dots.dismiss();
+  assert.equal(dots.phase, 'fading');
+  dots.update(30);
+  const after = dots.posY.getCurrentPosition();
+  assert.ok(after > before, `淡出期间弹簧应继续向 300 收敛（${before} → ${after}）`);
+});
