@@ -41,7 +41,7 @@ export class LyricLineCore {
     this.renderMode = LyricLineRenderMode.SOLID;
 
     // AMLL 镜像字段：亮度层窗口（焦点行 ±2 行）。渲染层的亮层由 isActive/
-    // highlight 驱动，此字段当前仅测试断言消费
+    // highlight 驱动，此字段当前无消费方（QML/测试均未读），保留镜像形状
     this.inBrightnessWindow = true;
 
     /** 行是否处于高亮（启用）状态 */
@@ -170,7 +170,8 @@ export class LyricLineGroupCore {
 
     /**
      * AMLL 镜像字段：指示当前歌词组是否处于亮度层活跃窗口内（焦点行与高亮行
-     * 向前后各扩展 2 行）。渲染层的亮层由 isActive/highlight 驱动，仅测试消费
+     * 向前后各扩展 2 行）。渲染层的亮层由 isActive/highlight 驱动，此字段
+     * 当前无消费方（QML/测试均未读），保留镜像形状
      */
     this.inBrightnessWindow = true;
 

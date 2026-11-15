@@ -89,7 +89,6 @@ Item {
         blur: Math.min(5, group.blur) * 2.5 / 16
     }
     Rectangle {
-        objectName: "amllGroupBackground" + group.index
         anchors.fill: parent
         radius: group.em * 0.25
         opacity: group.edgeFade
@@ -107,8 +106,8 @@ Item {
         opacity: group.edgeFade
         width: group.width - group.em * 2
         height: group.naturalHeight - group.em * 0.8
-        // 行缩放弹簧（非活动行播放中 97%，AMLL .lyricLine transform 语义）
-        scale: 1
+        // 行缩放弹簧（非活动行播放中 97%，AMLL .lyricLine transform 语义），
+        // 每帧由 commitFrame 写入（声明式绑定会被首帧命令式写断开，不在此声明）
         transformOrigin: Item.Left
         AmlLineView {
             id: mainView
@@ -127,6 +126,9 @@ Item {
             animTimeMs: flow.mediaTime - flow.offsetMs
             disabledAt: group.disabledAt
             enabledAt: group.enabledAt
+            // isEnabled 是核心 JS 对象的无通知属性，绑定不随它重估——新鲜度
+            // 靠 highlight 的 Behavior 逐帧动画触发重评时顺带读到新值
+            //（isEnabled 翻转必伴随 revision → highlightTarget 变化）
             current: group.groupCore ? group.groupCore.mainLine.isEnabled || group.highlight > 0.001 : false
             highlightAmount: group.highlight
             lineSmooth: lineLayerSmooth

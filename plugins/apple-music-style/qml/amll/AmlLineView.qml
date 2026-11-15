@@ -28,9 +28,11 @@ import "base/mask-animator.mjs" as MaskAnimator
 // 未逐词的行激活时整行点亮。
 // 强调词（时长 ≥1s 且全 CJK 或 2–7 字符）按宿主 LyricLine::pose：
 // 逐字交错 rise(.2,.4,.58,1)/fall(.3,0,.58,1) 包络，缩放 1+.1×amount、
-// 推移 −em×.03×amount×(字数/2−序)×scale；lift 整体替换为
-// −em×(.05×sin×高亮量 + .025×amount×scale)（floatPhase 带 400ms 提前量）、
-// 白色辉光 halo（半径 em×strength×.15，透明度 strength×包络×高亮量×亮色α）；
+// 推移 −em×.03×amount×(字数/2−序)×scale；强调位 = 持久上浮位（clusterLift）
+// 叠加 −em×(.05×sin(floatPhase×π) + .025×amount×scale)（floatPhase 带 400ms
+// 提前量，AMLL emphasize-word-float composite:add 语义，见下方实现注）；
+// 白色辉光 halo（半径 em×strength×.15，透明度 strength×包络×亮色α，高亮量
+// 经亮色 alpha 间接进入）；
 // 缩放围绕簇盒中心（锚点在基线上，需 (1−scale)×中心距补偿）。
 // 不做亮/暗双层叠放：双层在词上浮时错位会露出下层形成重影。
 // 活动行经 layer 离屏合成（见 layer.enabled 注释）：Qt 对非分层子树的
@@ -63,7 +65,8 @@ Item {
     property bool nonDynamicLyric: false
     property font font
     property color playedColor: "#ffffff"
-    property color unplayedColor: Qt.rgba(1, 1, 1, 0.2)
+    // 兜底值与配置默认同步（LyricFlow/Skin 均 0.15，fadeWidth 同款惯例）
+    property color unplayedColor: Qt.rgba(1, 1, 1, 0.15)
     // 背景均色估计（Skin 复刻宿主模糊封面合成链算出）。扫掠切片是不透明
     // 外观层，颜色须含背景贡献才与半透明未唱字无缝衔接（否则带尾暗端
     // 相对未唱字有 −bg(1−dimA) 的明暗边界）。
@@ -124,6 +127,8 @@ Item {
     readonly property real fade: Math.max(0.0001, rowHeight * Math.max(0.0001, fadeWidth))
     // 单行行盒高度（__refreshGeometry 时随行数折算更新）
     property real rowHeight: em * 1.2
+    // 绑定内箭头在此安全：求值期同步消费、箭头只引用自身参数（V4 对绑定内
+    // 箭头不做组件作用域捕获的坑只伤延迟回调，见 AmlGroupView.__backdropAt 注）
     readonly property bool hasWordTiming: words.some(w => Number(w.t1) !== Number(w.t0))
     // 宿主 LyricLine 的颜色模型：亮色随高亮量从未唱色渐入，
     // 暗色随高亮量提亮。系数 2 为对比度校准（AMLL 原式 ×(1+高亮量) 的暗端
@@ -139,7 +144,6 @@ Item {
     // 逐行歌词的全 alpha 形态：AMLL 无 mask 文本（wrapper 0.2/0.85 承担明暗）
     readonly property color solidDimColor: nonDynamicLyric ? Qt.rgba(playedColor.r, playedColor.g, playedColor.b, 1) : dimColor
     readonly property color solidBrightColor: nonDynamicLyric ? Qt.rgba(playedColor.r, playedColor.g, playedColor.b, 1) : brightColor
-    readonly property real textWidth: width
     readonly property real textHeight: height
     // 整行塑形指标同步可用；空行没有 run
     readonly property var runMetrics: run.metrics.length > 0 ? run.metrics[0] : null
@@ -576,7 +580,7 @@ Item {
             const g0 = center - fade * 0.5, g1 = center + fade * 0.5;
             // 强调词逐字动画（宿主 LyricLine::pose 同式，包络 rise/fall 分段）
             let ex = 0, ey = 0, escale = 1, halos = null;
-            if (empActive && span && span.em && span.ec > 0) {
+            if (empActive && span.em && span.ec > 0) {
                 const charIndex = i - span.eg;
                 if (charIndex >= 0 && charIndex < span.ec) {
                     const rawDu = span.t1 - span.t0;

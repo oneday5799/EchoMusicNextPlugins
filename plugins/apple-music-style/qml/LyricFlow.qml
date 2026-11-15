@@ -50,6 +50,8 @@ Item {
     property bool springEnabled: true
     property real sublineOpacity: 0.56
     property real lineWidthAspect: 0.86
+    // 间奏点「页面高度 1vh」基准。默认绑定 = 歌词视口高，仅作兜底；Skin
+    // 显式传 root.height（整页）——调用方不传时 1vh 会按视口高计算
     property real pageHeight: height
 
     readonly property real secondaryFontSize: Math.max(10, fontSize * .5)

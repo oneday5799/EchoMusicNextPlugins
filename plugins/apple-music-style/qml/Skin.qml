@@ -87,6 +87,8 @@ Item {
             "tag": "VPA",
             "color": "#7C3AED"
         }]
+    // 绑定内箭头在此安全：filter 在求值期同步执行完，箭头不外逃成延迟回调
+    //（V4 不做组件作用域捕获的坑只伤后者，见 AmlGroupView.__backdropAt 注）
     readonly property var qualityModel: root.qualityCatalog.filter(entry => root.viperEnabled || !entry.value.startsWith("viper_"))
 
     function num(value: var, fallback: real, min: real, max: real): real {
@@ -197,7 +199,7 @@ Item {
     // 合成链的均值：封面 → background-preprocess（对比 .4 → 饱和 ×3 →
     // 对比 1.7 → 亮度 .75，8bit 钳制）→ 8 次盒模糊（均值保持）→ lyric-fluid
     // （×0.5 压暗，backgroundOpacity 权重叠在底色渐变 #20242c→#12151b 上）。
-    // 封面均值经 Canvas 8×8 采样；模糊不可用时与宿主一致只显示底色四边形
+    // 封面均值经 Canvas 32×32 采样；模糊不可用时与宿主一致只显示底色四边形
     // （磨砂时 55% 黑）。采样前退化为底色估计，不劣于旧黑底烘焙。
     property bool coverSampled: false
     property color coverAvgColor: "#000000"
@@ -1012,7 +1014,6 @@ Item {
                             // page.command('quality') 并收起（旧插件 selectQuality 语义）
                             EchoAnchoredPopup {
                                 id: qualityPopup
-                                objectName: "amssQualityPopup"
                                 anchorItem: qualityBadge
                                 preferredWidth: 208
                                 maximumHeight: 420
@@ -1212,7 +1213,7 @@ Item {
             unplayedColor: Qt.rgba(1, 1, 1, 0.15)
             // 背景均色估计：渐变带切片色注入背景项（消除带端明暗边界）
             backdropColor: root.backdropColor
-            // v9 逐像素背景估计器（null 时 AmlLineView 回退 backdropColor 均色）
+            // v10 逐像素背景估计器（null 时 AmlLineView 回退 backdropColor 均色）
             backdropSampler: root.backdropSample
             focusPosition: root.s.alignPosition / 100
             wordFade: root.s.fadeWidth / 100

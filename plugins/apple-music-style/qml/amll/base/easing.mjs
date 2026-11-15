@@ -80,7 +80,8 @@ function bezierTForX(x, x1, x2) {
  * @param {number} y1 控制点 1 纵坐标
  * @param {number} x2 控制点 2 横坐标，须在 [0,1]
  * @param {number} y2 控制点 2 纵坐标
- * @returns {(x: number) => number} 输入 [0,1] 时间进度，输出 [0,1] 缓动值
+ * @returns {(x: number) => number} 输入 [0,1] 时间进度；输出值域由 y1/y2
+ *      决定（同 CSS cubic-bezier，纵坐标出 [0,1] 即过冲），当前调用点均不过冲
  */
 export function bezier(x1, y1, x2, y2) {
   if (!(x1 >= 0 && x1 <= 1 && x2 >= 0 && x2 <= 1)) {

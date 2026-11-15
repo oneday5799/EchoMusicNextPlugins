@@ -49,6 +49,8 @@ export function generateWordKeyframes(words, lineStart, lineEnd, fadeWidth) {
       walkSlots.push(i);
     }
   }
+  // 行时长 1ms 下限防除零：AMLL 的 totalFadeDuration 无下限，仅在 WAAPI
+  // duration 处设同款 max(…,1)（animator-web.ts:84）
   const total = Math.max(lineEnd - lineStart, 1);
   for (let targetIndex = 0; targetIndex < walkWords.length; ++targetIndex) {
     const targetWord = walkWords[targetIndex];
